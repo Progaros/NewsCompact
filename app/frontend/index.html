@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI News Aggregator</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>AI News Aggregator</h1>
+    </div>
+    <div class="controls">
+      <a href="/feeds" class="btn">Feeds</a>
+      <span id="status" class="status">loading…</span>
+      <button id="refresh" class="btn">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="heads-up" id="heads-up" aria-label="Quick heads up">
+      <div class="heads-up-label">Quick Heads Up</div>
+      <p id="heads-up-text">Loading brief…</p>
+    </section>
+
+    <section class="feed" id="feed" aria-label="Stories">
+      <!-- story cards injected here -->
+    </section>
+    <div class="feed-controls">
+      <button id="load-more" class="btn" hidden>Load more</button>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

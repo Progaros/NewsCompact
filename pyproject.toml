@@ -1,0 +1,15 @@
+[project]
+name = "news-aggregator-ai"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.143.0",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "newspaper3k>=0.2.8",
+    "pydantic>=2.14.0",
+    "sqlite-vec>=0.1.9",
+    "trafilatura>=2.3.1",
+    "uvicorn[standard]>=0.54.0",
+]

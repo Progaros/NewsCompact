@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Feeds — AI News Aggregator</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1><a href="/" class="brand-link">Feeds</a></h1>
+    </div>
+    <div class="controls">
+      <span id="feed-status" class="status">loading…</span>
+      <button id="reload" class="btn">Reload</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="heads-up">
+      <div class="heads-up-label">Add feed</div>
+      <form id="add-feed" class="add-feed">
+        <input name="xml_url" placeholder="https://example.com/rss.xml" required />
+        <input name="title" placeholder="Title (auto-fetched from URL if left empty)" />
+        <input name="category" list="catlist" placeholder="Category (pick existing or type new)" />
+        <button class="btn" type="submit">Add</button>
+      </form>
+      <datalist id="catlist"></datalist>
+      <p class="hint">
+        Disabling a feed stops its AI ingestion (embedding/clustering/scoring) — it still
+        keeps fetching RSS rows so its 24h / 7d volume stays live. Category totals only
+        count enabled feeds. Re-enabling processes the accumulated backlog.
+      </p>
+    </section>
+
+    <section class="feed" id="feed-list" aria-label="Feeds">
+      <div class="empty">Loading feeds…</div>
+    </section>
+  </main>
+
+  <script src="/static/feeds.js"></script>
+</body>
+</html>
