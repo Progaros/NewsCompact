@@ -26,6 +26,13 @@ EMBED_MAX_WORDS = int(os.getenv("NEWS_EMBED_MAX_WORDS", "1000"))
 # harness + Prompt2 call every 15 min. The count lives on Article.pipeline_failures
 # and resets to 0 on the next successful process. See /api/health (dead_letter).
 PIPELINE_MAX_FAILURES = int(os.getenv("NEWS_PIPELINE_MAX_FAILURES", "3"))
+# Junk-joins-junk generation skip: when a `thin` article JOINS an existing
+# story whose quality_score is at/below this threshold (or whose members are
+# all broken/thin), skip both the harness assessment and Prompt2 re-summarize
+# — junk-on-junk would otherwise burn two 27B calls per article to re-summarize
+# a story nobody reads. created=True paths and good stories (q > threshold)
+# are never skipped. Tune with NEWS_JUNK_SKIP_QUALITY_THRESHOLD.
+JUNK_SKIP_QUALITY_THRESHOLD = float(os.getenv("NEWS_JUNK_SKIP_QUALITY_THRESHOLD", "2.0"))
 # KNN window for clustering: only cluster against stories updated within N hours.
 CLUSTER_WINDOW_HOURS = int(os.getenv("NEWS_CLUSTER_WINDOW_HOURS", "48"))
 # Cosine *similarity* threshold (article vector vs the story's *anchor*

@@ -601,21 +601,58 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
                     "UPDATE Article SET story_id = ?, created_at = COALESCE(created_at, datetime('now')) WHERE id=?",
                     (story_id, art["id"]),
                 )
+                # Junk-joins-junk skip: a `thin` article joining a junk story
+                # (quality_score <= JUNK_SKIP_QUALITY_THRESHOLD, or all members
+                # broken/thin) adds no signal worth two 27B calls — skip the
+                # harness and Prompt2 and keep the story's existing summary,
+                # headline and tags. New stories (created=True) never skip: the
+                # first summary must always exist.
+                junk_skip = False
+                if not created:
+                    s_row = conn.execute(
+                        "SELECT quality_score FROM Story WHERE id=?", (story_id,)
+                    ).fetchone()
+                    member_classes = {
+                        m["content_class"] or ""
+                        for m in conn.execute(
+                            "SELECT content_class FROM Article WHERE story_id=? AND id != ?",
+                            (story_id, art["id"]),
+                        )
+                    }
+                    s_quality = s_row["quality_score"] if s_row is not None else None
+                    junk_skip = (
+                        art.get("content_class") == "thin"
+                        and (
+                            (s_quality is not None
+                             and s_quality <= config.JUNK_SKIP_QUALITY_THRESHOLD)
+                            or member_classes <= {"", "broken", "thin"}
+                        )
+                    )
+                    if junk_skip:
+                        log.info(
+                            "junk-skip article=%s story=%s story_quality=%s members=%s",
+                            art.get("id"), story_id, s_quality, sorted(member_classes),
+                        )
                 # Fast schema-constrained scoring (Jev-style harness): quality +
                 # breaking flag. A harness failure must not kill the article —
-                # fall back to Prompt2's parsed values.
+                # fall back to Prompt2's parsed values. Skipped on junk-on-junk
+                # joins (quality stays NULL there — the story's median quality
+                # is unaffected).
                 t0 = time.perf_counter()
-                try:
-                    assessment = _harness.assess_article(
-                        art.get("title", ""), _article_text(art)
-                    )
-                    log.info(
-                        "harness article=%s quality=%s breaking=%s",
-                        art.get("id"), assessment.get("quality"), assessment.get("breaking"),
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("harness assess failed for article %s", art.get("id"))
+                if junk_skip:
                     assessment = {}
+                else:
+                    try:
+                        assessment = _harness.assess_article(
+                            art.get("title", ""), _article_text(art)
+                        )
+                        log.info(
+                            "harness article=%s quality=%s breaking=%s",
+                            art.get("id"), assessment.get("quality"), assessment.get("breaking"),
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("harness assess failed for article %s", art.get("id"))
+                        assessment = {}
                 t_harness = time.perf_counter() - t0
                 # Persist the per-article quality + content class. Story quality
                 # is the median of these across member articles (see prompt2),
@@ -625,12 +662,16 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
                     (assessment.get("quality"), art["id"]),
                 )
                 t0 = time.perf_counter()
-                p2_chars = prompt2_update_story(
-                    conn, story_id,
-                    quality=assessment.get("quality"), breaking=assessment.get("breaking"),
-                    article_id=art["id"],
-                    force_full=revived,
-                )
+                if junk_skip:
+                    # Junk-on-junk: story keeps its existing summary/quality.
+                    p2_chars = 0
+                else:
+                    p2_chars = prompt2_update_story(
+                        conn, story_id,
+                        quality=assessment.get("quality"), breaking=assessment.get("breaking"),
+                        article_id=art["id"],
+                        force_full=revived,
+                    )
                 t_p2 = time.perf_counter() - t0
             # notify on breaking stories
             with db.get_conn() as conn:
@@ -645,10 +686,10 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
                         emit({"type": "story_update", "story_id": s["id"], "breaking": True})
             log.info(
                 "perf article=%s story=%s created=%s wall=%.1fs cpu=%.1fs "
-                "embed=%.2fs knn=%.2fs harness=%.2fs p2=%.2fs p2chars=%d",
+                "embed=%.2fs knn=%.2fs harness=%.2fs p2=%.2fs p2chars=%d junk_skip=%d",
                 art["id"], story_id, created,
                 time.perf_counter() - wall0, _proc_cpu() - cpu0,
-                t_embed, t_knn, t_harness, t_p2, p2_chars,
+                t_embed, t_knn, t_harness, t_p2, p2_chars, int(junk_skip),
             )
         except Exception:  # noqa: BLE001 - one bad article must not stall the cycle
             log.exception("pipeline error for article %s", art.get("id"))
