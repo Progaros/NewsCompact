@@ -3,7 +3,6 @@
 const feedEl = document.getElementById("feed");
 const statusEl = document.getElementById("status");
 const headsEl = document.getElementById("heads-up-text");
-const refreshBtn = document.getElementById("refresh");
 const moreBtn = document.getElementById("load-more");
 
 function esc(s) {
@@ -22,6 +21,20 @@ function fmtDate(s) {
   if (!s) return "";
   const d = new Date(s.replace(" ", "T"));
   return isNaN(d) ? s : d.toLocaleString();
+}
+
+// Relative "Xm ago" for the feed-freshness signal. last_article is stored as
+// naive UTC ("YYYY-MM-DD HH:MM:SS"), so append "Z" to parse as UTC before
+// diffing against Date.now() (also UTC) — no timezone drift.
+function timeAgo(utcStr) {
+  const t = Date.parse(utcStr.replace(" ", "T") + "Z");
+  if (isNaN(t)) return utcStr;
+  const m = Math.floor(Math.max(0, (Date.now() - t) / 60000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 // --- <story-card> ---------------------------------------------------------
@@ -54,7 +67,9 @@ class StoryCard extends HTMLElement {
     const metricsPill =
       `<span class="pill metric">urgency ${m.urgency_level ?? "–"}</span>` +
       `<span class="pill metric">${esc(m.impact_scale ?? "")}</span>` +
-      `<span class="pill metric">${esc(m.status ?? "")}</span>`;
+      `<span class="pill metric">${esc(m.status ?? "")}</span>` +
+      `${m.location && !/^global\b/i.test(m.location) ?
+        `<span class="pill metric" title="story location — boosts the distance term">📍 ${esc(m.location)}</span>` : ""}`;
     const breakingPill = breaking ? `<span class="pill breaking">BREAKING</span>` : "";
     // Badge shows BOTH the distinct-source count (news outlets) and the
     // attached-article count, so the number above matches the list below
@@ -68,9 +83,8 @@ class StoryCard extends HTMLElement {
     const rel = d.relevance || {};
     const scoreRow =
       `<span class="rel-val">relevance ${rel.base ?? "–"}</span>` +
-      `<span class="rel-break" title="relevance base = quality·0.40 + credibility·0.35 + impact·0.25 (0–10); ` +
-      `display = base + urgency + interest − time decay">` +
-      `q ${rel.quality ?? "–"} · cred ${rel.credibility ?? "–"} · impact ${rel.user_impact ?? "–"} · int ${rel.user_interest ?? "–"}` +
+      `<span class="rel-break" title="relevance base = quality·0.40 + credibility·0.35 + impact·0.25 (0–10); display = base + urgency + interest + distance − time decay">` +
+      `q ${rel.quality ?? "–"} · cred ${rel.credibility ?? "–"} · impact ${rel.user_impact ?? "–"} · int ${rel.user_interest ?? "–"} · dist ${rel.distance ?? "–"}` +
       `</span>` +
       `<span class="score">display ${d.display_score}</span>`;
     const articles = (d.articles || []).map((a) => {
@@ -95,15 +109,22 @@ class StoryCard extends HTMLElement {
         <div class="interaction">
           <button class="fb" data-kind="up">👍 helpful</button>
           <button class="fb" data-kind="down">👎 not for me</button>
+          <button class="fb chat-btn" title="Ask about this story">💬 ask</button>
         </div>
       </div>
       <div class="accordion">${articles}</div>`;
 
-    this.querySelectorAll(".fb").forEach((b) => {
+    this.querySelectorAll(".fb[data-kind]").forEach((b) => {
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         this._fb(b.dataset.kind);
       });
+    });
+    // 💬 opens the page-level chat popup for THIS story (signed-in only — the
+    // .interaction row is hidden when unsigned-in, so the button is too).
+    this.querySelector(".chat-btn")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      Chat.open(this._data.id);
     });
   }
 }
@@ -114,6 +135,9 @@ const PAGE = 50;
 let allStories = [];
 let shown = 0;
 let totalCount = 0; // canonical server-side total (data.count), independent of fetch window
+let pendingCount = null; // /api/stories pending — pipeline backlog, shown as "N enqueued"
+let lastArticle = null; // /api/stories last_article (naive-UTC) — feed freshness, "last article Xm ago"
+let sseLive = false; // SSE connected — "· live" suffix survives renderFeed re-renders
 let loadingMore = false;
 
 function renderFeed() {
@@ -128,7 +152,17 @@ function renderFeed() {
     feedEl.appendChild(el);
   }
   moreBtn.hidden = shown >= totalCount;
-  statusEl.textContent = `showing ${Math.min(shown, allStories.length)}/${totalCount} stories`;
+  updateStatus();
+}
+
+// Single source of truth for the status bar text, so the "· live" suffix
+// survives re-renders (SSE state, not an append).
+function updateStatus() {
+  let statusText = `showing ${Math.min(shown, allStories.length)}/${totalCount} stories`;
+  if (pendingCount != null) statusText += ` · ${pendingCount} enqueued`;
+  if (lastArticle) statusText += ` · last article ${timeAgo(lastArticle)}`;
+  if (sseLive) statusText += " · live";
+  statusEl.textContent = statusText;
 }
 
 async function loadStories() {
@@ -145,6 +179,8 @@ async function refreshFeed() {
   const data = await res.json();
   allStories = data.stories;
   totalCount = data.count; // always keep the server total as source of truth
+  pendingCount = data.pending; // pipeline backlog for the status bar
+  lastArticle = data.last_article; // feed freshness for the status bar
   if (shown > data.count) shown = data.count;
   renderFeed();
 }
@@ -158,6 +194,8 @@ async function loadMore() {
     const data = await res.json();
     allStories = data.stories;
     totalCount = data.count;
+    pendingCount = data.pending;
+    lastArticle = data.last_article;
     shown = Math.min(shown + PAGE, data.count);
     renderFeed();
   } finally {
@@ -176,31 +214,21 @@ async function loadHeadsUp() {
   }
 }
 
-async function refresh() {
-  refreshBtn.disabled = true;
-  statusEl.textContent = "refreshing…";
-  try {
-    const res = await fetch("/api/refresh", { method: "POST" });
-    if (Auth.unauth(res)) {
-      statusEl.textContent = "sign-in needed";
-      return;
-    }
-    await Promise.all([loadStories(), loadHeadsUp()]);
-  } finally {
-    refreshBtn.disabled = false;
-  }
-}
-refreshBtn.addEventListener("click", refresh);
 moreBtn.addEventListener("click", () => loadMore());
 
 // --- live updates via SSE --------------------------------------------------
 let sseRetry = 0;
 function connectSSE() {
   const es = new EventSource("/api/events");
-  es.onopen = () => { statusEl.textContent = statusEl.textContent + " · live"; };
+  es.onopen = () => {
+    sseLive = true;
+    updateStatus();
+  };
   es.onerror = () => {
+    sseLive = false;
     es.close();
     sseRetry += 1;
+    updateStatus();
     setTimeout(connectSSE, Math.min(30000, 1000 * sseRetry));
   };
   let debounce;

@@ -10,7 +10,6 @@ from pathlib import Path
 # --- Paths -----------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("NEWS_DB_PATH", BASE_DIR / "news.db"))
-OPML_PATH = Path(os.getenv("NEWS_OPML_PATH", BASE_DIR / "subscriptions-2026-09-27.opml"))
 
 # --- Ollama ----------------------------------------------------------------
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -87,7 +86,7 @@ USER_AGENT = os.getenv(
 # Only re-extract full text if the RSS description is shorter than this (words).
 EXTRACT_MIN_DESC_WORDS = int(os.getenv("NEWS_EXTRACT_MIN_DESC_WORDS", "100"))
 # How often the background worker runs a full ingestion cycle (seconds).
-WORKER_INTERVAL_SECONDS = int(os.getenv("NEWS_WORKER_INTERVAL", "900"))
+WORKER_INTERVAL_SECONDS = int(os.getenv("NEWS_WORKER_INTERVAL", "300"))
 # Cap on feeds per run (0 = all). Handy for local testing.
 MAX_FEEDS_PER_RUN = int(os.getenv("NEWS_MAX_FEEDS_PER_RUN", "0"))
 # Cap on items ingested per feed per cycle.
@@ -103,7 +102,10 @@ W3_INTEREST = float(os.getenv("NEWS_W3", "1.5"))
 #   credibility  = corroboration (distinct sources backing the story)
 #   user_impact  = how much it affects the user (location/regions, see
 #                  UserProfile.preferences) — neutral 0.5 baseline when unset.
-# On top: + urgency*W1 + user_interest*W3 - time_decay. See scoring.py.
+# On top: + urgency*W1 + user_interest*W3 + distance*W_DISTANCE - time_decay.
+# The distance term (scoring.distance_score) ranks local news above distant
+# news: the Prompt2 call emits each story's location + language into
+# Story.metrics, compared against USER_CITY/USER_COUNTRY/USER_LANGUAGE. See scoring.py.
 W_RELEVANCE_QUALITY = float(os.getenv("NEWS_W_REL_QUALITY", "0.40"))
 W_RELEVANCE_CREDIBILITY = float(os.getenv("NEWS_W_REL_CREDIBILITY", "0.35"))
 W_RELEVANCE_IMPACT = float(os.getenv("NEWS_W_REL_IMPACT", "0.25"))
@@ -118,6 +120,18 @@ FEEDBACK_ALPHA = float(os.getenv("NEWS_FEEDBACK_ALPHA", "0.1"))
 # contribution to +/- INTEREST_CAP keeps personalization in the same band as
 # urgency and decay; raw weights stay intact for later re-derivation.
 INTEREST_CAP = float(os.getenv("NEWS_INTEREST_CAP", "10.0"))
+
+# --- User location (distance sorting) ----------------------------------
+# "Physical + cultural distance" is extracted by the EXISTING Prompt2 call
+# (no separate classifier): the schema gained optional `location` ("City,
+# Country" or "Global") + `language` (article language code) fields, stored
+# in Story.metrics. scoring.distance_score turns that into a 0..1 proximity
+# band vs these values — city match = 1.0, country = 0.6, language-only =
+# 0.35, unknown = 0 (neutral) — and display_score adds W_DISTANCE * score.
+USER_CITY = os.getenv("NEWS_USER_CITY", "Munich")
+USER_COUNTRY = os.getenv("NEWS_USER_COUNTRY", "Germany")
+USER_LANGUAGE = os.getenv("NEWS_USER_LANGUAGE", "de")
+W_DISTANCE = float(os.getenv("NEWS_W_DISTANCE", "2.0"))
 
 # --- Heads-up brief ------------------------------------------------------
 # The AI "Quick Heads Up" paragraph is regenerated at most once per TTL
@@ -145,6 +159,38 @@ AUTH_PASSWORD = os.getenv("NEWS_AUTH_PASSWORD", "")
 # re-login) and carried by an HttpOnly SameSite=Lax cookie.
 AUTH_SESSION_HOURS = float(os.getenv("NEWS_AUTH_SESSION_HOURS", "24"))
 AUTH_COOKIE = os.getenv("NEWS_AUTH_COOKIE", "news_session")
+
+# --- Chat (per-story, signed-in only) --------------------------------------
+# Per-story chat: a signed-in user opens a chat on any story card. The story's
+# context (headline, summary, metrics, tags, article titles/urls) is injected
+# into the SYSTEM prompt, so the model answers in that story's frame of
+# reference rather than as a free-form generalist. History is persisted
+# per-story (single local user -> one session per story). See app/chat.py.
+CHAT_TEMPERATURE = float(os.getenv("NEWS_CHAT_TEMPERATURE", "0.3"))
+CHAT_MAX_TOKENS = int(os.getenv("NEWS_CHAT_MAX_TOKENS", "1024"))
+# Allowed web-search turn budgets for the chat agent (searchngx). Before the
+# final answer, the agent may run up to the chosen number of search+scrape
+# turns to gather fresh context. 0 = no web search (pure story context).
+# The options are surfaced verbatim in the UI selector, so keep them ordered.
+CHAT_SEARCH_TURNS = sorted(
+    int(t) for t in os.getenv("NEWS_CHAT_SEARCH_TURNS", "0,1,2,3,5,7,10").split(",")
+    if t.strip()
+)
+# Hard cap on how many turns a single request may run (guards the env list).
+CHAT_SEARCH_TURNS_MAX = max(CHAT_SEARCH_TURNS)
+# Each scraped page is truncated to this many chars when folded into context.
+CHAT_CONTEXT_PER_SOURCE = int(os.getenv("NEWS_CHAT_CONTEXT_PER_SOURCE", "1500"))
+# Total web context folded into a single prompt (chars) before we stop adding.
+CHAT_CONTEXT_MAX = int(os.getenv("NEWS_CHAT_CONTEXT_MAX", "6000"))
+# --- searchngx (local searchapi.io-style web search + scrape) ---------------
+# A local searchapi.io-compatible instance. search() POSTs the engine
+# endpoint; scrape() fetches a URL and runs the ingest extraction chain.
+# SEARCHNGX_API_KEY is never logged and is sent only as a Bearer token.
+SEARCHNGX_BASE_URL = os.getenv("NEWS_SEARCHNGX_BASE_URL", "https://searx.example.org/")
+SEARCHNGX_API_KEY = os.getenv("NEWS_SEARCHNGX_API_KEY", "")
+SEARCHNGX_ENDPOINT = os.getenv("NEWS_SEARCHNGX_ENDPOINT", "api/v2/web_search")
+SEARCHNGX_TIMEOUT = float(os.getenv("NEWS_SEARCHNGX_TIMEOUT", "30"))
+SEARCHNGX_MAX_RESULTS = int(os.getenv("NEWS_SEARCHNGX_MAX_RESULTS", "5"))
 
 # --- API -------------------------------------------------------------------
 PUBLIC_BASE = os.getenv("NEWS_PUBLIC_BASE", "http://127.0.0.1:8787")

@@ -65,6 +65,13 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # Consecutive Prompt2-cycle failures (dead-letter counter, see
         # config.PIPELINE_MAX_FAILURES). NULL == never failed.
         ("Article", "pipeline_failures", "ALTER TABLE Article ADD COLUMN pipeline_failures INTEGER"),
+        # Per-stage pipeline wall times (seconds) for the successful run, shown
+        # in /list for diagnosing slow articles: embed, cluster, harness, story.
+        ("Article", "t_embed_s", "ALTER TABLE Article ADD COLUMN t_embed_s REAL"),
+        ("Article", "t_cluster_s", "ALTER TABLE Article ADD COLUMN t_cluster_s REAL"),
+        ("Article", "t_harness_s", "ALTER TABLE Article ADD COLUMN t_harness_s REAL"),
+        ("Article", "t_story_s", "ALTER TABLE Article ADD COLUMN t_story_s REAL"),
+        ("Article", "t_wall_s", "ALTER TABLE Article ADD COLUMN t_wall_s REAL"),
         # Feed management: disabling skips AI ingestion only — RSS fetch + article
         # rows still happen, so volume stats stay live for disabled feeds too.
         ("Feed", "enabled", "ALTER TABLE Feed ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"),

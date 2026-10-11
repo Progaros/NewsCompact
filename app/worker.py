@@ -76,9 +76,6 @@ def _loop() -> None:
 
 def start() -> None:
     db.init_db()
-    from .opml import import_opml
-
-    import_opml()
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
 

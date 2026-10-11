@@ -44,8 +44,12 @@ _P2_SYSTEM = (
     "You are a news editor. Given the source articles of one ongoing story, respond "
     "with ONLY a JSON object: "
     '{"headline": str, "summary": str, "tags": [...], "quality": int, '
+    '"location": str, "language": str, '
     '"metrics": {"urgency_level": int 1-10, "impact_scale": "Local|Regional|National|Global", '
     '"status": "Breaking|Ongoing|Resolved"}}. '
+    "location is the most specific place the news is about as 'City, Country' "
+    "(e.g. 'Munich, Germany'), or 'Global' when it has no specific local setting. "
+    "language is the two-letter code of the articles' main language (e.g. 'de', 'en'). "
     "Summary is 2-4 factual sentences. Do not invent facts not present in the articles."
 )
 _P2_INCREMENTAL_SYSTEM = (
@@ -54,7 +58,8 @@ _P2_INCREMENTAL_SYSTEM = (
     "summary in 2-4 factual sentences to incorporate them. If it adds no new "
     "facts, return the Current Summary exactly as written. Preserve the story "
     "headline unless the new facts require a clearer headline. Return the same "
-    "JSON object schema as requested."
+    "JSON object schema as requested. location/language describe the story's "
+    "setting — return them as-is unless the new article clearly changes it."
 )
 # JSON schema for the constrained /api/chat call (see _P2_SYSTEM). Keeps the
 # prose-JSON parse failure structural: the model emits this shape, not text.
@@ -67,6 +72,10 @@ _P2_SCHEMA = {
         "summary": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
         "quality": {"type": "integer", "minimum": 1, "maximum": 10},
+        # Distance sorting (see config.USER_CITY): where the story is about +
+        # its language. Optional — old/incremental outputs may omit them.
+        "location": {"type": "string"},
+        "language": {"type": "string"},
         "metrics": {
             "type": "object",
             "properties": {
@@ -444,7 +453,7 @@ def prompt2_update_story(conn, story_id: int, quality: int | None = None,
         return 0
     arts = [dict(a) for a in articles]
     story = conn.execute(
-        "SELECT headline, summary FROM Story WHERE id = ?", (story_id,)
+        "SELECT headline, summary, metrics FROM Story WHERE id = ?" , (story_id,)
     ).fetchone()
     incremental = len(arts) >= 2 and story is not None and not force_full
     if incremental:
@@ -504,6 +513,27 @@ def prompt2_update_story(conn, story_id: int, quality: int | None = None,
     # (sanitized already; keep it last so it can't be clobbered by the enum check).
     if breaking:
         metrics["status"] = "Breaking"
+    # Distance sorting (scoring.distance_score): location + language come from
+    # this same Prompt2 call — no separate classifier. Optional in the schema:
+    # on an incremental update an omission keeps what the story already had,
+    # so a passing article can't wipe the field.
+    location = str(out.get("location") or "").strip()[:120]
+    language = str(out.get("language") or "").strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}(-[a-z]{2,4})?", language):
+        language = ""
+    if story is not None:
+        try:
+            prev_metrics = json.loads(story["metrics"] or "{}")
+        except json.JSONDecodeError:
+            prev_metrics = {}
+        if not location:
+            location = str(prev_metrics.get("location") or "").strip()[:120]
+        if not language:
+            language = str(prev_metrics.get("language") or "").strip()
+    if location:
+        metrics["location"] = location
+    if language:
+        metrics["language"] = language
 
     conn.execute(
         "UPDATE Story SET headline=?, summary=?, tags=?, metrics=?, quality_score=? "
@@ -702,9 +732,15 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
                 t_p2 = time.perf_counter() - t0
             # notify on breaking stories
             with db.get_conn() as conn:
+                # Persist the successful run's per-stage wall times for /list.
+                # Stages store 0.0 when skipped (junk-on-junk) — NULL means the
+                # article was never fully processed. Resets the failure counter.
+                wall_s = time.perf_counter() - wall0
                 conn.execute(
-                    "UPDATE Article SET pipeline_failures = 0 WHERE id = ?",
-                    (art["id"],),
+                    "UPDATE Article SET pipeline_failures = 0, "
+                    "t_embed_s = ?, t_cluster_s = ?, t_harness_s = ?, "
+                    "t_story_s = ?, t_wall_s = ? WHERE id = ?",
+                    (t_embed, t_knn, t_harness, t_p2, wall_s, art["id"]),
                 )
                 s = conn.execute("SELECT * FROM Story WHERE id=?", (story_id,)).fetchone()
                 if s is not None:

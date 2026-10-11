@@ -5,7 +5,8 @@ components (quality, credibility, user_impact), weighted by normalized
 weights (sum to 1) so the base stays on a 0-10 scale:
 
     relevance = quality*WQ + credibility*WC + user_impact*WI     (0..10)
-    display   = relevance + urgency*W1 + clamp(user_interest*W3, +/-INTEREST_CAP) - time_decay
+    display   = relevance + urgency*W1 + clamp(user_interest*W3, +/-INTEREST_CAP)
+                + distance*W_DISTANCE - time_decay
 
 - quality      : per-story harness quality (1-10).
 - credibility  : corroboration — distinct sources backing the story
@@ -121,6 +122,41 @@ def user_impact_score(story, preferences: dict[str, Any]) -> float:
     return _clamp01(impact)
 
 
+def distance_score(story) -> float:
+    """0..1 physical + cultural proximity to the user's location.
+
+    The location/language come from Story.metrics — extracted by the existing
+    Prompt2 call, not a separate classifier. Bands:
+      city match (USER_CITY in the location string)   -> 1.0
+      country match (USER_COUNTRY)                     -> 0.6
+      language match (USER_LANGUAGE)                   -> 0.35
+      nothing / unknown                                -> 0.0 (neutral)
+
+    Pre-distance stories (no metrics.location) score 0 — neutral, never
+    penalized, so existing stories are unaffected.
+    """
+    m = _story_metrics(story)
+    location = str(m.get("location") or "").lower()
+    language = str(m.get("language") or "").lower()
+    score = 0.0
+    if location:
+        city = config.USER_CITY.lower().strip()
+        country = config.USER_COUNTRY.lower().strip()
+        if city and city in location:
+            score = 1.0
+        elif country and country in location:
+            score = 0.6
+    lang = config.USER_LANGUAGE.lower().strip()
+    if lang and language == lang:
+        score = max(score, 0.35)
+    return score
+
+
+def distance_points(story) -> float:
+    """Display-point contribution of the distance term (W_DISTANCE * 0..1)."""
+    return config.W_DISTANCE * distance_score(story)
+
+
 def relevance_score(story, tag_weights: dict[str, float], source_count: int = 1,
                     preferences: dict | None = None) -> dict:
     """The relevance breakdown (the personalization base), each component on
@@ -140,12 +176,15 @@ def relevance_score(story, tag_weights: dict[str, float], source_count: int = 1,
         + config.W_RELEVANCE_IMPACT * impact
     )
     interest = user_interest_score(story, tag_weights)
+    distance = distance_score(story)
     return {
         "quality": round(quality * 10, 1),
         "credibility": round(credibility * 10, 1),
         "user_impact": round(impact * 10, 1),
         "user_interest": round(interest, 2),
         "user_interest_points": round(user_interest_points(story, tag_weights), 2),
+        "distance": round(distance * 10, 1),
+        "distance_points": round(distance_points(story), 2),
         "base": round(base, 2),
     }
 
@@ -163,6 +202,7 @@ def display_score(story, tag_weights: dict[str, float], source_count: int = 1,
         rel["base"]
         + urgency * config.W1_URGENCY
         + user_interest_points(story, tag_weights)
+        + distance_points(story)
         - decay
     )
 

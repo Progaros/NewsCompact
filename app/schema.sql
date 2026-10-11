@@ -71,6 +71,26 @@ CREATE TABLE IF NOT EXISTS FeedbackLog (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id);
 
+-- Per-story chat. Single local user, so a session is keyed by story_id only
+-- (one session per story; history survives restarts). Deleting a story
+-- cascades to its session and the session cascades to its messages.
+CREATE TABLE IF NOT EXISTS ChatSession (
+    id          INTEGER PRIMARY KEY,
+    story_id    INTEGER NOT NULL UNIQUE REFERENCES Story(id) ON DELETE CASCADE,
+    created_at  TEXT    DEFAULT (datetime('now')),
+    updated_at  TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_session_story ON ChatSession(story_id);
+
+CREATE TABLE IF NOT EXISTS ChatMessage (
+    id          INTEGER PRIMARY KEY,
+    session_id  INTEGER NOT NULL REFERENCES ChatSession(id) ON DELETE CASCADE,
+    role        TEXT    NOT NULL,        -- 'user' | 'assistant'
+    content     TEXT    NOT NULL,
+    created_at  TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_message_session ON ChatMessage(session_id);
+
 -- The vec0 virtual table (created by db.py once the extension is loaded):
 --   CREATE VIRTUAL TABLE Article_Embeddings USING vec0(
 --       article_id INTEGER,

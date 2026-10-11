@@ -11,11 +11,15 @@ embedding table) and HTTP calls to a local Ollama instance. No external services
 [`plan.md`](./plan.md), for technical findings [`findings.md`](./findings.md), and for
 the original design spec [`project_plan.md`](./project_plan.md).
 
-## Project state (as of 2026-10-11)
+## Project state (as of 2026-10-12)
 
 - **Phases 1–5 complete** except final weight/threshold tuning. Phase 5 includes the
   feed management page (add/group/rename/delete feeds, enable-disable AI ingestion
   per feed with live 24h/7d volume stats per feed and per category).
+- **New since 2026-10-11:** per-story chat (💬, signed-in, optional searchngx
+  web-search turns), the `/list` flat article page with per-stage pipeline timings,
+  distance sorting (`NEWS_W_DISTANCE` + `NEWS_USER_*`), worker interval default
+  lowered 900 → 300 s.
 - **Remaining open work:** W1/W2/W3 + relevance-weight tuning once real 👍/👎
   feedback data exists (`FeedbackLog` still empty — personalization terms
   untested in practice).
@@ -55,8 +59,9 @@ uv run python main.py    # → http://127.0.0.1:8787
 On startup the app:
 
 1. initializes `news.db` (schema + sqlite-vec virtual table; idempotent),
-2. imports/updates feeds from `subscriptions-2026-09-27.opml` (upsert by `xml_url`),
-3. starts the background worker (ingest + AI pipeline every `NEWS_WORKER_INTERVAL`=900 s).
+2. starts the background worker (ingest + AI pipeline every `NEWS_WORKER_INTERVAL`=300 s).
+
+Feeds are managed through the web UI (`/feeds` → `POST`/`PATCH`/`DELETE /api/feeds`), not imported from a file.
 
 The first full ingest of a bulk pull takes hours (see load figures in
 [`findings.md`](./findings.md) → "Load & utilisation"). Subsequent cycles only process
@@ -87,9 +92,10 @@ all their articles), then:
      calibration anchors; broken/thin bodies are scored from the headline) + breaking
      flag.
    - **Prompt 2**: story-level LLM call that generates/updates the headline, summary,
-     tags, quality and metrics (urgency/impact/status). New stories use full context;
-     multi-member stories use the current summary plus the new article capped at 1,500
-     words. Tags are normalized (`app/tags.py`).
+     tags, quality and metrics (urgency/impact/status), plus `location` ("City,
+     Country" or "Global") and `language` for distance sorting. New stories use
+     full context; multi-member stories use the current summary plus the new
+     article capped at 1,500 words. Tags are normalized (`app/tags.py`).
    - Story quality is the **median** of member article qualities (one bot-blocked
      fetch can't drag a story down). `app/content_quality.py` classifies bodies as
      `ok`/`thin`/`broken` so broken pages are scored from the headline instead.
@@ -98,8 +104,15 @@ all their articles), then:
 
    ```
    relevance base (0–10) = quality·0.40 + credibility·0.35 + user_impact·0.25
-   display_score         = relevance base + urgency·W1 + user_interest·W3 − time_decay
+   display_score         = relevance base + urgency·W1 + user_interest·W3
+                            + distance·W_DISTANCE − time_decay
    ```
+
+   - `distance` (0–1) = physical + cultural proximity of the story to the user
+     (`NEWS_USER_CITY`/`_COUNTRY`/`_LANGUAGE`): city match → 1.0, country → 0.6,
+     same language → 0.35, unknown → 0 (neutral). The location/language come
+     from the Prompt 2 call (stored in the story's metrics), not a separate
+     classifier, so existing stories stay neutral at 0.
 
    - `credibility` = corroboration: distinct sources backing the story (1 → low, 5+ → max).
    - `user_impact` = location/region data from `UserProfile.preferences`
@@ -114,13 +127,15 @@ all their articles), then:
 
 Open <http://127.0.0.1:8787>:
 
-- **Sign-in** — if `NEWS_AUTH_PASSWORD` is set, full access (feeds page,
-  👍/👎, Refresh, profile) needs a login: the **Sign in** button in the top bar
+- **Sign-in** — if `NEWS_AUTH_PASSWORD` is set, full access (feeds page, `/list`,
+  👍/👎, chat, profile) needs a login: the **Sign in** button in the top bar
   opens a small password popup; the session lasts 24 h (`NEWS_AUTH_SESSION_HOURS`)
   in an HttpOnly cookie. Without signing in the main page stays fully readable
   and live (read-only: no Feeds link, no feedback buttons). A not-signed-in
   viewer who hits a protected endpoint sees a toast with a **Sign in** button
-  that disappears after a few seconds.
+  that disappears after a few seconds. When signed in, the top bar shows a
+  **User** button instead — it opens a read-only profile view (preferences +
+  tag weights) with a sign-out action.
 
 - **Quick Heads Up** — AI paragraph summarizing the top 5 stories by display score.
   Cached server-side and regenerated at most once per TTL (`NEWS_HEADS_UP_TTL_MINUTES`,
@@ -128,12 +143,26 @@ Open <http://127.0.0.1:8787>:
   (`NEWS_HEADS_UP_NTFY_TIMES`, default `07:00`) the brief is also pushed to the phone
   over ntfy (`NEWS_HEADS_UP_NTFY_URL`, default `https://ntfy.sh/your-topic`).
 - **Story feed** — cards sorted by display score, each showing: AI headline, summary,
-  quality badge (color-coded), **relevance breakdown** (base + q/cred/impact/int
+  quality badge (color-coded), **relevance breakdown** (base + q/cred/impact/int/dist
   components, hover for formula), breaking pill, **`N sources` badge** (so you don't
-  have to expand the card to see corroboration), tag pills, and 👍/👎 buttons.
+  have to expand the card to see corroboration), tag pills, a **📍 location pill**
+  (when the story's location isn't "Global" — explains any distance boost) and
+  👍/👎 buttons.
+- **Chat** — the **💬** button on a card (signed-in only) opens a per-story chat
+  popup. The story's full context (headline, summary, metrics, articles) is
+  injected into the model's SYSTEM prompt, so it answers in that story's frame
+  of reference. Before answering, the agent may run a chosen number of
+  search+scrape web turns against the local searchngx instance (selector:
+  0/1/2/3/5/7/10, `NEWS_CHAT_SEARCH_TURNS`) to gather fresh context. History is
+  persisted per story (`ChatSession`/`ChatMessage`) and survives restarts.
 - Clicking a card expands an accordion with the per-source article timeline and links.
 - **Load more** paginates in pages of 50; the `showing X/Y` status uses the server-side
   total. The UI refreshes live via SSE.
+- **List** in the top bar opens `/list` — a flat, read-only table of every ingested
+  article (title, feed · author · published date, body class, quality, status,
+  per-stage pipeline timings: embed/cluster/harness/story/total) with newest/oldest
+  sort and Load-more pagination. It's the tool for diagnosing slow or stuck
+  articles. (`POST /api/refresh` still runs a full worker cycle on demand.)
 - **Feeds** in the top bar opens the feed management page (`/feeds`): add feeds, rename,
   regroup (category edit per row), delete, and toggle AI ingestion per feed — or
   **turn an entire category on/off with one button** (each category header has a
@@ -144,16 +173,18 @@ Open <http://127.0.0.1:8787>:
   its own live 24h/7d stats — disabled feeds keep fetching RSS rows, so their volume
   stays visible even while they skip the AI pipeline. This is the tool for spotting
   too-chatty feeds/categories.
-- **Refresh** in the top bar runs a full worker cycle inline (blocks while it runs).
-- The status bar in the top right shows `showing X/Y stories`; health figures are at
-  `GET /api/health`.
+- The status bar in the top right shows `showing X/Y stories · N enqueued ·
+  last article Xm ago · live`; health figures are at `GET /api/health`.
 
 ## API
 
 | Method & path          | Purpose                                            |
 | ---------------------- | -------------------------------------------------- |
-| `GET /api/stories`     | Ranked stories (`limit` slice + total `count`)    |
+| `GET /api/stories`     | Ranked stories (`limit` slice + total `count` + pipeline `pending` + newest-article time) |
 | `GET /api/stories/{id}`| One story incl. its articles                       |
+| `GET /api/stories/{id}/chat` | Chat history + `search_turns_options` (signed-in only) |
+| `POST /api/stories/{id}/chat` | Send a message: `{"message", "search_turns"}` → `{"reply"}` (signed-in only) |
+| `GET /api/articles`    | Flat list of all ingested articles for `/list` (`limit`/`order`, per-stage timings) |
 | `GET /api/heads-up`    | AI brief over the top 5 stories (TTL-cached)       |
 | `POST /api/feedback`   | `{"story_id": N, "kind": "up" \| "down"}`          |
 | `GET /api/feedback`    | Raw 👍/👎 vote log (separate from the profile)     |
@@ -173,11 +204,12 @@ Open <http://127.0.0.1:8787>:
 | `POST /api/auth/logout`| Clears the session cookie                          |
 
 **Auth:** when `NEWS_AUTH_PASSWORD` is set, every endpoint **except** the
-read-only set — `GET /api/stories`, `GET /api/stories/{id}`, `GET /api/heads-up`,
-`GET /api/health`, `GET /api/events`, `/`, `/static/*` and the two auth probes
-above — returns **401** without a session (the `/feeds` page redirects to `/`
-for browser navigation). With the password unset, auth is off and everything
-is open.
+read-only set — `GET /api/stories`, `GET /api/stories/{id}`, `GET /api/articles`,
+`GET /api/heads-up`, `GET /api/health`, `GET /api/events`, `/`, `/list`, `/static/*`
+and the two auth probes above — returns **401** without a session (the `/feeds`
+page redirects to `/` for browser navigation). `GET /api/stories/{id}/chat` is
+deliberately **excluded** from the public story prefix: chat history is
+signed-in only. With the password unset, auth is off and everything is open.
 
 ## Configuration
 
@@ -196,9 +228,11 @@ All via environment variables (see `app/config.py` for defaults):
 | `NEWS_CLUSTER_REVIVE_SIM_THRESHOLD` | `0.62` | revive a stale story (no time window) |
 | `NEWS_PIPELINE_MAX_FAILURES` | `3` | failures before an article enters dead-letter state |
 | `NEWS_CLUSTER_WINDOW_HOURS` | `48` | clustering freshness window |
-| `NEWS_WORKER_INTERVAL` | `900` (s) | worker cycle period |
+| `NEWS_WORKER_INTERVAL` | `300` (s) | worker cycle period |
 | `NEWS_MAX_ITEMS_PER_FEED` | `10` | items per feed per cycle |
 | `NEWS_W1` / `NEWS_W3` | `1.0` / `1.5` | display-score urgency / user-interest weights |
+| `NEWS_W_DISTANCE` | `2.0` | distance-sorting weight (see below) |
+| `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | user location for distance sorting |
 | `NEWS_W_REL_QUALITY` / `NEWS_W_REL_CREDIBILITY` / `NEWS_W_REL_IMPACT` | `0.40` / `0.35` / `0.25` | relevance base weights (sum 1) |
 | `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` | `18` / `10.0` | time decay |
 | `NEWS_FEEDBACK_ALPHA` | `0.1` | feedback learning rate |
@@ -210,26 +244,39 @@ All via environment variables (see `app/config.py` for defaults):
 | `NEWS_AUTH_PASSWORD` | _(empty = off)_ | app login password; empty disables auth entirely |
 | `NEWS_AUTH_SESSION_HOURS` | `24` | session lifetime (h); in-memory, restart = re-login |
 | `NEWS_AUTH_COOKIE` | `news_session` | session cookie name (HttpOnly, SameSite=Lax) |
+| `NEWS_CHAT_TEMPERATURE` / `NEWS_CHAT_MAX_TOKENS` | `0.3` / `1024` | per-story chat generation params |
+| `NEWS_CHAT_SEARCH_TURNS` | `0,1,2,3,5,7,10` | allowed searchngx web-search turn budgets for chat (shown verbatim in the UI) |
+| `NEWS_CHAT_CONTEXT_PER_SOURCE` / `NEWS_CHAT_CONTEXT_MAX` | `1500` / `6000` | chars per scraped page / total web context folded into a chat prompt |
+| `NEWS_SEARCHNGX_BASE_URL` | `https://searx.example.org/` | local searchapi.io-style web search instance |
+| `NEWS_SEARCHNGX_API_KEY` | _(empty)_ | Bearer token (never logged); empty = unauthenticated |
+| `NEWS_SEARCHNGX_ENDPOINT` | `api/v2/web_search` | search endpoint path |
+| `NEWS_SEARCHNGX_TIMEOUT` / `NEWS_SEARCHNGX_MAX_RESULTS` | `30` / `5` | HTTP timeout (s) / results per search |
 
 ## Database
 
 Single file `news.db` (WAL mode, foreign keys on, sqlite-vec loaded per connection):
 
-- `Feed` — feeds from OPML (title, xml_url, category, ETag/Last-Modified cache,
+- `Feed` — feeds added via the web UI (title, xml_url, category, ETag/Last-Modified cache,
   `enabled` = AI-ingestion toggle, see Feed management)
 - `Article` — one row per RSS item; `content_raw` (may be a broken page — see
-  `content_class`), `quality` (per-article), `story_id` (NULL = pending clustering)
-- `Story` — AI headline/summary/tags/metrics, `quality_score` = median of member
-  article qualities
+  `content_class`), `quality` (per-article), `story_id` (NULL = pending clustering),
+  per-stage pipeline wall times (`t_embed_s`, `t_cluster_s`, `t_harness_s`, `t_story_s`,
+  `t_wall_s` — NULL until the article's first fully successful pipeline run, shown in `/list`)
+- `Story` — AI headline/summary/tags/metrics (incl. `location`/`language` for distance
+  sorting), `quality_score` = median of member article qualities
 - `Article_Embeddings` — sqlite-vec virtual table (`FLOAT[1024]`, title-first vectors)
 - `UserProfile` — single local user: `tag_weights`, `source_weights`, `preferences`
 - `FeedbackLog` — raw 👍/👎 votes (kept separate from the profile for later tuning)
+- `ChatSession` / `ChatMessage` — per-story chat history (one session per story,
+  messages cascade from the session, session cascades from the story)
 
 ## Ops & helper scripts
 
 - Run: `cd news_aggregator_ai && uv run python main.py`. The old server ignores SIGTERM
   (uvicorn waits for in-flight Ollama calls) — `kill -9` the `.venv/bin/python` child if
-  you must restart.
+  you must restart. Detached launch helpers in `scripts/`: `start.sh` (fully detached
+  via `setsid -f`, refuses if the port is taken), `start_server.sh`, `launch_and_check.sh`
+  (launch + port/log report). All append/overwrite `server.log`.
 - One-shot DB stats: `PYTHONPATH=. uv run python scripts/dbstats.py`
 - Clustering benchmark: export review pairs with
   `PYTHONPATH=. uv run python scripts/benchmark_clustering.py --export /tmp/clustering-pairs.json`.
@@ -265,17 +312,19 @@ news_aggregator_ai/
     config.py        # env-driven settings
     db.py            # connections + schema bootstrap (sqlite-vec)
     schema.sql       # DDL
-    opml.py          # OPML → Feed rows (auto on startup)
     ingest.py        # RSS fetch + extraction fallback chain
     pipeline.py      # embed → cluster → harness → Prompt2 → story update
     harness.py       # Jev-style Choice/Score/Boolean (schema-constrained)
     ollama.py        # Ollama HTTP client (chat /v1 + embeddings)
+    chat.py          # per-story chat (system-prompt story context + search turns)
+    searchngx.py     # best-effort web search/scrape client for the chat agent
     content_quality.py # ok/thin/broken/empty body classifier
     tags.py          # tag normalization (aliases, case/punctuation)
     scoring.py       # relevance/display score + feedback loop
     worker.py        # background scheduler
     bus.py           # SSE pub/sub
     api.py           # FastAPI routes
-    frontend/        # index.html, app.js, feeds.html, feeds.js, styles.css
+    frontend/        # index.html, app.js, feeds.html, feeds.js, chat.js,
+                     # list.html, list.js, styles.css
   scripts/           # one-off & monitoring scripts
 ```

@@ -23,6 +23,12 @@ const Auth = (() => {
     _notify();
   }
 
+  function esc(s) {
+    return (s ?? "").toString().replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
   function onChange(fn) {
     listeners.push(fn);
   }
@@ -55,8 +61,15 @@ const Auth = (() => {
       controls.appendChild(b);
     }
     const el = document.getElementById("auth-btn");
-    el.textContent = state.authenticated ? "Sign out" : "Sign in";
-    el.onclick = () => (state.authenticated ? signOut() : showLoginModal());
+    if (state.authenticated) {
+      el.textContent = "\u{1F464} User";
+      el.title = "Preferences & sign out";
+      el.onclick = () => showUserModal();
+    } else {
+      el.textContent = "Sign in";
+      el.title = "";
+      el.onclick = () => showLoginModal();
+    }
   }
 
   async function signOut() {
@@ -66,6 +79,64 @@ const Auth = (() => {
     state.authenticated = false;
     applyDom();
     _notify();
+  }
+
+  /* Read-only view of the user's profile (preferences + tag weights) with a
+   * sign-out action. Shown via the header User button when signed in. */
+  function showUserModal() {
+    if (document.getElementById("user-modal")) return;
+    const overlay = document.createElement("div");
+    overlay.id = "user-modal";
+    overlay.innerHTML = `
+      <div class="login-panel user-panel">
+        <h2>Preferences</h2>
+        <p class="hint">Your current profile (read-only).</p>
+        <div id="user-profile" class="user-profile">Loading\u2026</div>
+        <div class="login-row">
+          <button type="button" class="btn" id="user-close">Close</button>
+          <button type="button" class="btn" id="user-signout">Sign out</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    overlay.querySelector("#user-close").onclick = close;
+    overlay.querySelector("#user-signout").onclick = () => {
+      close();
+      signOut();
+    };
+    const box = overlay.querySelector("#user-profile");
+    fetch("/api/profile")
+      .then((res) => {
+        if (Auth.unauth(res)) { close(); return null; }
+        return res.json();
+      })
+      .then((d) => {
+        if (d && box) box.innerHTML = renderProfile(d);
+      })
+      .catch(() => { if (box) box.textContent = "(profile unavailable)"; });
+  }
+
+  function renderProfile(p) {
+    const prefs = p.preferences || {};
+    const prefRows = Object.entries(prefs)
+      .map(([k, v]) => `<div class="pref-row"><span>${esc(k)}</span><span>${esc(v)}</span></div>`)
+      .join("");
+    const tags = Object.entries(p.tag_weights || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 30)
+      .map(([t, w]) => `<div class="pref-row"><span>${esc(t)}</span><span>${Number(w).toFixed(2)}</span></div>`)
+      .join("");
+    const tagBlock = tags || `<div class="muted">No tag weights yet.</div>`;
+    return `
+      <div class="user-section">
+        <div class="user-section-label">Preferences</div>${prefRows}
+      </div>
+      <div class="user-section">
+        <div class="user-section-label">Tag weights (${Object.keys(p.tag_weights || {}).length})</div>${tagBlock}
+      </div>`;
   }
 
   function showLoginModal() {

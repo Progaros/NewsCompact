@@ -20,11 +20,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 
-from . import auth, bus, config, db, scoring, worker
+from . import auth, bus, chat, config, db, scoring, worker
 
 log = logging.getLogger("news.heads-up")
 
 _FRONTEND_DIR = Path(__file__).with_name("frontend")
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """Frontend is served in place (no build step): always revalidate so
+    edits to app.js/css take effect on a normal reload, not a hard refresh."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        resp = super().file_response(full_path, stat_result, scope, status_code)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
 # "Quick Heads Up" brief cache: {"text": str, "ts": epoch}. The LLM call is
 # slow, so the brief is only regenerated once it's older than the TTL
@@ -64,6 +74,13 @@ class CategoryUpdate(BaseModel):
 
 class Login(BaseModel):
     password: str
+
+
+class ChatSend(BaseModel):
+    message: str
+    # Web-search turn budget (searchngx) for this turn; clamped server-side to
+    # the configured set (config.CHAT_SEARCH_TURNS) in app/chat.py.
+    search_turns: int = 0
 
 
 def _load_tags(raw: str) -> list[str]:
@@ -275,14 +292,18 @@ def _is_public(request: Request) -> bool:
     stay fully readable (and live) for a not-signed-in viewer; everything
     else 401s. When auth is disabled (no NEWS_AUTH_PASSWORD) this is moot."""
     path = request.url.path
-    if path == "/" or path.startswith("/static/"):
+    if path == "/" or path == "/list" or path.startswith("/static/"):
         return True
     if path in ("/api/auth/login", "/api/auth/session"):
         return True
     if request.method == "GET":
         # story list + detail (the list endpoint also serves the load-more
-        # pagination), heads-up brief, health, and the SSE stream
-        if path == "/api/stories" or path.startswith("/api/stories/"):
+        # pagination), flat article list, heads-up brief, health, and the SSE
+        # stream. NOTE: /api/stories/{id}/chat is deliberately EXCLUDED from
+        # the public prefix — chat history is signed-in only.
+        if path in ("/api/stories", "/api/articles") or (
+            path.startswith("/api/stories/") and not path.endswith("/chat")
+        ):
             return True
         if path in ("/api/heads-up", "/api/health", "/api/events"):
             return True
@@ -311,11 +332,16 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def index():
-        return FileResponse(_FRONTEND_DIR / "index.html")
+        # no-cache so JS edits never sit behind a heuristic cache
+        return FileResponse(_FRONTEND_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/feeds")
     def feeds_page():
-        return FileResponse(_FRONTEND_DIR / "feeds.html")
+        return FileResponse(_FRONTEND_DIR / "feeds.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/list")
+    def list_page():
+        return FileResponse(_FRONTEND_DIR / "list.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/stories")
     def list_stories(limit: int = 50):
@@ -323,8 +349,79 @@ def create_app() -> FastAPI:
             stories = conn.execute("SELECT * FROM Story").fetchall()
             counts = _source_counts(conn)
             payload = [_story_payload(conn, s, counts.get(s["id"], 0)) for s in stories]
+            # Pipeline-eligible backlog (same query as /api/health), surfaced next
+            # to the story total in the status bar as "N enqueued".
+            pending = conn.execute(
+                "SELECT count(*) c FROM Article a JOIN Feed f ON f.id = a.feed_id "
+                "WHERE a.story_id IS NULL AND f.enabled = 1 "
+                "AND COALESCE(a.pipeline_failures, 0) < ?",
+                (config.PIPELINE_MAX_FAILURES,),
+            ).fetchone()["c"]
+            # Newest article's ingest time — the feed-freshness signal, shown in
+            # the status bar as "last article Xm ago" (naive-UTC string, formatted
+            # client-side).
+            last_article = conn.execute("SELECT MAX(created_at) FROM Article").fetchone()[0]
         payload.sort(key=lambda p: p["display_score"], reverse=True)
-        return {"count": len(payload), "stories": payload[:limit]}
+        return {"count": len(payload), "pending": pending, "last_article": last_article, "stories": payload[:limit]}
+
+    @app.get("/api/articles")
+    def list_articles(limit: int = 100, order: str = "newest"):
+        """Compact flat list of every ingested article for the /list page.
+
+        Read-only, paginated by cumulative limit (load-more). Default sort is
+        newest-first by created_at ("first seen"); created_at is naive-UTC, so
+        lexicographic == chronological. Returns a trimmed payload (no bodies).
+        """
+        if order not in ("newest", "oldest"):
+            order = "newest"
+        direction = "DESC" if order == "newest" else "ASC"
+        max_fail = config.PIPELINE_MAX_FAILURES
+        with db.get_conn() as conn:
+            total = conn.execute("SELECT count(*) c FROM Article").fetchone()["c"]
+            rows = conn.execute(
+                f"""
+                SELECT a.id, a.title, a.url, a.created_at, a.content_class,
+                       a.quality, a.story_id, a.pipeline_failures, f.title AS feed,
+                       a.t_embed_s, a.t_cluster_s, a.t_harness_s,
+                       a.t_story_s, a.t_wall_s, a.author, a.published_date
+                FROM Article a JOIN Feed f ON f.id = a.feed_id
+                ORDER BY a.created_at {direction}, a.id {direction}
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        articles = []
+        for r in rows:
+            if r["story_id"] is not None:
+                status = "assigned"
+            elif (r["pipeline_failures"] or 0) >= max_fail:
+                status = "dead"
+            else:
+                status = "pending"
+            articles.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "feed": r["feed"],
+                    "author": r["author"],
+                    "published_date": r["published_date"],
+                    "created_at": r["created_at"],
+                    "class": r["content_class"],
+                    "quality": r["quality"],
+                    "story_id": r["story_id"],
+                    "status": status,
+                    # Per-stage pipeline wall times (s); null if never processed.
+                    "timings": {
+                        "embed": r["t_embed_s"],
+                        "cluster": r["t_cluster_s"],
+                        "harness": r["t_harness_s"],
+                        "story": r["t_story_s"],
+                        "wall": r["t_wall_s"],
+                    },
+                }
+            )
+        return {"count": total, "order": order, "articles": articles}
 
     @app.get("/api/stories/{story_id}")
     def get_story(story_id: int):
@@ -337,6 +434,77 @@ def create_app() -> FastAPI:
                 (story_id,),
             ).fetchone()["c"]
             return _story_payload(conn, s, sc)
+
+    @app.get("/api/stories/{story_id}/chat")
+    def get_chat(story_id: int):
+        """History for a story's chat session (signed-in only, see _is_public)."""
+        with db.get_conn() as conn:
+            s = conn.execute("SELECT * FROM Story WHERE id=?", (story_id,)).fetchone()
+            if s is None:
+                raise HTTPException(404, "story not found")
+            session = conn.execute(
+                "SELECT id FROM ChatSession WHERE story_id=?", (story_id,)
+            ).fetchone()
+            if session is None:
+                messages = []
+            else:
+                rows = conn.execute(
+                    "SELECT role, content FROM ChatMessage WHERE session_id=? ORDER BY id",
+                    (session["id"],),
+                ).fetchall()
+                messages = [{"role": r["role"], "content": r["content"]} for r in rows]
+        return {
+            "story_id": story_id,
+            "messages": messages,
+            "search_turns_options": config.CHAT_SEARCH_TURNS,
+        }
+
+    @app.post("/api/stories/{story_id}/chat")
+    def post_chat(story_id: int, body: ChatSend):
+        """Append a user message, generate the assistant reply, persist both."""
+        text = (body.message or "").strip()
+        if not text:
+            raise HTTPException(400, "message must not be empty")
+        with db.get_conn() as conn:
+            s = conn.execute("SELECT * FROM Story WHERE id=?", (story_id,)).fetchone()
+            if s is None:
+                raise HTTPException(404, "story not found")
+            sc = conn.execute(
+                "SELECT COUNT(DISTINCT feed_id) AS c FROM Article WHERE story_id=?",
+                (story_id,),
+            ).fetchone()["c"]
+            story = _story_payload(conn, s, sc)
+            # One session per story (single local user).
+            session = conn.execute(
+                "SELECT id FROM ChatSession WHERE story_id=?", (story_id,)
+            ).fetchone()
+            if session is None:
+                cur = conn.execute("INSERT INTO ChatSession (story_id) VALUES (?)", (story_id,))
+                session_id = cur.lastrowid
+            else:
+                session_id = session["id"]
+            rows = conn.execute(
+                "SELECT role, content FROM ChatMessage WHERE session_id=? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            history = [{"role": r["role"], "content": r["content"]} for r in rows]
+            conn.execute(
+                "INSERT INTO ChatMessage (session_id, role, content) VALUES (?, 'user', ?)",
+                (session_id, text),
+            )
+        # The LLM call is slow — run it with the connection CLOSED so the WAL
+        # lock is not held across it (see db.py autocommit note).
+        reply = chat.generate(story, history, text, body.search_turns)
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO ChatMessage (session_id, role, content) VALUES (?, 'assistant', ?)",
+                (session_id, reply),
+            )
+            conn.execute(
+                "UPDATE ChatSession SET updated_at=datetime('now') WHERE id=?",
+                (session_id,),
+            )
+        return {"reply": reply, "story_id": story_id}
 
     @app.get("/api/heads-up")
     def heads_up():
@@ -588,7 +756,7 @@ def create_app() -> FastAPI:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="static")
+    app.mount("/static", _NoCacheStaticFiles(directory=_FRONTEND_DIR), name="static")
     return app
 
 
