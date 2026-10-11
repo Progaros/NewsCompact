@@ -552,6 +552,32 @@ def repair_stale_placeholder_stories() -> int:
     return len(orphans)
 
 
+def cleanup_orphaned_stories() -> int:
+    """Delete stories with zero articles ("ghost stories").
+
+    A story can lose its members without ever being deleted: e.g. two
+    concurrent pipeline passes (the pre-lock refresh endpoint) both create a
+    story for the same article, and the article's story_id ends up pointing
+    at one twin only. The story row keeps its Prompt2 headline/summary but
+    shows "0 sources · 0 articles" in the UI. Stories created within a
+    cycle always have their article assigned by cycle end, so reaping at
+    the start of every cycle is safe. Cheap: one NOT-INDEX-LOOKUP scan
+    over a small table.
+    """
+    with db.get_conn() as conn:
+        ghosts = conn.execute(
+            "SELECT COUNT(*) FROM Story s WHERE NOT EXISTS "
+            "(SELECT 1 FROM Article a WHERE a.story_id = s.id)"
+        ).fetchone()[0]
+        if ghosts:
+            conn.execute(
+                "DELETE FROM Story WHERE id NOT IN "
+                "(SELECT DISTINCT story_id FROM Article WHERE story_id IS NOT NULL)"
+            )
+            log.info("reaped %d orphaned stories (zero articles)", ghosts)
+    return ghosts
+
+
 def process_new_articles(limit: int = 50, emit: Any = None) -> int:
     """Find unassigned articles, embed, cluster, and refresh their stories.
 
@@ -559,6 +585,7 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
     Returns the number of articles processed.
     """
     repair_stale_placeholder_stories()
+    cleanup_orphaned_stories()
     processed = 0
     with db.get_conn() as conn:
         # Disabled feeds (Feed.enabled = 0) still ingest RSS rows but wait in the
