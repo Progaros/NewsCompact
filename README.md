@@ -22,16 +22,15 @@ the original design spec [`project_plan.md`](./project_plan.md).
 - **Database snapshot (2026-10-11):** ~3,573 articles, 835 stories, 596
   pending, 0 dead_letter. The server is **running in open mode** (no
   `NEWS_AUTH_PASSWORD`) on port 8787, worker draining the backlog.
-- **Clustering status:** `NEWS_CLUSTER_MODE=cosine` is active — member-anchor
-  join at **0.64** (revive 0.62), no LLM verifier. The two-stage path
-  (0.55 retrieval + local verifier) is retained in code as a rollback option.
-  Benchmark (human-corrected 200-pair): cosine @0.55 retrieval P/R/F1
-  `0.712/0.855/0.777`; cosine @0.64 (production join) `0.750/0.436/0.552`;
-  two-stage (zero-reasoning + entity clause) `0.818/0.655/0.727`.
-  **F0.5:** two-stage `0.779` vs cosine @0.64 `0.656` — see findings.md →
-  "Assessment response" for why the cosine decision was made on a
-  retrieval-gate F1 that understates two-stage, and why the open question is
-  a latency budget, not accuracy.
+- **Clustering status:** `two_stage` is active: member-anchor retrieval at
+  **0.55**, then the local zero-reasoning verifier (only EXACT_MATCH /
+  CONTINUING_DEVELOPMENT attach). `NEWS_CLUSTER_MODE=cosine` is the rollback
+  path (member-anchor join at 0.64, no verifier). Locked 2026-10-11: final
+  200-pair benchmark two_stage P/R/F1 `0.804/0.673/0.733`, F0.5 `0.774`
+  versus cosine @0.64 `0.750/0.436/0.552`, F0.5 `0.656`. The F0.5 metric
+  weights precision, which matters for news (a wrong merge corrupts the
+  summary; a missed merge just leaves two clean stories).
+  (findings.md → "Assessment response" + "Final mode decision")
 
 ## Quickstart
 
