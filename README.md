@@ -19,9 +19,13 @@ the original design spec [`project_plan.md`](./project_plan.md).
 - **Remaining open work:** W1/W2/W3 + relevance-weight tuning once real 👍/👎
   feedback data exists (`FeedbackLog` still empty — personalization terms
   untested in practice).
-- **Database snapshot (2026-10-11):** ~3,573 articles, 835 stories, 596
-  pending, 0 dead_letter. The server is **running in open mode** (no
-  `NEWS_AUTH_PASSWORD`) on port 8787, worker draining the backlog.
+- **Database snapshot (2026-10-11, evening):** ~4,043 articles, ~1,133
+  stories, 367 pending (mostly disabled-feed backlog by design), 1
+  dead_letter (article 3546, transient failure — parked). The server is
+  **running in open mode** (no `NEWS_AUTH_PASSWORD`) on port 8787; the
+  enabled-feed backlog has drained to steady-state arrivals and a per-cycle
+  cleanup reaps zero-article ("ghost") stories, so the story count is
+  self-healing.
 - **Clustering status:** `two_stage` is active: member-anchor retrieval at
   **0.55**, then the local zero-reasoning verifier (only EXACT_MATCH /
   CONTINUING_DEVELOPMENT attach). `NEWS_CLUSTER_MODE=cosine` is the rollback
@@ -60,7 +64,10 @@ new articles (~30/hour arrival measured).
 
 ## How it works
 
-Per worker cycle (`app/worker.py`):
+Per worker cycle (`app/worker.py`), a two-step self-heal runs first
+(`repair_stale_placeholder_stories()` re-pends articles of NULL-headline
+placeholder stories; `cleanup_orphaned_stories()` deletes stories that lost
+all their articles), then:
 
 1. **Ingestion** (`app/ingest.py`): concurrent RSS fetch (`feedparser` + `httpx`,
    browser User-Agent, ETag/Last-Modified). Full-text extraction fallback chain when
