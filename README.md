@@ -19,17 +19,19 @@ the original design spec [`project_plan.md`](./project_plan.md).
 - **Remaining open work:** W1/W2/W3 + relevance-weight tuning once real 👍/👎
   feedback data exists (`FeedbackLog` still empty — personalization terms
   untested in practice).
-- **Database snapshot:** 3,351 articles, 1,011 processed articles, and 817
-  stories. The server is currently stopped; start it with a newly supplied
-  `NEWS_AUTH_PASSWORD` if authenticated access is required.
-- **Clustering status:** two-stage routing is active by default: embeddings
-  retrieve candidates at 0.55 and the local verifier accepts only exact-event
-  matches. Set `NEWS_CLUSTER_MODE=cosine` for the former member-anchor path.
-  The first 40-pair benchmark improved precision at 0.64 from 0.50 to 0.667,
-  with recall moving from 0.636 to 0.545.
-  The full corrected 200-pair run at 0.55 completed without timeout: verifier
-  precision `0.826`, recall `0.691`, F1 `0.753` versus cosine precision
-  `0.712`, recall `0.855`, F1 `0.777`.
+- **Database snapshot (2026-10-11):** ~3,573 articles, 835 stories, 596
+  pending, 0 dead_letter. The server is **running in open mode** (no
+  `NEWS_AUTH_PASSWORD`) on port 8787, worker draining the backlog.
+- **Clustering status:** `NEWS_CLUSTER_MODE=cosine` is active — member-anchor
+  join at **0.64** (revive 0.62), no LLM verifier. The two-stage path
+  (0.55 retrieval + local verifier) is retained in code as a rollback option.
+  Benchmark (human-corrected 200-pair): cosine @0.55 retrieval P/R/F1
+  `0.712/0.855/0.777`; cosine @0.64 (production join) `0.750/0.436/0.552`;
+  two-stage (zero-reasoning + entity clause) `0.818/0.655/0.727`.
+  **F0.5:** two-stage `0.779` vs cosine @0.64 `0.656` — see findings.md →
+  "Assessment response" for why the cosine decision was made on a
+  retrieval-gate F1 that understates two-stage, and why the open question is
+  a latency budget, not accuracy.
 
 ## Quickstart
 

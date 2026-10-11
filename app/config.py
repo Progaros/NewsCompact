@@ -105,6 +105,12 @@ TIME_DECAY_HALF_LIFE_HOURS = float(os.getenv("NEWS_DECAY_HALF_LIFE_HOURS", "18")
 TIME_DECAY_MAX = float(os.getenv("NEWS_DECAY_MAX", "10.0"))
 # Learning rate for the feedback loop (small so one click can't dominate).
 FEEDBACK_ALPHA = float(os.getenv("NEWS_FEEDBACK_ALPHA", "0.1"))
+# Display-point cap on the user_interest term. tag_weights are not decayed,
+# so raw sums accumulate permanently (5 upvotes x 6 tags x W3 = +45 would
+# outrank max urgency W1*10 and max decay -10 for days). Clamping the
+# contribution to +/- INTEREST_CAP keeps personalization in the same band as
+# urgency and decay; raw weights stay intact for later re-derivation.
+INTEREST_CAP = float(os.getenv("NEWS_INTEREST_CAP", "10.0"))
 
 # --- Heads-up brief ------------------------------------------------------
 # The AI "Quick Heads Up" paragraph is regenerated at most once per TTL

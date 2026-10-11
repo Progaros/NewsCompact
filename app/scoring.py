@@ -5,7 +5,7 @@ components (quality, credibility, user_impact), weighted by normalized
 weights (sum to 1) so the base stays on a 0-10 scale:
 
     relevance = quality*WQ + credibility*WC + user_impact*WI     (0..10)
-    display   = relevance + urgency*W1 + user_interest*W3 - time_decay
+    display   = relevance + urgency*W1 + clamp(user_interest*W3, +/-INTEREST_CAP) - time_decay
 
 - quality      : per-story harness quality (1-10).
 - credibility  : corroboration — distinct sources backing the story
@@ -24,6 +24,11 @@ story ages (half-life = TIME_DECAY_HALF_LIFE_HOURS).
 Feedback nudges the user's tag weights by a small learning rate (FEEDBACK_ALPHA)
 so a single click can't dominate the feed; the raw vote is logged separately in
 FeedbackLog.
+
+tag_weights are never decayed, so the *contribution* of the interest term is
+clamped to +/- INTEREST_CAP display points in display_score (see
+user_interest_points). That bounds personalization against urgency (<= W1*10)
+and time decay (<= TIME_DECAY_MAX) while leaving the raw weights intact.
 """
 from __future__ import annotations
 
@@ -72,6 +77,16 @@ def time_decay_penalty(updated_at: str | None) -> float:
 
 def user_interest_score(story, tag_weights: dict[str, float]) -> float:
     return sum(tag_weights.get(t, 0.0) for t in _story_tags(story))
+
+
+def user_interest_points(story, tag_weights: dict[str, float]) -> float:
+    """The clamped display contribution of the interest term.
+
+    The raw tag-weight sum can drift over time (feedback is never decayed),
+    so ranking uses the contribution clamped to +/- INTEREST_CAP; the raw
+    sum is kept for transparency and for re-deriving ranks later."""
+    contrib = user_interest_score(story, tag_weights) * config.W3_INTEREST
+    return max(-config.INTEREST_CAP, min(config.INTEREST_CAP, contrib))
 
 
 def _clamp01(x: float) -> float:
@@ -124,11 +139,13 @@ def relevance_score(story, tag_weights: dict[str, float], source_count: int = 1,
         + config.W_RELEVANCE_CREDIBILITY * credibility
         + config.W_RELEVANCE_IMPACT * impact
     )
+    interest = user_interest_score(story, tag_weights)
     return {
         "quality": round(quality * 10, 1),
         "credibility": round(credibility * 10, 1),
         "user_impact": round(impact * 10, 1),
         "user_interest": round(interest, 2),
+        "user_interest_points": round(user_interest_points(story, tag_weights), 2),
         "base": round(base, 2),
     }
 
@@ -141,12 +158,11 @@ def display_score(story, tag_weights: dict[str, float], source_count: int = 1,
         urgency = float(metrics.get("urgency_level", 5))
     except (TypeError, ValueError):
         urgency = 5.0
-    interest = user_interest_score(story, tag_weights)
     decay = time_decay_penalty(story["updated_at"])
     return (
         rel["base"]
         + urgency * config.W1_URGENCY
-        + interest * config.W3_INTEREST
+        + user_interest_points(story, tag_weights)
         - decay
     )
 
