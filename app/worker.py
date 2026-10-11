@@ -24,7 +24,11 @@ def _proc_cpu() -> float:
 
 
 def run_cycle() -> dict:
-    """One full ingestion + pipeline pass. Returns a small summary."""
+    """One full ingestion + pipeline pass. Returns a small summary.
+
+    Callers outside the worker thread (e.g. the refresh endpoint) must use
+    ``run_cycle_locked`` — see below.
+    """
     result = {"ingest_new": 0, "processed": 0, "error": None}
     wall0 = time.perf_counter()
     cpu0 = _proc_cpu()
@@ -50,6 +54,13 @@ def run_cycle() -> dict:
         pipeline_wall, pipeline_cpu, result["processed"],
     )
     return result
+
+
+def run_cycle_locked() -> dict:
+    """run_cycle() with the cycle lock held — for endpoints called from a
+    foreign thread. Blocks until any scheduled cycle finishes, then runs."""
+    with _lock:
+        return run_cycle()
 
 
 def _loop() -> None:

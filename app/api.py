@@ -412,7 +412,9 @@ def create_app() -> FastAPI:
     @app.post("/api/refresh")
     def refresh():
         # Runs inline; fine for a local single-user app. Long but explicit.
-        return worker.run_cycle()
+        # Locked: an unlocked refresh would run concurrently with the
+        # scheduled worker cycle and double-process the same articles.
+        return worker.run_cycle_locked()
 
     @app.get("/api/feeds")
     def list_feeds():
