@@ -71,9 +71,9 @@ def main() -> None:
                 f"{name}: n={n} min={vals[0]:.3f} p10={pct(.1):.3f} "
                 f"p25={pct(.25):.3f} p50={pct(.5):.3f} p75={pct(.75):.3f} max={vals[-1]:.3f}"
             )
-        # split by content class to see if junk joins sit in a different range
+        # split by content class to see if broken joins sit in a different range
         for name, xs in (("centroid", cent_sims), ("best-member", mem_sims)):
-            for cls in ("ok", "thin", "junk"):
+            for cls in ("ok", "thin", "broken"):
                 vals = sorted(v for v, k in xs if k == cls)
                 if not vals:
                     continue

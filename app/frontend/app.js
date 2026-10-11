@@ -41,7 +41,8 @@ class StoryCard extends HTMLElement {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ story_id: d.id, kind }),
-    }).then(() => {
+    }).then((res) => {
+      if (Auth.unauth(res)) return; // not signed in → toast with Sign in
       this.querySelector(`.fb[data-kind="${kind}"]`)?.classList.add("active");
     });
   }
@@ -55,9 +56,15 @@ class StoryCard extends HTMLElement {
       `<span class="pill metric">${esc(m.impact_scale ?? "")}</span>` +
       `<span class="pill metric">${esc(m.status ?? "")}</span>`;
     const breakingPill = breaking ? `<span class="pill breaking">BREAKING</span>` : "";
+    // Badge shows BOTH the distinct-source count (news outlets) and the
+    // attached-article count, so the number above matches the list below
+    // (one outlet can contribute several articles -> the two differ).
     const srcCount = d.source_count ?? (d.articles || []).length;
+    const artCount = (d.articles || []).length;
     const sourcesPill =
-      `<span class="pill sources">${srcCount} ${srcCount === 1 ? "source" : "sources"}</span>`;
+      `<span class="pill sources" title="distinct sources · articles attached">`
+      + `${srcCount} ${srcCount === 1 ? "source" : "sources"} · `
+      + `${artCount} ${artCount === 1 ? "article" : "articles"}</span>`;
     const rel = d.relevance || {};
     const scoreRow =
       `<span class="rel-val">relevance ${rel.base ?? "–"}</span>` +
@@ -173,7 +180,11 @@ async function refresh() {
   refreshBtn.disabled = true;
   statusEl.textContent = "refreshing…";
   try {
-    await fetch("/api/refresh", { method: "POST" });
+    const res = await fetch("/api/refresh", { method: "POST" });
+    if (Auth.unauth(res)) {
+      statusEl.textContent = "sign-in needed";
+      return;
+    }
     await Promise.all([loadStories(), loadHeadsUp()]);
   } finally {
     refreshBtn.disabled = false;
@@ -201,6 +212,7 @@ function connectSSE() {
 
 // --- boot ------------------------------------------------------------------
 (async function boot() {
+  await Auth.init(); // session state + header sign-in/out before first render
   await loadStories();
   loadHeadsUp();
   connectSSE();

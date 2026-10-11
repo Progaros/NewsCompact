@@ -22,6 +22,7 @@ function avgPerDay(n7) {
 
 async function loadFeeds() {
   const res = await fetch("/api/feeds");
+  if (Auth.unauth(res)) return;
   const data = await res.json();
   renderFeeds(data);
 }
@@ -102,6 +103,7 @@ async function patch(id, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (Auth.unauth(res)) return;
   if (res.ok) {
     loadFeeds();
   } else {
@@ -115,6 +117,7 @@ async function setCategory(cat, enabled) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ category: cat === "(uncategorized)" ? null : cat, enabled }),
   });
+  if (Auth.unauth(res)) return;
   if (res.ok) {
     loadFeeds();
   } else {
@@ -124,6 +127,7 @@ async function setCategory(cat, enabled) {
 
 async function del(id) {
   const res = await fetch(`/api/feeds/${id}`, { method: "DELETE" });
+  if (Auth.unauth(res)) return;
   if (res.ok) {
     loadFeeds();
   } else {
@@ -138,6 +142,7 @@ async function previewTitle(url, titleEl) {
   if (!url || titleEl.value.trim()) return;
   try {
     const res = await fetch(`/api/feeds/preview?url=${encodeURIComponent(url)}`);
+    if (Auth.unauth(res)) return;
     if (res.ok) {
       const d = await res.json();
       if (d.title) titleEl.value = d.title;
@@ -172,6 +177,7 @@ addForm.addEventListener("submit", async (e) => {
       category: (fd.get("category") || "").trim() || null,
     }),
   });
+  if (Auth.unauth(res)) return;
   if (res.ok) {
     addForm.reset();
     loadFeeds();
@@ -181,4 +187,8 @@ addForm.addEventListener("submit", async (e) => {
 });
 
 document.getElementById("reload").addEventListener("click", loadFeeds);
-loadFeeds();
+
+(async function boot() {
+  await Auth.init();
+  loadFeeds();
+})();

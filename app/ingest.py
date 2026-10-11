@@ -13,7 +13,7 @@ from typing import Any
 import feedparser
 import httpx
 
-from . import config, db
+from . import config, content_quality, db
 
 log = logging.getLogger("news.ingest")
 
@@ -136,11 +136,13 @@ def _ingest_feed(feed: dict[str, Any]) -> int:
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO Article
-                    (feed_id, title, url, author, content_raw, hero_image_url, published_date, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (feed_id, title, url, author, content_raw, content_class,
+                     hero_image_url, published_date, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    feed["id"], title, link, author, content, hero,
+                    feed["id"], title, link, author, content,
+                    content_quality.classify(content), hero,
                     published, now,
                 ),
             )

@@ -102,3 +102,36 @@ def chat_json(messages: list[dict[str, Any]], **kwargs) -> Any:
     """Chat, expecting a JSON object/array back. Returns the parsed value."""
     raw = chat(messages, **kwargs)
     return _extract_json(raw)
+
+
+def chat_json_constrained(
+    schema: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    num_predict: int = 1024,
+) -> Any:
+    """Chat via the NATIVE /api/chat with a JSON ``format`` schema, so the model
+    is constrained to emit the requested object (kills prose-JSON / bare-list
+    failure modes structurally). Uses ``think: false`` — required, since on the
+    Qwen3 thinking models the thinking tokens eat the num_predict budget and
+    ``format`` is silently ignored (empty content).
+
+    Falls back to :func:`chat_json` when the constrained endpoint returns no
+    usable content (the known ``think`` interaction), so this never regresses
+    the prose path.
+    """
+    payload: dict[str, Any] = {
+        "model": config.CHAT_MODEL,
+        "messages": messages,
+        "format": schema,
+        "stream": False,
+        "think": False,
+        "options": {"temperature": temperature, "num_predict": num_predict},
+    }
+    r = _http().post("/api/chat", json=payload)
+    r.raise_for_status()
+    content = r.json()["message"]["content"]
+    if not (content or "").strip():
+        return chat_json(messages, temperature=temperature, max_tokens=num_predict)
+    return _extract_json(content)

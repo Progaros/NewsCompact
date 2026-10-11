@@ -3,13 +3,13 @@
 Design notes:
 - Embeddings are stored per article in the vec0 table `Article_Embeddings`,
   generated from *title-first* text (title + first 100 body words; title
-  only for short bodies) — raw-body embeddings over-merged junk articles.
-- Clustering is star/centroid mode: an article joins a story only if it is
-  similar to the story's centroid (mean of member embeddings), restricted to
-  stories updated within CLUSTER_WINDOW_HOURS. A stronger match can revive
-  a stale story from any age (see decide_story).
-- Prompt2 rewrites the whole story from its attached articles. If the combined
-  text is large, older articles are compressed to bullets (map-reduce fallback).
+  only for short bodies) — raw-body embeddings over-merged broken articles.
+- Clustering is member-anchor mode: an article joins a story only if it is
+  similar to at least one of the story's non-broken member embeddings (never
+  the mean), restricted to stories updated within CLUSTER_WINDOW_HOURS. A
+  stronger match can revive a stale story from any age (see decide_story).
+- Prompt2 uses full context for new stories and an incremental current-summary
+    plus new-article payload for multi-member stories.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import resource
 import statistics
 import struct
@@ -47,6 +48,98 @@ _P2_SYSTEM = (
     '"status": "Breaking|Ongoing|Resolved"}}. '
     "Summary is 2-4 factual sentences. Do not invent facts not present in the articles."
 )
+_P2_INCREMENTAL_SYSTEM = (
+    "You are updating an active news story. Review the Current Summary and the "
+    "New Article. If the New Article introduces material updates, rewrite the "
+    "summary in 2-4 factual sentences to incorporate them. If it adds no new "
+    "facts, return the Current Summary exactly as written. Preserve the story "
+    "headline unless the new facts require a clearer headline. Return the same "
+    "JSON object schema as requested."
+)
+# JSON schema for the constrained /api/chat call (see _P2_SYSTEM). Keeps the
+# prose-JSON parse failure structural: the model emits this shape, not text.
+_P2_IMPACTS = ("Local", "Regional", "National", "Global")
+_P2_STATUSES = ("Breaking", "Ongoing", "Resolved")
+_P2_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "headline": {"type": "string"},
+        "summary": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "quality": {"type": "integer", "minimum": 1, "maximum": 10},
+        "metrics": {
+            "type": "object",
+            "properties": {
+                "urgency_level": {"type": "integer", "minimum": 1, "maximum": 10},
+                "impact_scale": {"type": "string", "enum": list(_P2_IMPACTS)},
+                "status": {"type": "string", "enum": list(_P2_STATUSES)},
+            },
+            "required": ["urgency_level", "impact_scale", "status"],
+        },
+    },
+    "required": ["headline", "summary", "tags", "quality", "metrics"],
+}
+
+
+def _sanitize_metrics(metrics: Any) -> dict:
+    """Coerce Prompt2 metrics to valid values (log-only; never raises).
+
+    Today only *missing* keys were filled (``setdefault``) — an out-of-range
+    urgency or a misspelled enum passed straight through to the UI. Clamp +
+    default the present-but-invalid values instead so the SSE urgency check
+    and the frontend always see clean enums.
+    """
+    m = dict(metrics) if isinstance(metrics, dict) else {}
+    try:
+        urg = int(m.get("urgency_level"))
+    except (TypeError, ValueError):
+        urg = None
+    if urg is None or not (1 <= urg <= 10):
+        if m.get("urgency_level") is not None:
+            log.warning("prompt2: invalid urgency_level %r -> 5", m.get("urgency_level"))
+        m["urgency_level"] = 5
+    m["urgency_level"] = urg if (1 <= urg <= 10) else 5
+    if m.get("impact_scale") not in _P2_IMPACTS:
+        if m.get("impact_scale") is not None:
+            log.warning("prompt2: invalid impact_scale %r -> National", m.get("impact_scale"))
+        m["impact_scale"] = "National"
+    if m.get("status") not in _P2_STATUSES:
+        if m.get("status") is not None:
+            log.warning("prompt2: invalid status %r -\u003e Ongoing", m.get("status"))
+        m["status"] = "Ongoing"
+    return m
+
+
+# Sentence-ish splitter for the summary length check (loose; prose punctuation).
+_SENT_SPLIT = re.compile(r"[.!?]+\s*")
+
+
+def _validate_p2(story_id: int, out: dict) -> None:
+    """Sanity-check Prompt2 output and log violations (never raises).
+
+    "Store raw output on violation" is done via a WARNING log with the story
+    id + the offending fields: the diagnostics table is out of scope for now
+    and the log is greppable. Hard failures (no headline at all, no summary)
+    are downgraded to a fallback by the caller rather than failing the article.
+    """
+    headline = (out.get("headline") or "").strip()
+    summary = (out.get("summary") or "").strip()
+    problems = []
+    if not headline:
+        problems.append("empty headline")
+    elif len(headline) > 200:
+        problems.append(f"headline too long ({len(headline)} chars)")
+    if not summary:
+        problems.append("empty summary")
+    else:
+        n_sents = len([s for s in _SENT_SPLIT.split(summary) if s.strip()])
+        if n_sents < 1 or n_sents > 6:
+            problems.append(f"summary outside 1-6 sentences ({n_sents})")
+    if problems:
+        log.warning(
+            "prompt2 violation for story %s: %s | raw=%s",
+            story_id, "; ".join(problems), json.dumps(out, ensure_ascii=False)[:400],
+        )
 
 # Combined-text budget before we start compressing older articles to bullets.
 _CONTEXT_BUDGET_CHARS = int(os.getenv("NEWS_CONTEXT_BUDGET_CHARS", str(200_000)))
@@ -54,10 +147,10 @@ _CONTEXT_BUDGET_CHARS = int(os.getenv("NEWS_CONTEXT_BUDGET_CHARS", str(200_000))
 
 # --- text handling ---------------------------------------------------------
 # Title-first embedding text: title + first N words of body. A title is the
-# densest signal per token; embedding raw bodies over-merged junk articles
+# densest signal per token; embedding raw bodies over-merged broken articles
 # (short i.redd.it posts, image captions) — see findings.md.
-# Bodies classified as junk (bot-block chrome, social feed boilerplate) embed
-# to nearly identical vectors regardless of topic, so junk bodies are
+# Bodies classified as broken (bot-block chrome, social feed boilerplate)
+# embed to nearly identical vectors regardless of topic, so broken bodies are
 # NEVER used as embedding input — title only. That is what caused the
 # 25-member "Googlebooks" catch-all story in 2026-10-10.
 EMBED_MIN_BODY_WORDS = 20
@@ -68,7 +161,7 @@ def embed_text_for(article: dict[str, Any]) -> str:
     title = (article.get("title") or "").strip()
     content_raw = article.get("content_raw") or ""
     body = content_raw.split()
-    # Only 'ok' bodies carry topic signal; junk/thin/empty bodies are
+    # Only 'ok' bodies carry topic signal; broken/thin/empty bodies are
     # boilerplate (bot-block pages, social chrome) and would cluster by
     # boilerplate similarity instead of topic similarity.
     if classify_content(content_raw) != "ok" or len(body) < EMBED_MIN_BODY_WORDS:
@@ -154,26 +247,33 @@ def prompt1_assess(title: str, content: str) -> dict[str, Any]:
 
 
 # --- clustering ------------------------------------------------------------
-# Star/centroid mode: an article joins a story only if it is similar to the
-# story's *centroid* (mean of member embeddings), not to any single member.
-# Chain mode (matching any member) chained topic-level similarity into
-# 100+ article junk dumps — see findings.md. Centroids are recomputed per
-# call from member embeddings, excluding content_class='junk' members: junk
-# titles embed to generic blog-like vectors that would dilute the story's
-# identity and let more junk join (self-reinforcing catch-alls, 2026-10-10).
-# No schema change needed.
+# Member-anchor mode: an article joins a story only if it is similar to at
+# least one of the story's *anchor* (non-broken) members, never to the mean.
+# Centroid mode averaged member embeddings into a point in the "middle" of
+# the cluster, so articles ~0.40 from the real story sat ~0.60 from the mean
+# and joined at the 0.55 threshold — story 7 became a 23-article mush of
+# OpenAI-math/NIH/Nobel/funding blurbs (2026-10-11). Anchors exclude
+# content_class='broken' members (title-only boilerplate vectors); a
+# broken-only story falls back to all members so it still has an identity.
 KNN_CANDIDATES = int(os.getenv("NEWS_KNN_CANDIDATES", "50"))
-MAX_CENTROID_STORIES = int(os.getenv("NEWS_MAX_CENTROID_STORIES", "12"))
+MAX_CANDIDATE_STORIES = int(os.getenv("NEWS_MAX_CENTROID_STORIES", "12"))
 
 
-def _member_embeddings(conn, story_id: int, exclude_junk: bool) -> list:
-    sql = (
-        "SELECT e.embedding FROM Article_Embeddings e "
-        "JOIN Article a ON a.id = e.article_id WHERE a.story_id = ?"
-    )
-    if exclude_junk:
-        sql += " AND (a.content_class IS NULL OR a.content_class != 'junk')"
-    return conn.execute(sql, (story_id,)).fetchall()
+def _story_anchors(conn, story_id: int) -> list[list[float]]:
+    """Normalized anchor vectors: non-broken member embeddings, falling back
+    to all members when the story has no real-body anchor (broken-only)."""
+    def _vecs(exclude_broken: bool) -> list[list[float]]:
+        sql = (
+            "SELECT e.embedding FROM Article_Embeddings e "
+            "JOIN Article a ON a.id = e.article_id WHERE a.story_id = ?"
+        )
+        if exclude_broken:
+            sql += " AND (a.content_class IS NULL OR a.content_class != 'broken')"
+        rows = conn.execute(sql, (story_id,)).fetchall()
+        return [_normalize(_unpack_vec(bytes(r["embedding"]))) for r in rows]
+
+    vecs = _vecs(True)
+    return vecs if vecs else _vecs(False)
 
 
 def _unpack_vec(b: bytes) -> list[float]:
@@ -185,33 +285,19 @@ def _normalize(v: list[float]) -> list[float]:
     return [x / n for x in v]
 
 
-def _story_centroid(conn, story_id: int) -> list[float] | None:
-    rows = _member_embeddings(conn, story_id, exclude_junk=True)
-    if not rows:
-        # All members are junk (or none have embeddings yet): fall back to
-        # everything so the story still has an identity.
-        rows = _member_embeddings(conn, story_id, exclude_junk=False)
-    if not rows:
-        return None
-    acc = [0.0] * config.EMBED_DIM
-    for r in rows:
-        v = _unpack_vec(bytes(r["embedding"]))
-        for k in range(len(v)):
-            acc[k] += v[k]
-    n = len(rows)
-    return _normalize([x / n for x in acc])
+def decide_story(conn, vec: list[float], article: dict[str, Any] | None = None) -> tuple[int, bool, bool]:
+    """Return (story_id, created_new, revived). Creates a story when nothing clusters.
 
-
-def decide_story(conn, vec: list[float]) -> tuple[int, bool]:
-    """Return (story_id, created_new). Creates a story when nothing clusters.
-
-    Two-tier decision, both centroid-based (see note above):
-    1. Join a story updated within CLUSTER_WINDOW_HOURS with
-       centroid sim >= CLUSTER_SIM_THRESHOLD (normal clustering).
-    2. Otherwise, *revive* the best-matching story of any age with a stricter
-       centroid sim >= CLUSTER_REVIVE_SIM_THRESHOLD. The story's updated_at is
-       bumped by Prompt2 (which re-summarizes from all its articles, so the
-       old context survives into the new summary).
+    Two-tier decision, both member-anchor based (see note above). Each
+    candidate story is scored by the article's max similarity to any of the
+    story's anchor (non-broken) members. Tier 1: join a story updated within
+    CLUSTER_WINDOW_HOURS clearing CLUSTER_SIM_THRESHOLD. Tier 2: otherwise
+    *revive* the best-matching story of any age at CLUSTER_REVIVE_SIM_THRESHOLD
+    (slightly looser, so a resurfacing topic links to its old story instead of
+    spawning a clone). Prompt2 bumps updated_at and re-summarizes from all
+    articles, so the old context survives into the new summary.
+    re-summarizes from all articles, so the old context survives into the
+    new summary.
     """
     vec_u = _normalize(vec)
     q = db.pack_floats(vec)
@@ -220,7 +306,8 @@ def decide_story(conn, vec: list[float]) -> tuple[int, bool]:
         - datetime.timedelta(hours=config.CLUSTER_WINDOW_HOURS)
     ).strftime("%Y-%m-%d %H:%M:%S")
 
-    def _best_centroid_match(windowed: bool) -> tuple[int | None, float]:
+    def _candidate_sims(windowed: bool) -> list[tuple[int, float]]:
+        """[(story_id, max anchor sim)] best (nearest article) first."""
         sql = (
             "SELECT a.story_id, vec_distance_cosine(e.embedding, ?) AS dist "
             "FROM Article_Embeddings e JOIN Article a ON a.id = e.article_id "
@@ -233,46 +320,120 @@ def decide_story(conn, vec: list[float]) -> tuple[int, bool]:
         sql += " ORDER BY dist ASC LIMIT ?"
         params.append(KNN_CANDIDATES)
 
-        # Candidate stories: nearest article per story, best first.
-        candidates: dict[int, float] = {}
+        # Candidate stories: nearest article per story, best first, deduped.
+        # Safe to gate on the full member set: the nearest member is a
+        # member, so max-anchor-sim >= sim to it; if the nearest misses
+        # every threshold, no member can clear it.
+        seen: list[int] = []
+        seen_set: set[int] = set()
         for r in conn.execute(sql, params).fetchall():
             sid = r["story_id"]
-            if sid is not None and sid not in candidates:
-                candidates[sid] = 1.0 - float(r["dist"])
+            if sid is not None and sid not in seen_set:
+                seen_set.add(sid)
+                seen.append(sid)
 
-        best_story, best_sim = None, -1.0
-        for sid in list(candidates)[:MAX_CENTROID_STORIES]:
-            c = _story_centroid(conn, sid)
-            if c is None:
+        out: list[tuple[int, float]] = []
+        for sid in seen[:MAX_CANDIDATE_STORIES]:
+            anchors = _story_anchors(conn, sid)
+            if not anchors:
                 continue
-            sim = sum(a * b for a, b in zip(vec_u, c))
-            if sim > best_sim:
+            sim = max(sum(x * y for x, y in zip(vec_u, a)) for a in anchors)
+            out.append((sid, sim))
+        return out
+
+    def _best_clearing(cands, threshold: float) -> tuple[int | None, float]:
+        best_story, best_sim = None, -1.0
+        for sid, sim in cands:
+            if sim >= threshold and sim > best_sim:
                 best_story, best_sim = sid, sim
         return best_story, best_sim
 
+    def _verify_candidates(cands, threshold: float) -> tuple[int | None, float]:
+        """Verify high-recall candidates as exact event matches.
+
+        Cosine retrieval supplies recall; the verifier prevents same-topic
+        stories from merging. A missing article context falls back to the
+        cosine path so maintenance scripts and old callers remain compatible.
+        Verification failures reject that candidate rather than silently
+        weakening the precision guard.
+        """
+        if article is None:
+            return _best_clearing(cands, config.CLUSTER_SIM_THRESHOLD)
+        candidate_rows = []
+        ranked = sorted(cands, key=lambda item: item[1], reverse=True)
+        for sid, sim in ranked[:config.CLUSTER_VERIFY_MAX_CANDIDATES]:
+            if sim < threshold:
+                break
+            row = conn.execute(
+                "SELECT headline, summary FROM Story WHERE id = ?", (sid,)
+            ).fetchone()
+            if row is None:
+                continue
+            candidate_rows.append({
+                "id": sid,
+                "headline": row["headline"] or "",
+                "summary": row["summary"] or "",
+                "similarity": sim,
+            })
+        if not candidate_rows:
+            return None, -1.0
+        try:
+            decisions = _harness.classify_event_candidates(
+                article.get("title") or "",
+                _article_text(article),
+                candidate_rows,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("event verification failed for article %s", article.get("id"))
+            return None, -1.0
+        for candidate in candidate_rows:
+            sid = candidate["id"]
+            sim = candidate["similarity"]
+            classification = decisions.get(sid, "UNRELATED")
+            log.info(
+                "event verification article=%s story=%s sim=%.3f class=%s",
+                article.get("id"), sid, sim, classification,
+            )
+            if classification in {"EXACT_MATCH", "CONTINUING_DEVELOPMENT"}:
+                return sid, sim
+        return None, -1.0
+
     # --- tier 1: normal clustering inside the freshness window ---
-    best_story, best_sim = _best_centroid_match(windowed=True)
-    if best_story is not None and best_sim >= config.CLUSTER_SIM_THRESHOLD:
-        return best_story, False
+    tier_one = _candidate_sims(windowed=True)
+    if config.CLUSTER_MODE == "two_stage":
+        best_story, best_sim = _verify_candidates(
+            tier_one, config.CLUSTER_VERIFY_RETRIEVE_THRESHOLD
+        )
+    else:
+        best_story, best_sim = _best_clearing(tier_one, config.CLUSTER_SIM_THRESHOLD)
+    if best_story is not None:
+        return best_story, False, False
 
     # --- tier 2: revive a stale story with a stronger match ---
-    revive_story, revive_sim = _best_centroid_match(windowed=False)
-    if (
-        revive_story is not None
-        and revive_sim >= config.CLUSTER_REVIVE_SIM_THRESHOLD
-    ):
-        log.info("reviving stale story %d (centroid sim=%.3f)", revive_story, revive_sim)
-        return revive_story, False
+    tier_two = _candidate_sims(windowed=False)
+    if config.CLUSTER_MODE == "two_stage":
+        revive_story, revive_sim = _verify_candidates(
+            tier_two, config.CLUSTER_REVIVE_SIM_THRESHOLD
+        )
+    else:
+        revive_story, revive_sim = _best_clearing(
+            tier_two, config.CLUSTER_REVIVE_SIM_THRESHOLD
+        )
+    if revive_story is not None:
+        log.info("reviving story %d (anchor sim=%.3f)", revive_story, revive_sim)
+        return revive_story, False, True
 
     # create a new story
     cur = conn.execute("INSERT INTO Story (headline, summary, tags, metrics, quality_score) "
                        "VALUES (NULL, NULL, '[]', '{}', 5.0)")
-    return cur.lastrowid, True
+    return cur.lastrowid, True, False
 
 
 # --- Prompt 2: story-level -------------------------------------------------
 def prompt2_update_story(conn, story_id: int, quality: int | None = None,
-                         breaking: bool | None = None) -> int:
+                         breaking: bool | None = None,
+                         article_id: int | None = None,
+                         force_full: bool = False) -> int:
     """Rewrite the story from its articles. Returns the prompt payload size
     in chars (0 when nothing to do) — used for load accounting."""
     articles = conn.execute(
@@ -282,24 +443,41 @@ def prompt2_update_story(conn, story_id: int, quality: int | None = None,
     if not articles:
         return 0
     arts = [dict(a) for a in articles]
-    combined = _combined_story_text(arts)
-    titles = "\n".join(f"- {a.get('title')}" for a in arts)
-    user = f"Attached source articles:\n{titles}\n\nFull article text:\n{combined}"
-    out = ollama.chat_json(
-        [{"role": "system", "content": _P2_SYSTEM}, {"role": "user", "content": user}],
-        temperature=0.2,
-    )
-    # The model sometimes wraps the object in an array ([{...}]) or returns a
-    # bare list. Recover a dict when possible; otherwise raise so the article
-    # is rolled back and retried next cycle (consistent with the prose case).
+    story = conn.execute(
+        "SELECT headline, summary FROM Story WHERE id = ?", (story_id,)
+    ).fetchone()
+    incremental = len(arts) >= 2 and story is not None and not force_full
+    if incremental:
+        new_article = next((a for a in arts if a.get("id") == article_id), arts[-1])
+        new_body = " ".join((_article_text(new_article) or "").split()[:1500])
+        user = (
+            f"Current Headline:\n{story['headline'] or new_article.get('title', '')}\n\n"
+            f"Current Summary:\n{story['summary'] or '(none)'}\n\n"
+            f"New Article Title:\n{new_article.get('title', '')}\n\n"
+            f"New Article Text:\n{new_body}"
+        )
+        system = _P2_INCREMENTAL_SYSTEM
+    else:
+        combined = _combined_story_text(arts)
+        titles = "\n".join(f"- {a.get('title')}" for a in arts)
+        user = f"Attached source articles:\n{titles}\n\nFull article text:\n{combined}"
+        system = _P2_SYSTEM
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    # Schema-constrained (native /api/chat + format): the model emits the
+    # object, so the prose-JSON / bare-list parse failure is killed
+    # structurally. chat_json_constrained falls back to prose chat_json when
+    # the constrained endpoint returns empty content (the Qwen ``think``
+    # interaction), so this never regresses the old path.
+    out = ollama.chat_json_constrained(_P2_SCHEMA, messages, temperature=0.2)
+    # The prose fallback can still wrap the object in an array ([{...}]) or
+    # return a bare list. Recover a dict when possible; otherwise raise so the
+    # article is rolled back and retried next cycle (consistent with prose).
     if isinstance(out, list):
         out = next((x for x in out if isinstance(x, dict)), None)
     if not isinstance(out, dict):
         raise ValueError(f"Prompt2 returned non-object JSON: {str(out)[:200]!r}")
-    metrics = out.get("metrics", {}) or {}
-    metrics.setdefault("urgency_level", 5)
-    metrics.setdefault("impact_scale", "National")
-    metrics.setdefault("status", "Ongoing")
+    _validate_p2(story_id, out)
+    metrics = _sanitize_metrics(out.get("metrics", {}))
     tags = out.get("tags", [])
     if not isinstance(tags, list):
         tags = []
@@ -307,7 +485,7 @@ def prompt2_update_story(conn, story_id: int, quality: int | None = None,
     # agrees across LLM spellings ("AI" vs "ai", "machine-learning", ...).
     tags = normalize_tags(tags)[:6]
     # Story quality = robust aggregate (median) of the member per-article
-    # qualities stored by the harness. Junk fetches are scored from their
+    # qualities stored by the harness. Broken fetches are scored from their
     # headline (see content_quality), so one bot-block page can no longer drag
     # a real story down — this replaces the old last-writer-wins behaviour.
     # Fallback for stories whose articles predate the per-article quality column.
@@ -322,7 +500,8 @@ def prompt2_update_story(conn, story_id: int, quality: int | None = None,
             final_quality = 5.0
     headline = (out.get("headline") or "").strip() or arts[-1].get("title", "Untitled")
     summary = (out.get("summary") or "").strip()
-    # A breaking boolean forces status so the SSE urgency check is consistent.
+    # A breaking boolean forces status so the SSE urgency check is consistent
+    # (sanitized already; keep it last so it can't be clobbered by the enum check).
     if breaking:
         metrics["status"] = "Breaking"
 
@@ -386,8 +565,10 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
         # unclustered backlog: no AI spend until re-enabled.
         pending = conn.execute(
             "SELECT a.* FROM Article a JOIN Feed f ON f.id = a.feed_id "
-            "WHERE a.story_id IS NULL AND f.enabled = 1 ORDER BY a.id LIMIT ?",
-            (limit,),
+            "WHERE a.story_id IS NULL AND f.enabled = 1 "
+            "AND COALESCE(a.content_class, 'empty') != 'broken' "
+            "AND COALESCE(a.pipeline_failures, 0) < ? ORDER BY a.id LIMIT ?",
+            (config.PIPELINE_MAX_FAILURES, limit),
         ).fetchall()
     for article in pending:
         art = dict(article)
@@ -413,7 +594,7 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
                     )
                 t_embed = time.perf_counter() - t0
                 t0 = time.perf_counter()
-                new_story_id, created = decide_story(conn, vec)
+                new_story_id, created, revived = decide_story(conn, vec, art)
                 t_knn = time.perf_counter() - t0
                 story_id = new_story_id
                 conn.execute(
@@ -438,19 +619,25 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
                 t_harness = time.perf_counter() - t0
                 # Persist the per-article quality + content class. Story quality
                 # is the median of these across member articles (see prompt2),
-                # so a single junk fetch can't drag a real story down.
+                # so a single broken fetch can't drag a real story down.
                 conn.execute(
-                    "UPDATE Article SET quality = ?, content_class = ? WHERE id = ?",
-                    (assessment.get("quality"), assessment.get("content_class"), art["id"]),
+                    "UPDATE Article SET quality = ? WHERE id = ?",
+                    (assessment.get("quality"), art["id"]),
                 )
                 t0 = time.perf_counter()
                 p2_chars = prompt2_update_story(
                     conn, story_id,
                     quality=assessment.get("quality"), breaking=assessment.get("breaking"),
+                    article_id=art["id"],
+                    force_full=revived,
                 )
                 t_p2 = time.perf_counter() - t0
             # notify on breaking stories
             with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE Article SET pipeline_failures = 0 WHERE id = ?",
+                    (art["id"],),
+                )
                 s = conn.execute("SELECT * FROM Story WHERE id=?", (story_id,)).fetchone()
                 if s is not None:
                     metrics = json.loads(s["metrics"] or "{}")
@@ -468,7 +655,21 @@ def process_new_articles(limit: int = 50, emit: Any = None) -> int:
             # Un-assign so the article is retried next cycle; drop the
             # placeholder story if this cycle created it.
             with db.get_conn() as conn:
-                conn.execute("UPDATE Article SET story_id = NULL WHERE id = ?", (art["id"],))
+                conn.execute(
+                    "UPDATE Article SET story_id = NULL, quality = NULL, "
+                    "content_class = NULL, pipeline_failures = "
+                    "COALESCE(pipeline_failures, 0) + 1 WHERE id = ?",
+                    (art["id"],),
+                )
+                failures = conn.execute(
+                    "SELECT pipeline_failures FROM Article WHERE id = ?",
+                    (art["id"],),
+                ).fetchone()["pipeline_failures"]
+            if failures >= config.PIPELINE_MAX_FAILURES:
+                log.error(
+                    "dead-letter article %s after %d pipeline failures",
+                    art["id"], failures,
+                )
             if created and story_id is not None:
                 with db.get_conn() as conn:
                     conn.execute("DELETE FROM Story WHERE id = ?", (story_id,))

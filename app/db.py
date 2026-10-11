@@ -13,6 +13,7 @@ from pathlib import Path
 import sqlite_vec
 
 from . import config
+from .content_quality import classify as classify_content
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -55,11 +56,15 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
     ``CREATE TABLE IF NOT EXISTS`` won't touch an existing table, so newly
     added columns (e.g. Article.quality / content_class) are added here for
-    databases that predate them.
+    databases that predate them. Also migrates renamed class values:
+    Article.content_class 'junk' → 'broken' (2026-10-11).
     """
     for table, column, ddl in (
         ("Article", "quality", "ALTER TABLE Article ADD COLUMN quality REAL"),
         ("Article", "content_class", "ALTER TABLE Article ADD COLUMN content_class TEXT"),
+        # Consecutive Prompt2-cycle failures (dead-letter counter, see
+        # config.PIPELINE_MAX_FAILURES). NULL == never failed.
+        ("Article", "pipeline_failures", "ALTER TABLE Article ADD COLUMN pipeline_failures INTEGER"),
         # Feed management: disabling skips AI ingestion only — RSS fetch + article
         # rows still happen, so volume stats stay live for disabled feeds too.
         ("Feed", "enabled", "ALTER TABLE Feed ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"),
@@ -67,6 +72,19 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(ddl)
+    # Class-value rename (no-op once applied): new writes never store 'junk'.
+    conn.execute("UPDATE Article SET content_class = 'broken' WHERE content_class = 'junk'")
+    # Backfill the deterministic class for articles ingested before the
+    # ingest-time classification change. This is local CPU work and makes NULL
+    # mean genuinely unknown rather than merely old backlog.
+    rows = conn.execute(
+        "SELECT id, content_raw FROM Article WHERE content_class IS NULL"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE Article SET content_class = ? WHERE id = ?",
+            (classify_content(row["content_raw"]), row["id"]),
+        )
 
 
 def init_db() -> None:

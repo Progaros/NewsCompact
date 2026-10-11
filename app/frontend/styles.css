@@ -155,3 +155,35 @@ table.feeds .muted { color: var(--muted); font-size: 12px; }
 table.feeds .toggle { min-width: 48px; font-size: 11px; font-weight: 700; }
 table.feeds tr.feed-on .toggle { border-color: var(--accent-2); color: var(--accent-2); }
 table.feeds .del { padding: 4px 8px; font-size: 12px; }
+
+/* --- auth: read-only mode, login modal, toasts --------------------------- */
+/* Not signed in → page is read-only: no 👍/👎, no Feeds subpage link. */
+body.unsigned-in .interaction { display: none; }
+body.unsigned-in #feeds-link { display: none; }
+
+#login-modal {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.login-panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px 24px;
+  width: min(380px, 90vw); box-shadow: 0 10px 40px rgba(0, 0, 0, .5);
+}
+.login-panel h2 { margin: 0 0 8px; font-size: 17px; }
+.login-panel form { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.login-panel input {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 14px;
+}
+.login-panel input:focus { outline: none; border-color: var(--accent); }
+.login-row { display: flex; justify-content: flex-end; gap: 8px; }
+.login-error { color: var(--danger); font-size: 13px; margin: 0; }
+
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 16px; font-size: 14px;
+  display: flex; align-items: center; gap: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .45); z-index: 60;
+}

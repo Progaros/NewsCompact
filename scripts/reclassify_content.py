@@ -1,12 +1,13 @@
 """Re-classify stored article bodies and reprocess the ones that flipped.
 
 The content_quality.classify() rule changed (2026-10-10): a page whose chrome
-signals REPEAT across the body (social feed, "Comment permalink" xN) is junk,
-but an article that merely opens with one chrome line followed by real text
-("Reading time | Post permalink In the spring, we hit ...") now classifies ok
-or thin by length. Rows whose class flips need a fresh embed (junk rows were
-embedded title-only; ok/thin rows embed title + body) and a fresh harness
-score (junk rows were scored from the headline).
+signals REPEAT across the body (social feed, "Comment permalink" xN) is
+broken, but an article that merely opens with one chrome line followed by
+real text ("Reading time | Post permalink In the spring, we hit ...") now
+classifies ok
+or thin by length. Rows whose class flips need a fresh embed (broken rows
+were embedded title-only; ok/thin rows embed title + body) and a fresh harness
+score (broken rows were scored from the headline).
 
 So for every classified row whose class changed: delete its vec0 row, null
 quality + content_class, and unassign it — the pipeline re-processes

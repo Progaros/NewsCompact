@@ -32,12 +32,27 @@ TAG_ALIASES = {
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# Common Latin diacritics → ASCII, mapped *before* the non-alnum strip so
+# accented tags keep their letters: "Identitätengesetz" → "identitaengesetz"
+# (one tag) instead of "identita tengesetz" (two tags). ß/æ map to two
+# chars, so the table is built by hand rather than with str.maketrans.
+_DIACRITICS = {
+    ord(k): v
+    for k, v in {
+        "ä": "a", "ö": "o", "ü": "u", "ß": "ss",
+        "é": "e", "è": "e", "ê": "e", "ë": "e",
+        "à": "a", "ù": "u", "ç": "c", "ñ": "n",
+        "å": "a", "ø": "o", "æ": "ae",
+    }.items()
+}
+
 
 def normalize_tag(tag: str) -> str:
     """Lowercase, collapse punctuation/whitespace, apply alias table.
 
     Returns "" when nothing survives (e.g. a bare punctuation tag)."""
     t = str(tag).strip().lower()
+    t = t.translate(_DIACRITICS)
     t = _NON_ALNUM.sub(" ", t).strip()
     t = " ".join(t.split())
     if t in TAG_ALIASES:

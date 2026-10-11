@@ -2,18 +2,34 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import sqlite3
+import threading
+import time
+from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 
-from . import bus, config, db, scoring, worker
+from . import auth, bus, config, db, scoring, worker
+
+log = logging.getLogger("news.heads-up")
 
 _FRONTEND_DIR = Path(__file__).with_name("frontend")
+
+# "Quick Heads Up" brief cache: {"text": str, "ts": epoch}. The LLM call is
+# slow, so the brief is only regenerated once it's older than the TTL
+# (config.HEADS_UP_TTL_MINUTES); fresh requests get the stored text back.
+_heads_up_cache: dict = {}
 
 
 class Feedback(BaseModel):
@@ -44,6 +60,10 @@ class FeedUpdate(BaseModel):
 class CategoryUpdate(BaseModel):
     category: str | None
     enabled: int
+
+
+class Login(BaseModel):
+    password: str
 
 
 def _load_tags(raw: str) -> list[str]:
@@ -95,13 +115,199 @@ def _story_payload(conn, story, source_count: int) -> dict:
     }
 
 
+# --- Heads-up brief: generation, ntfy push, and the scheduled push loop ---
+
+def _build_brief(force: bool = False) -> tuple[str, bool]:
+    """Generate the "Quick Heads Up" brief, honoring the TTL cache.
+
+    Returns ``(text, cached)``. With ``force=False`` a stored brief younger
+    than the TTL is returned as-is (no LLM call). With ``force=True`` (used
+    by the scheduled push) it always regenerates. Failures are never cached
+    so an Ollama hiccup doesn't pin the endpoint to an error for the whole
+    TTL. Shared by the ``/api/heads-up`` endpoint and the scheduler.
+    """
+    from . import ollama
+
+    now = time.time()
+    ttl = config.HEADS_UP_TTL_MINUTES * 60
+    if not force and _heads_up_cache and now - _heads_up_cache["ts"] < ttl:
+        return _heads_up_cache["text"], True
+
+    profile = scoring.get_user_profile()
+    with db.get_conn() as conn:
+        stories = conn.execute("SELECT * FROM Story").fetchall()
+        counts = _source_counts(conn)
+    tw, prefs = profile["tag_weights"], profile["preferences"]
+    ranked = sorted(
+        stories,
+        key=lambda s: scoring.display_score(s, tw, counts.get(s["id"], 0), prefs),
+        reverse=True,
+    )[:5]
+    if not ranked:
+        return "No stories yet. The worker is ingesting.", False
+
+    lines = []
+    for s in ranked:
+        m = _load_json(s["metrics"])
+        lines.append(
+            f"- {s['headline']} | urgency={m.get('urgency_level')} "
+            f"status={m.get('status')} | {s['summary']}"
+        )
+    try:
+        text = ollama.chat(
+            [
+                {"role": "system", "content": "Write a concise 2-3 sentence news brief "
+                                               "in plain text. Be factual, no preamble."},
+                {"role": "user", "content": "Summarize these top stories for a reader:\n" + "\n".join(lines)},
+            ],
+            temperature=0.2,
+        )
+    except Exception as e:  # noqa: BLE001
+        text = f"(heads-up unavailable: {e})"
+    text = text.strip()
+    # Don't cache failures — a hiccup with Ollama shouldn't lock the
+    # endpoint into an error message for the whole TTL.
+    if not text.startswith("(heads-up unavailable"):
+        _heads_up_cache["text"] = text
+        _heads_up_cache["ts"] = now
+    return text, False
+
+
+def _send_ntfy(text: str) -> None:
+    """Push the brief to the phone over ntfy (POST body = message text)."""
+    import httpx
+
+    try:
+        r = httpx.post(
+            config.HEADS_UP_NTFY_URL,
+            content=text.encode("utf-8"),
+            headers={"Title": config.HEADS_UP_NTFY_TITLE},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        log.warning("heads-up ntfy push to %s failed: %s", config.HEADS_UP_NTFY_URL, e)
+
+
+_SCHED_POLL_SECONDS = 15      # how often the scheduler wakes to check due times
+_SCHED_CATCHUP_MINUTES = 5    # a time still fires if it fell within this window
+
+
+def _parse_hhmm(t: str) -> int | None:
+    """Parse "HH:MM" to minutes-since-midnight, or None if malformed."""
+    parts = t.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
+    return h * 60 + m
+
+
+def _fire(time_str: str) -> None:
+    """One scheduled firing: regenerate a fresh brief and push it to ntfy."""
+    text, _cached = _build_brief(force=True)
+    # On an LLM failure or an empty DB the fresh call returns a sentinel;
+    # _build_brief never caches those, so fall back to the last good brief.
+    if not text or text.startswith("(heads-up unavailable") or text.startswith("No stories"):
+        text = _heads_up_cache.get("text") or ""
+    if not text:
+        log.info("heads-up: skip scheduled push at %s (no brief yet)", time_str)
+        return
+    _send_ntfy(text)
+    log.info("heads-up: pushed scheduled brief (schedule %s)", time_str)
+
+
+_sched_stop = threading.Event()
+
+
+def _sched_tick(fired: dict[str, str]) -> None:
+    """Fire any configured times that have come due (once per time per day)."""
+    times = config.HEADS_UP_NTFY_TIMES
+    if not times or not config.HEADS_UP_NTFY_URL:
+        return
+    now = datetime.now()
+    today = now.date().isoformat()
+    now_min = now.hour * 60 + now.minute
+    for t in times:
+        t_min = _parse_hhmm(t)
+        if t_min is None:
+            log.warning("heads-up: skipping malformed schedule time %r", t)
+            continue
+        delta = now_min - t_min
+        if delta < 0 or delta > _SCHED_CATCHUP_MINUTES:
+            continue  # not yet, or already well past (don't fire a stale time)
+        if fired.get(t) == today:
+            continue  # already fired this time today
+        _fire(t)
+        fired[t] = today
+
+
+def _sched_loop() -> None:
+    fired: dict[str, str] = {}  # "HH:MM" -> date (ISO) it last fired
+    while not _sched_stop.is_set():
+        try:
+            _sched_tick(fired)
+        except Exception:  # noqa: BLE001
+            log.exception("heads-up scheduler tick failed")
+        _sched_stop.wait(_SCHED_POLL_SECONDS)
+
+
+_sched_started = False
+
+
+def start_heads_up_scheduler() -> None:
+    """Start the background thread that fires the scheduled ntfy push(es)."""
+    global _sched_started
+    if _sched_started:
+        return
+    _sched_started = True
+    threading.Thread(target=_sched_loop, daemon=True).start()
+
+
+# --- Auth middleware (default-secure) ---------------------------------------
+
+def _is_public(request: Request) -> bool:
+    """Paths reachable without a session. Reads only — the main page must
+    stay fully readable (and live) for a not-signed-in viewer; everything
+    else 401s. When auth is disabled (no NEWS_AUTH_PASSWORD) this is moot."""
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        return True
+    if path in ("/api/auth/login", "/api/auth/session"):
+        return True
+    if request.method == "GET":
+        # story list + detail (the list endpoint also serves the load-more
+        # pagination), heads-up brief, health, and the SSE stream
+        if path == "/api/stories" or path.startswith("/api/stories/"):
+            return True
+        if path in ("/api/heads-up", "/api/health", "/api/events"):
+            return True
+    return False
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="AI News Aggregator")
+
+    @app.middleware("http")
+    async def _auth_middleware(request: Request, call_next):
+        if auth.auth_enabled() and not _is_public(request):
+            if not auth.is_authenticated(request.cookies.get(config.AUTH_COOKIE)):
+                # Browser navigation to the management page → home; API
+                # clients get a machine-readable 401 for the toast.
+                if request.url.path == "/feeds":
+                    return RedirectResponse("/", status_code=303)
+                return JSONResponse(status_code=401, content={"detail": "unauthenticated"})
+        return await call_next(request)
 
     @app.on_event("startup")
     def _startup() -> None:
         db.init_db()
         worker.start()
+        start_heads_up_scheduler()
 
     @app.get("/")
     def index():
@@ -134,40 +340,53 @@ def create_app() -> FastAPI:
 
     @app.get("/api/heads-up")
     def heads_up():
-        """AI paragraph summarizing the top critical stories."""
-        from . import ollama
+        """AI paragraph summarizing the top critical stories.
 
-        profile = scoring.get_user_profile()
-        with db.get_conn() as conn:
-            stories = conn.execute("SELECT * FROM Story").fetchall()
-            counts = _source_counts(conn)
-        tw, prefs = profile["tag_weights"], profile["preferences"]
-        ranked = sorted(
-            stories,
-            key=lambda s: scoring.display_score(s, tw, counts.get(s["id"], 0), prefs),
-            reverse=True,
-        )[:5]
-        if not ranked:
-            return {"text": "No stories yet. The worker is ingesting."}
-        lines = []
-        for s in ranked:
-            m = _load_json(s["metrics"])
-            lines.append(
-                f"- {s['headline']} | urgency={m.get('urgency_level')} "
-                f"status={m.get('status')} | {s['summary']}"
+        Cached: if the stored brief is younger than the TTL
+        (NEWS_HEADS_UP_TTL_MINUTES, default 3 min) it is returned without
+        re-running the LLM. The frontend only calls this on page open, so the
+        brief refreshes at most once per TTL while the page is open.
+        """
+        text, cached = _build_brief()
+        return {"text": text, "cached": cached}
+
+    @app.post("/api/auth/login")
+    def login(body: Login, request: Request):
+        ip = request.client.host if request.client else "unknown"
+        if auth.auth_enabled():
+            if auth.login_throttled(ip):
+                raise HTTPException(429, "too many failed attempts — try again shortly")
+            if not auth.check_password(body.password):
+                auth.record_failure(ip)
+                raise HTTPException(401, "incorrect password")
+            auth.clear_failures(ip)
+        resp = JSONResponse({"ok": True})
+        if auth.auth_enabled():
+            resp.set_cookie(
+                config.AUTH_COOKIE,
+                auth.create_session(),
+                max_age=int(config.AUTH_SESSION_HOURS * 3600),
+                httponly=True,
+                samesite="lax",
+                path="/",
+                secure=config.PUBLIC_BASE.startswith("https"),
             )
-        try:
-            text = ollama.chat(
-                [
-                    {"role": "system", "content": "Write a concise 2-3 sentence news brief "
-                                                   "in plain text. Be factual, no preamble."},
-                    {"role": "user", "content": "Summarize these top stories for a reader:\n" + "\n".join(lines)},
-                ],
-                temperature=0.2,
-            )
-        except Exception as e:  # noqa: BLE001
-            text = f"(heads-up unavailable: {e})"
-        return {"text": text.strip()}
+        return resp
+
+    @app.post("/api/auth/logout")
+    def logout(request: Request):
+        auth.destroy_session(request.cookies.get(config.AUTH_COOKIE))
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(config.AUTH_COOKIE, path="/")
+        return resp
+
+    @app.get("/api/auth/session")
+    def session(request: Request):
+        """Boot probe: lets the frontend know whether to show the sign-in UI."""
+        return {
+            "auth_enabled": auth.auth_enabled(),
+            "authenticated": auth.is_authenticated(request.cookies.get(config.AUTH_COOKIE)),
+        }
 
     @app.post("/api/feedback")
     def feedback(body: Feedback):
@@ -332,7 +551,24 @@ def create_app() -> FastAPI:
         with db.get_conn() as conn:
             arts = conn.execute("SELECT count(*) c FROM Article").fetchone()["c"]
             sts = conn.execute("SELECT count(*) c FROM Story").fetchone()["c"]
-        return {"ok": True, "articles": arts, "stories": sts}
+            pending = conn.execute(
+                "SELECT count(*) c FROM Article a JOIN Feed f ON f.id = a.feed_id "
+                "WHERE a.story_id IS NULL AND f.enabled = 1 "
+                "AND COALESCE(a.pipeline_failures, 0) < ?",
+                (config.PIPELINE_MAX_FAILURES,),
+            ).fetchone()["c"]
+            dead_letter = conn.execute(
+                "SELECT count(*) c FROM Article WHERE story_id IS NULL "
+                "AND COALESCE(pipeline_failures, 0) >= ?",
+                (config.PIPELINE_MAX_FAILURES,),
+            ).fetchone()["c"]
+        return {
+            "ok": True,
+            "articles": arts,
+            "stories": sts,
+            "pending": pending,
+            "dead_letter": dead_letter,
+        }
 
     @app.get("/api/events")
     def events():

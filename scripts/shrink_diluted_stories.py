@@ -1,11 +1,11 @@
 """Shrink diluted stories: unassign members below the join threshold.
 
-Background: the story centroid is the mean of member embeddings, so junk
+Background: the story centroid is the mean of member embeddings, so broken
 titles (embedded title-only) that landed in a story pulled its centroid
 toward themselves — a self-reinforcing dilution that kept absorbing more
-junk (e.g. story 7 grew to 16 mixed members). Since the centroid is now
-computed from *non-junk* members only (app/pipeline.py, 2026-10-10), a
-member that sits below CLUSTER_SIM_THRESHOLD relative to the junk-free
+broken fetches (e.g. story 7 grew to 16 mixed members). Since the centroid is now
+computed from *non-broken* members only (app/pipeline.py, 2026-10-10), a
+member that sits below CLUSTER_SIM_THRESHOLD relative to the broken-free
 centroid is not really part of the story.
 
 This migration walks each story and unassigns (story_id = NULL) the
@@ -69,10 +69,10 @@ def main() -> None:
             }
 
             def centroid():
-                # Mirror pipeline._story_centroid: non-junk members first,
+                # Mirror pipeline._story_anchors: non-broken members first,
                 # fall back to everything.
                 sel = [m["vec"] for m in members.values()
-                       if m["vec"] and m["class"] != "junk"]
+                       if m["vec"] and m["class"] != "broken"]
                 if not sel:
                     sel = [m["vec"] for m in members.values() if m["vec"]]
                 if not sel:
