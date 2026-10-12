@@ -1,7 +1,7 @@
 [project]
 name = "news-aggregator-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local-first RSS aggregator that clusters, summarizes and ranks news stories with a local Ollama LLM"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.143.0",
@@ -13,3 +13,9 @@ dependencies = [
     "trafilatura>=2.3.1",
     "uvicorn[standard]>=0.54.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

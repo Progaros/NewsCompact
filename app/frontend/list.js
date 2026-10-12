@@ -1,79 +1,87 @@
-/* Compact read-only article list (/list) — plain fetch + DOM. No frameworks. */
+/* Article list (/list): every ingested article with its pipeline timings. */
 
 const listEl = document.getElementById("article-list");
 const statusEl = document.getElementById("list-status");
 const moreBtn = document.getElementById("load-more");
 const sortBtn = document.getElementById("sort-toggle");
+const searchEl = document.getElementById("search");
+const statusFilterEl = document.getElementById("status-filter");
 
-const PAGE_SIZE = 100; // rows per "Load more" click; API takes cumulative limit
-
-function esc(s) {
-  return (s || "").toString().replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
-// created_at is naive-UTC ("YYYY-MM-DD HH:MM:SS") → parse as UTC for display.
-function fmtDate(s) {
-  if (!s) return "–";
-  const d = new Date(s.replace(" ", "T") + "Z");
-  return isNaN(d) ? s : d.toLocaleString();
-}
-
-// Pipeline stage wall time (seconds) → "1.2s"; null (never run) → "–".
-function fmtSec(v) {
-  if (v == null) return "–";
-  const n = Number(v);
-  return isNaN(n) ? "–" : n.toFixed(1) + "s";
-}
-
-// Source cell: "site · author · published date" — skips empty parts.
-function fmtSource(a) {
-  const parts = [a.feed, a.author, a.published_date].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "–";
-}
+const PAGE_SIZE = 100; // rows per "Load more"; the API takes a cumulative limit
 
 let order = "newest";
 let shown = 0;
-let totalCount = 0; // server total (data.count), source of truth
+let totalCount = 0;
 let articles = [];
+let workerStatus = {};
 let loadingMore = false;
 
+const COLUMNS = [
+  ["wait", "Wait", "Queue wait: first seen → pipeline start (ingest of other feeds + articles ahead)"],
+  ["embed", "Embed", "Embedding call"],
+  ["cluster", "Cluster", "Vector search + LLM event verification"],
+  ["harness", "Harness", "Quality/breaking LLM call"],
+  ["story", "Story", "Prompt 2: story headline/summary update"],
+  ["wall", "Work", "Pipeline work for this article (sum of the stages)"],
+  ["latency", "Latency", "First seen → in a story (wait + work)"],
+  ["merge", "Merge", "Recall merge that moved this article into another story (verifier + story rewrite)"],
+];
+
+function median(values) {
+  const v = values.filter((x) => x != null).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+function sourceText(a) {
+  const parts = [a.feed, a.author, a.published_date ? fmtShort(a.published_date) : null].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "–";
+}
+
 function statusText() {
-  return `showing ${Math.min(shown, articles.length)}/${totalCount} articles`;
+  let text = `showing ${Math.min(shown, articles.length)}/${totalCount} articles`;
+  const work = median(articles.map((a) => a.timings.wall));
+  const latency = median(articles.map((a) => a.timings.latency));
+  if (latency != null) text += ` · median work ${fmtDuration(work)}, latency ${fmtDuration(latency)}`;
+  const w = workerStatus;
+  if (w.ingest_running) text += " · ingest running";
+  else if (w.ingest_last_started) {
+    text += ` · last ingest ${timeAgo(w.ingest_last_started)} (${fmtDuration(w.ingest_last_seconds)}, ${w.ingest_last_new} new)`;
+  }
+  text += w.pipeline_running ? " · pipeline running" : " · pipeline idle";
+  if (w.merge_last_finished) {
+    text += ` · last merge pass ${timeAgo(w.merge_last_finished)} (${w.merge_last_checked} checked, ${w.merge_last_merged} merged)`;
+  }
+  if (w.retention_last_run) {
+    text += ` · cleanup ${timeAgo(w.retention_last_run)} (${w.retention_last_deleted_articles} articles removed)`;
+  }
+  return text;
 }
 
 function render() {
   const table = document.createElement("table");
   table.className = "feeds";
   table.innerHTML = `<thead><tr>
-      <th>First seen</th><th>Title</th><th title="Article feed · author · published date">Source</th>
-      <th title="Deterministic body classifier from ingest: ok / thin / broken / empty">Class</th>
+      <th>First seen</th><th>Title</th><th title="Feed · author · published">Source</th>
+      <th title="Body classifier from ingest: ok / thin / broken / empty">Class</th>
       <th title="LLM-assessed article quality, 1-10">Quality</th>
-      <th title="assigned = in a story · pending = queued · dead = failed N times">Status</th>
-      <th class="num" title="Embedding (CPU vector, ~1s)">Embed</th>
-      <th class="num" title="Clustering: vec0 search + LLM event verification">Cluster</th>
-      <th class="num" title="Harness: quality/breaking LLM call">Harness</th>
-      <th class="num" title="Prompt2: story headline/summary update">Story</th>
-      <th class="num" title="End-to-end pipeline wall time">Total</th>
+      <th title="assigned = in a story · pending = queued · duplicate = copy from another feed, joins the original's story without AI calls · skipped = broken body or disabled feed · dead = failed too often">Status</th>
+      ${COLUMNS.map(([, label, title]) => `<th class="num" title="${esc(title)}">${label}</th>`).join("")}
     </tr></thead>`;
   const body = document.createElement("tbody");
   for (const a of articles) {
     const t = a.timings || {};
     const tr = document.createElement("tr");
-    const q = a.quality == null ? "–" : a.quality;
+    const statusCls = { dead: "dead", pending: "muted", skipped: "muted", duplicate: "muted" }[a.status] || "";
     tr.innerHTML = `
-      <td class="muted">${fmtDate(a.created_at)}</td>
-      <td><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a></td>
-      <td class="muted">${esc(fmtSource(a))}</td>
+      <td class="muted nowrap" title="first seen ${esc(fmtUtc(a.created_at))} · processed ${esc(fmtUtc(a.processed_at))}">${esc(fmtShort(a.created_at))}</td>
+      <td><a href="${esc(safeUrl(a.url))}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a></td>
+      <td class="muted">${esc(sourceText(a))}</td>
       <td>${esc(a.class || "–")}</td>
-      <td>${q}</td>
-      <td class="${a.status === "dead" ? "dead" : a.status === "pending" ? "muted" : ""}">${a.status}</td>
-      <td class="num muted">${fmtSec(t.embed)}</td>
-      <td class="num muted">${fmtSec(t.cluster)}</td>
-      <td class="num muted">${fmtSec(t.harness)}</td>
-      <td class="num muted">${fmtSec(t.story)}</td>
-      <td class="num muted">${fmtSec(t.wall)}</td>`;
+      <td>${a.quality ?? "–"}</td>
+      <td class="${statusCls}">${esc(a.status)}</td>
+      ${COLUMNS.map(([key]) => `<td class="num${key === "latency" ? "" : " muted"}">${fmtDuration(t[key])}</td>`).join("")}`;
     body.appendChild(tr);
   }
   table.appendChild(body);
@@ -93,11 +101,15 @@ async function loadMore() {
   loadingMore = true;
   moreBtn.disabled = true;
   try {
-    const res = await fetch(`/api/articles?limit=${shown + PAGE_SIZE}&order=${order}`);
-    if (Auth.unauth(res)) return;
+    const params = new URLSearchParams({ limit: String(shown + PAGE_SIZE), order });
+    if (searchEl.value.trim()) params.set("q", searchEl.value.trim());
+    if (statusFilterEl.value) params.set("status", statusFilterEl.value);
+    const res = await fetch(`/api/articles?${params}`);
+    if (Auth.unauth(res) || !res.ok) return;
     const data = await res.json();
     articles = data.articles;
     totalCount = data.count;
+    workerStatus = data.worker || {};
     shown = Math.min(shown + PAGE_SIZE, data.count);
     render();
   } finally {
@@ -112,6 +124,12 @@ sortBtn.addEventListener("click", () => {
   load();
 });
 moreBtn.addEventListener("click", () => loadMore());
+statusFilterEl.addEventListener("change", load);
+let searchTimer;
+searchEl.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(load, 300);
+});
 
 (async function boot() {
   await Auth.init();

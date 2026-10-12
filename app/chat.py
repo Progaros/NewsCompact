@@ -13,6 +13,7 @@ The model calls use the same local CHAT_MODEL the pipeline already trusts.
 from __future__ import annotations
 
 import logging
+from typing import Generator, Iterator
 
 from . import config, ollama, searchngx
 
@@ -36,12 +37,9 @@ _QUERY_SYSTEM = (
 def _clamp_turns(requested: int) -> int:
     """Clamp a requested search-turn budget to the configured allowed set."""
     allowed = config.CHAT_SEARCH_TURNS
-    if requested in allowed:
-        return requested
-    # Nearest valid option (0 when no web search requested, else the closest).
-    if requested <= 0:
-        return allowed[0] if allowed and allowed[0] == 0 else 0
-    return min(allowed, key=lambda t: abs(t - requested)) if allowed else 0
+    if requested <= 0 or not allowed:
+        return 0
+    return min(allowed, key=lambda t: abs(t - requested))
 
 
 def story_system_prompt(story: dict) -> str:
@@ -51,7 +49,7 @@ def story_system_prompt(story: dict) -> str:
     arts = story.get("articles") or []
     lines = []
     for a in arts:
-        src = a.get("author") or ""
+        src = " / ".join(p for p in (a.get("feed"), a.get("author")) if p)
         url = a.get("url") or ""
         line = f"- {a.get('title') or '(untitled)'}"
         if src:
@@ -68,7 +66,7 @@ def story_system_prompt(story: dict) -> str:
         f"impact {m.get('impact_scale', '?')}, status {m.get('status', '?')}, "
         f"location {m.get('location', '?')}, language {m.get('language', '?')}",
         f"Quality score: {story.get('quality_score', '?')}",
-        f"Articles in this story:\n" + "\n".join(lines),
+        "Articles in this story:\n" + "\n".join(lines),
         "",
         _SYSTEM_BASE,
     ]
@@ -107,32 +105,36 @@ def _next_query(story: dict, user_question: str, context_so_far: str) -> str | N
         "required": ["query", "done"],
     }
     try:
-        res = ollama.chat_json_constrained(
-            schema, messages, temperature=0.0, num_predict=200
+        res = ollama.structured(
+            schema, messages, temperature=0.0, num_predict=200, prose_fallback=True
         )
     except Exception as e:  # noqa: BLE001 — a failed query ends the search loop
         log.debug("chat search query call failed: %s", e)
         return None
-    if res.get("done"):
+    if not isinstance(res, dict) or res.get("done"):
         return None
     q = (res.get("query") or "").strip()
     return q or None
 
 
-def _gather_context(story: dict, user_question: str, turns: int) -> str:
-    """Run up to ``turns`` search+scrape turns; return accumulated context."""
+def _gather_context(story: dict, user_question: str,
+                    turns: int) -> Generator[tuple[str, str], None, str]:
+    """Run up to ``turns`` search+scrape turns, yielding status lines; returns the context."""
     context = ""
     for _ in range(turns):
         if len(context) >= config.CHAT_CONTEXT_MAX:
             break
+        yield "status", "Planning web search…"
         query = _next_query(story, user_question, context)
         if not query:
             break
+        yield "status", f"Searching: {query}"
         results = searchngx.search(query)
         added = False
         for res in results:
             if len(context) >= config.CHAT_CONTEXT_MAX:
                 break
+            yield "status", f"Reading {res.get('title') or res['url']}"
             text = searchngx.scrape(res["url"]) or res.get("description", "")
             text = text[: config.CHAT_CONTEXT_PER_SOURCE]
             block = f"\n[{res.get('title') or res['url']}] ({res['url']})\n{text}"
@@ -143,15 +145,15 @@ def _gather_context(story: dict, user_question: str, turns: int) -> str:
     return context
 
 
-def generate(story: dict, history: list[dict], user_question: str, search_turns: int) -> str:
-    """Produce the assistant reply for one chat turn.
+def stream(story: dict, history: list[dict], user_question: str,
+           search_turns: int) -> Iterator[tuple[str, str]]:
+    """Yield ``("status", text)`` while researching, then ``("delta", text)`` answer chunks.
 
-    ``history`` is the prior messages (role/content) WITHOUT the new user
-    message. ``search_turns`` is the requested web-search budget (clamped to
-    the configured set). Returns the assistant text.
+    ``history`` is the prior messages WITHOUT the new user message;
+    ``search_turns`` is clamped to the configured options.
     """
     turns = _clamp_turns(search_turns)
-    context = _gather_context(story, user_question, turns) if turns > 0 else ""
+    context = (yield from _gather_context(story, user_question, turns)) if turns > 0 else ""
 
     system = story_system_prompt(story)
     if context:
@@ -164,6 +166,8 @@ def generate(story: dict, history: list[dict], user_question: str, search_turns:
             messages.append({"role": role, "content": h.get("content", "")})
     messages.append({"role": "user", "content": user_question})
 
-    return ollama.chat(
+    yield "status", "Writing answer…"
+    for chunk in ollama.chat_stream(
         messages, temperature=config.CHAT_TEMPERATURE, max_tokens=config.CHAT_MAX_TOKENS
-    ).strip()
+    ):
+        yield "delta", chunk

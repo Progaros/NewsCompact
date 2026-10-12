@@ -1,28 +1,35 @@
-"""Classify a stored article body so broken fetches don't poison the quality score.
+"""Article body cleanup + classification (deterministic, no LLM).
 
-~70% of stored ``content_raw`` is NOT the article: it's the RSS description for
-feeds whose description is social/bot-block chrome ("Post permalink / Top
-comments / m.youtube", German "Ihre Anfrage wurde blockiert", JS-required
-paywalls, ...). Scoring that chrome as journalism gives quality 1-2 for a story
-whose *headline* is perfectly substantive — the root cause behind the ICC
-sanctions story sitting at quality 2.
+``clean_body`` normalizes what ingest stores:
+- upvoterss (Reddit / Hacker News) descriptions are "Reading time | Post
+  permalink <post text> Top comments <c1> Comment permalink <c2> …". They are
+  rewritten to the post text plus a "Top comments:" list (first
+  SOCIAL_MAX_COMMENTS). The raw permalink chrome used to classify ~95 % of
+  these items as ``broken`` although they carried the full post / linked article.
+- binary payloads (images fetched as pages) are dropped.
 
-Class values: ``ok`` / ``thin`` / ``broken`` / ``empty`` (2026-10-11 the
-former ``junk`` value was renamed to ``broken`` — the fetch is broken, the
-body isn't empty). Stored rows are migrated on startup (``app/db.py``).
-
-The classifier is a cheap deterministic gate (no LLM): it only looks at the
-first ~400 chars, where bot-block/social pages announce themselves, so a legit
-article that merely *mentions* "captcha" mid-body is not flagged.
+``classify`` → ``ok`` / ``thin`` / ``broken`` / ``empty``. Non-``ok`` bodies are
+embedded and quality-scored from the headline only; ``broken`` ones are skipped
+by the pipeline.
 """
 from __future__ import annotations
 
-# Strong signals of a non-article page. Checked only in the opening window.
-BLOCK_SIGS = [
-    "post permalink",           # social feed chrome
-    "top comments",             # social feed chrome
-    "m.youtube",                # social video embed
-    "wurde blockiert",          # bot-block (German: "was blocked")
+import re
+
+from . import config
+
+MAX_BODY_CHARS = 100_000
+MAX_COMMENT_CHARS = 1_000
+COMMENTS_HEADER = "Top comments:"
+
+# Signals of a non-article page, checked in the opening window only so an
+# article that merely mentions "captcha" mid-body is not flagged.
+BLOCK_SIGS = (
+    "post permalink",
+    "top comments",
+    "comment permalink",
+    "m.youtube",
+    "wurde blockiert",
     "access denied",
     "unusual traffic",
     "captcha",
@@ -30,39 +37,62 @@ BLOCK_SIGS = [
     "javascript seems disabled",
     "please enable cookies",
     "subscribe for free",
-    "comment permalink",      # social feed chrome (repeats per comment)
-    "one small step",           # NYT paywall phrase
+    "one small step",
     "this content is only available",
-]
+)
 _HEAD_WINDOW = 400
 _THIN_CHARS = 250
 
+_SOCIAL_LEAD = re.compile(r"^\s*(?:Reading time:\s*\d+\s*min\s*\|\s*)?Post permalink\s*", re.I)
+_SOCIAL_COMMENTS = re.compile(r"\s*\bTop comments\b", re.I)
+_COMMENT_END = re.compile(r"\s*\bComment permalink\b\s*", re.I)
+_HEADER_SPLIT = "\n\n" + COMMENTS_HEADER + "\n"
+
+
+def is_binary(text: str) -> bool:
+    head = text[:200]
+    return sum(ch < " " and ch not in "\n\r\t" or ch in "\x7f\ufffd" for ch in head) > 10
+
+
+def with_comments(post: str, comments: list[str]) -> str:
+    if not comments:
+        return post
+    listing = COMMENTS_HEADER + "\n" + "\n".join(f"- {c}" for c in comments)
+    return f"{post}\n\n{listing}" if post else listing
+
+
+def split_post(text: str | None) -> tuple[str, str]:
+    """``(post, comments_section)`` of a cleaned body; comments may be ""."""
+    t = text or ""
+    if t.startswith(COMMENTS_HEADER + "\n"):
+        return "", t
+    post, sep, rest = t.partition(_HEADER_SPLIT)
+    return post, (COMMENTS_HEADER + "\n" + rest) if sep else ""
+
+
+def clean_body(text: str | None) -> str:
+    t = (text or "").strip()
+    if not t or is_binary(t):
+        return ""
+    if _SOCIAL_LEAD.match(t):
+        parts = _SOCIAL_COMMENTS.split(_SOCIAL_LEAD.sub("", t, count=1), maxsplit=1)
+        thread = parts[1] if len(parts) > 1 else ""
+        comments = [c.strip()[:MAX_COMMENT_CHARS] for c in _COMMENT_END.split(thread) if c.strip()]
+        t = with_comments(parts[0].strip(), comments[: config.SOCIAL_MAX_COMMENTS])
+    return t[:MAX_BODY_CHARS]
+
 
 def classify(text: str | None) -> str:
-    """Return one of: 'ok' | 'thin' | 'broken' | 'empty'.
-
-    - 'broken' : the stored body is NOT the article (bot-block / social /
-                  paywall page, or binary garbage such as raw image bytes
-                  stored as text) — a broken fetch.
-    - 'thin'   : too short to be a real body (a blurb/lead).
-    - 'empty'  : no text at all.
-    - 'ok'     : looks like real article text.
-    """
     t = (text or "").strip()
     if not t:
         return "empty"
-    # Binary garbage (raw image bytes etc.) announces itself with control
-    # chars; a few NULs/newlines are legit text, >10 per 200 chars is not.
-    h = t[:200]
-    if sum(ch < " " or ch == "\x7f" for ch in h) > 10:
+    if is_binary(t):
         return "broken"
     head = t[:_HEAD_WINDOW].lower()
+    # One chrome line before real text is fine; chrome repeated across the page is not.
     if any(sig in head for sig in BLOCK_SIGS):
-        # Chrome signals repeated across the whole page ("Comment
-        # permalink" xN) = social feed page. An article that merely opens
-        # with one chrome line ("Reading time | Post permalink") followed
-        # by real text is not — classify it by length below.
-        if sum(t.lower().count(sig) for sig in BLOCK_SIGS) >= 3:
+        low = t.lower()
+        if sum(low.count(sig) for sig in BLOCK_SIGS) >= 3:
             return "broken"
     if len(t) < _THIN_CHARS:
         return "thin"

@@ -1,5 +1,5 @@
 /* Shared auth UI: session state, header sign-in/out, login modal, toasts.
- * Loaded on both pages before app.js / feeds.js. Backend: app/auth.py. */
+ * Loaded on every page after common.js. Backend: app/auth.py. */
 
 const Auth = (() => {
   const TOAST_MS = 8000; // toasts auto-dismiss after this (spec: 5–10 s)
@@ -23,12 +23,6 @@ const Auth = (() => {
     _notify();
   }
 
-  function esc(s) {
-    return (s ?? "").toString().replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
-
   function onChange(fn) {
     listeners.push(fn);
   }
@@ -48,22 +42,18 @@ const Auth = (() => {
 
   function renderHeader() {
     const controls = document.querySelector(".topbar .controls");
-    const btn = document.getElementById("auth-btn");
     if (!controls) return;
-    if (!state.authEnabled) {
-      if (btn) btn.remove();
-      return;
+    let el = document.getElementById("auth-btn");
+    if (!el) {
+      el = document.createElement("button");
+      el.id = "auth-btn";
+      el.type = "button";
+      el.className = "btn";
+      controls.appendChild(el);
     }
-    if (!btn) {
-      const b = document.createElement("button");
-      b.id = "auth-btn";
-      b.className = "btn";
-      controls.appendChild(b);
-    }
-    const el = document.getElementById("auth-btn");
-    if (state.authenticated) {
-      el.textContent = "\u{1F464} User";
-      el.title = "Preferences & sign out";
+    if (!state.authEnabled || state.authenticated) {
+      el.textContent = "\u2699 Preferences";
+      el.title = state.authEnabled ? "Preferences & sign out" : "Preferences";
       el.onclick = () => showUserModal();
     } else {
       el.textContent = "Sign in";
@@ -81,62 +71,98 @@ const Auth = (() => {
     _notify();
   }
 
-  /* Read-only view of the user's profile (preferences + tag weights) with a
-   * sign-out action. Shown via the header User button when signed in. */
+  /* Preferences editor: ranking inputs (regions/locations feed user_impact,
+   * min quality hides weak stories) and the learned tag weights. */
   function showUserModal() {
     if (document.getElementById("user-modal")) return;
     const overlay = document.createElement("div");
     overlay.id = "user-modal";
     overlay.innerHTML = `
-      <div class="login-panel user-panel">
+      <form class="login-panel user-panel" id="prefs-form">
         <h2>Preferences</h2>
-        <p class="hint">Your current profile (read-only).</p>
         <div id="user-profile" class="user-profile">Loading\u2026</div>
         <div class="login-row">
-          <button type="button" class="btn" id="user-close">Close</button>
-          <button type="button" class="btn" id="user-signout">Sign out</button>
+          ${state.authEnabled ? `<button type="button" class="btn" id="user-signout">Sign out</button>` : ""}
+          <span class="spacer"></span>
+          <button type="button" class="btn" id="user-close">Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
         </div>
-      </div>`;
+      </form>`;
     document.body.appendChild(overlay);
-    const close = () => overlay.remove();
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) close();
-    });
-    overlay.querySelector("#user-close").onclick = close;
-    overlay.querySelector("#user-signout").onclick = () => {
-      close();
-      signOut();
-    };
+    const form = overlay.querySelector("form");
     const box = overlay.querySelector("#user-profile");
+    const close = () => overlay.remove();
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+    overlay.querySelector("#user-close").onclick = close;
+    overlay.querySelector("#user-signout")?.addEventListener("click", () => { close(); signOut(); });
+
+    let weights = {};
     fetch("/api/profile")
-      .then((res) => {
-        if (Auth.unauth(res)) { close(); return null; }
-        return res.json();
+      .then((res) => (unauth(res) ? null : res.json()))
+      .then((p) => {
+        if (!p) return close();
+        weights = { ...(p.tag_weights || {}) };
+        box.innerHTML = renderProfileForm(p.preferences || {});
+        renderWeights(box, weights);
       })
-      .then((d) => {
-        if (d && box) box.innerHTML = renderProfile(d);
-      })
-      .catch(() => { if (box) box.textContent = "(profile unavailable)"; });
+      .catch(() => { box.textContent = "(profile unavailable)"; });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const list = (name) => form.elements[name].value.split(",").map((s) => s.trim()).filter(Boolean);
+      const minQ = parseFloat(form.elements.min_quality.value);
+      const res = await fetch("/api/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preferences: {
+            interest_regions: list("interest_regions"),
+            locations: list("locations"),
+            min_quality: isNaN(minQ) ? 0 : Math.min(10, Math.max(0, minQ)),
+          },
+          tag_weights: weights,
+        }),
+      });
+      if (unauth(res)) return;
+      if (!res.ok) return toast(`saving failed: ${res.status}`);
+      close();
+      toast("Preferences saved.");
+      _notify();
+    });
   }
 
-  function renderProfile(p) {
-    const prefs = p.preferences || {};
-    const prefRows = Object.entries(prefs)
-      .map(([k, v]) => `<div class="pref-row"><span>${esc(k)}</span><span>${esc(v)}</span></div>`)
-      .join("");
-    const tags = Object.entries(p.tag_weights || {})
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 30)
-      .map(([t, w]) => `<div class="pref-row"><span>${esc(t)}</span><span>${Number(w).toFixed(2)}</span></div>`)
-      .join("");
-    const tagBlock = tags || `<div class="muted">No tag weights yet.</div>`;
+  function renderProfileForm(prefs) {
+    const join = (v) => (Array.isArray(v) ? v.join(", ") : "");
     return `
+      <label class="field">Interest regions <span class="hint">comma-separated; matching story tags raise "impact"</span>
+        <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
+      <label class="field">Locations <span class="hint">comma-separated, same effect</span>
+        <input name="locations" value="${esc(join(prefs.locations))}" placeholder="munich" /></label>
+      <label class="field">Minimum story quality <span class="hint">0 = show everything</span>
+        <input name="min_quality" type="number" min="0" max="10" step="0.5" value="${esc(prefs.min_quality ?? 0)}" /></label>
       <div class="user-section">
-        <div class="user-section-label">Preferences</div>${prefRows}
-      </div>
-      <div class="user-section">
-        <div class="user-section-label">Tag weights (${Object.keys(p.tag_weights || {}).length})</div>${tagBlock}
+        <div class="user-section-label">Learned tag weights <button type="button" class="link" id="reset-weights">reset all</button></div>
+        <div id="weights"></div>
       </div>`;
+  }
+
+  function renderWeights(box, weights) {
+    const el = box.querySelector("#weights");
+    const entries = Object.entries(weights).sort((a, b) => b[1] - a[1]);
+    el.innerHTML = entries.length
+      ? entries.map(([t, w]) => `<div class="pref-row"><span>#${esc(t)}</span>
+          <span class="${w >= 0 ? "pos" : "neg"}">${Number(w).toFixed(1)}
+          <button type="button" class="link" data-tag="${esc(t)}" title="Forget this tag">\u00d7</button></span></div>`).join("")
+      : `<div class="muted">No tag weights yet \u2014 use \u{1F44D}/\u{1F44E} on stories.</div>`;
+    el.querySelectorAll("button[data-tag]").forEach((b) => b.addEventListener("click", () => {
+      delete weights[b.dataset.tag];
+      renderWeights(box, weights);
+    }));
+    box.querySelector("#reset-weights").onclick = () => {
+      for (const k of Object.keys(weights)) delete weights[k];
+      renderWeights(box, weights);
+    };
   }
 
   function showLoginModal() {

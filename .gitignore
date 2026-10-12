@@ -12,8 +12,13 @@ wheels/
 # Runtime data & logs
 news.db
 news.db-*
+news.pid
 *.log
+*.log.*.gz
+server.out
 monitor.out
+false_negatives.md
+.env
 
 # Local subscriptions
 *.opml

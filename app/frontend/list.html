@@ -3,23 +3,37 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Article List — AI News Aggregator</title>
+  <title>Articles — AI News Aggregator</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
+<body class="wide">
   <header class="topbar">
-    <div class="brand">
-      <span class="dot"></span>
-      <h1><a href="/" class="brand-link">Articles</a></h1>
-    </div>
+    <a href="/" class="brand"><span class="dot"></span><h1>News</h1></a>
+    <nav class="nav">
+      <a href="/">Stories</a>
+      <a href="/list" class="active">Articles</a>
+      <a href="/feeds" id="feeds-link">Feeds</a>
+    </nav>
     <div class="controls">
       <span id="list-status" class="status">loading…</span>
-      <button id="sort-toggle" class="btn" title="Toggle sort order">newest first</button>
     </div>
   </header>
 
   <main>
-    <section class="feed" id="article-list" aria-label="Articles">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search title or feed…" maxlength="100" />
+      <select id="status-filter" aria-label="Status filter">
+        <option value="">all statuses</option>
+        <option value="assigned">assigned</option>
+        <option value="pending">pending</option>
+        <option value="skipped">skipped</option>
+        <option value="dead">dead</option>
+        <option value="duplicate">duplicate</option>
+      </select>
+      <button id="sort-toggle" class="btn" type="button" title="Toggle sort order">newest first</button>
+    </div>
+    <section class="table-wrap" id="article-list" aria-label="Articles">
       <div class="empty">Loading articles…</div>
     </section>
     <div class="feed-controls">
@@ -27,6 +41,7 @@
     </div>
   </main>
 
+  <script src="/static/common.js"></script>
   <script src="/static/auth.js"></script>
   <script src="/static/list.js"></script>
 </body>

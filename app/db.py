@@ -1,117 +1,208 @@
-"""SQLite + sqlite-vec connection management and schema bootstrap.
+"""SQLite + sqlite-vec connections, schema bootstrap, small shared helpers.
 
-Each connection loads the vec extension and enables foreign keys. WAL is enabled
-so the API and the background worker can share the file. Keep usage patterns
-read-only where possible; the vec extension is loaded per-connection (cheap).
+Connections run in autocommit mode: long LLM/HTTP calls between statements
+must never hold a write transaction (that caused "database is locked").
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import sqlite3
+import struct
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Iterator
 
 import sqlite_vec
 
-from . import config
+from . import config, dedup
 from .content_quality import classify as classify_content
+from .content_quality import clean_body
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
+# Columns added after the first release: (table, column, type).
+_MIGRATIONS = (
+    ("Article", "quality", "REAL"),
+    ("Article", "content_class", "TEXT"),
+    ("Article", "pipeline_failures", "INTEGER"),
+    ("Article", "processed_at", "TEXT"),
+    ("Article", "t_embed_s", "REAL"),
+    ("Article", "t_cluster_s", "REAL"),
+    ("Article", "t_harness_s", "REAL"),
+    ("Article", "t_story_s", "REAL"),
+    ("Article", "t_wall_s", "REAL"),
+    ("Article", "t_merge_s", "REAL"),
+    ("Article", "duplicate_of", "INTEGER"),
+    ("Article", "url_key", "TEXT"),
+    ("Article", "title_key", "TEXT"),
+    ("Story", "merge_checked_at", "TEXT"),
+    ("Feed", "enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("Feed", "last_error", "TEXT"),
+)
+# Indexes on migrated columns (schema.sql runs before the columns exist on old DBs).
+_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_article_url_key ON Article(url_key)",
+    "CREATE INDEX IF NOT EXISTS idx_article_title_key ON Article(title_key)",
+    "CREATE INDEX IF NOT EXISTS idx_article_duplicate ON Article(duplicate_of)",
+)
 
-def _new_conn() -> sqlite3.Connection:
-    # autocommit=True: each statement commits immediately. In the default legacy
-    # transaction mode, pysqlite opens an implicit transaction on the first write
-    # and holds it until an explicit commit() — which, across long-running
-    # ingest/pipeline calls (HTTP fetches, LLM calls), made other connections
-    # fail with "database is locked". Explicit transactions can still be
-    # started with `with conn:` when atomicity is needed.
-    db = sqlite3.connect(config.DB_PATH, check_same_thread=False, autocommit=True)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA foreign_keys=ON")
-    db.execute("PRAGMA busy_timeout=10000")
-    db.enable_load_extension(True)
-    db.load_extension(sqlite_vec.loadable_path())
-    db.enable_load_extension(False)
-    return db
+VECTOR_TABLE = "Article_Vectors"
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False, autocommit=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.enable_load_extension(True)
+    conn.load_extension(sqlite_vec.loadable_path())
+    conn.enable_load_extension(False)
+    return conn
 
 
 @contextmanager
-def get_conn():
-    """Yield a configured connection; ensures it is closed on exit."""
-    db = _new_conn()
+def get_conn() -> Iterator[sqlite3.Connection]:
+    conn = _connect()
     try:
-        yield db
+        yield conn
     finally:
-        db.close()
+        conn.close()
 
 
-def pack_floats(vector: list[float]) -> bytes:
-    """Serialize a float vector to the raw float32 blob sqlite-vec expects."""
-    return sqlite_vec.serialize_float32(vector)
-
-
-def _ensure_columns(conn: sqlite3.Connection) -> None:
-    """Add columns that postdate a schema version (idempotent).
-
-    ``CREATE TABLE IF NOT EXISTS`` won't touch an existing table, so newly
-    added columns (e.g. Article.quality / content_class) are added here for
-    databases that predate them. Also migrates renamed class values:
-    Article.content_class 'junk' → 'broken' (2026-10-11).
-    """
-    for table, column, ddl in (
-        ("Article", "quality", "ALTER TABLE Article ADD COLUMN quality REAL"),
-        ("Article", "content_class", "ALTER TABLE Article ADD COLUMN content_class TEXT"),
-        # Consecutive Prompt2-cycle failures (dead-letter counter, see
-        # config.PIPELINE_MAX_FAILURES). NULL == never failed.
-        ("Article", "pipeline_failures", "ALTER TABLE Article ADD COLUMN pipeline_failures INTEGER"),
-        # Per-stage pipeline wall times (seconds) for the successful run, shown
-        # in /list for diagnosing slow articles: embed, cluster, harness, story.
-        ("Article", "t_embed_s", "ALTER TABLE Article ADD COLUMN t_embed_s REAL"),
-        ("Article", "t_cluster_s", "ALTER TABLE Article ADD COLUMN t_cluster_s REAL"),
-        ("Article", "t_harness_s", "ALTER TABLE Article ADD COLUMN t_harness_s REAL"),
-        ("Article", "t_story_s", "ALTER TABLE Article ADD COLUMN t_story_s REAL"),
-        ("Article", "t_wall_s", "ALTER TABLE Article ADD COLUMN t_wall_s REAL"),
-        # Feed management: disabling skips AI ingestion only — RSS fetch + article
-        # rows still happen, so volume stats stay live for disabled feeds too.
-        ("Feed", "enabled", "ALTER TABLE Feed ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"),
-    ):
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in cols:
-            conn.execute(ddl)
-    # Class-value rename (no-op once applied): new writes never store 'junk'.
-    conn.execute("UPDATE Article SET content_class = 'broken' WHERE content_class = 'junk'")
-    # Backfill the deterministic class for articles ingested before the
-    # ingest-time classification change. This is local CPU work and makes NULL
-    # mean genuinely unknown rather than merely old backlog.
+def _clean_bodies(conn: sqlite3.Connection) -> None:
+    """v1: strip upvoterss chrome / binary payloads and reclassify (re-pends wrongly 'broken' rows)."""
     rows = conn.execute(
-        "SELECT id, content_raw FROM Article WHERE content_class IS NULL"
+        "SELECT id, content_raw FROM Article "
+        "WHERE content_class = 'broken' OR content_raw LIKE '%Post permalink%'"
     ).fetchall()
-    for row in rows:
+    for r in rows:
+        body = clean_body(r["content_raw"])
+        conn.execute("UPDATE Article SET content_raw = ?, content_class = ? WHERE id = ?",
+                     (body, classify_content(body), r["id"]))
+
+
+def _create_vector_table(conn: sqlite3.Connection) -> None:
+    """v2: primary-keyed cosine vec0 table (fast KNN + point lookups); copies the old table."""
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {VECTOR_TABLE} USING vec0("
+        f"article_id INTEGER PRIMARY KEY, embedding FLOAT[{config.EMBED_DIM}] distance_metric=cosine)"
+    )
+    if _table_exists(conn, "Article_Embeddings"):
         conn.execute(
-            "UPDATE Article SET content_class = ? WHERE id = ?",
-            (classify_content(row["content_raw"]), row["id"]),
+            f"INSERT INTO {VECTOR_TABLE} (article_id, embedding) "
+            "SELECT article_id, embedding FROM Article_Embeddings "
+            "WHERE article_id IN (SELECT id FROM Article) GROUP BY article_id"
         )
+        conn.execute("DROP TABLE Article_Embeddings")
+
+
+def _dedup_and_retention(conn: sqlite3.Connection) -> None:
+    """v3: dedupe keys for existing rows; votes survive story deletion; drop the experiment table."""
+    for r in conn.execute("SELECT id, url, title FROM Article").fetchall():
+        conn.execute("UPDATE Article SET url_key = ?, title_key = ? WHERE id = ?",
+                     (dedup.url_key(r["url"]), dedup.title_key(r["title"]), r["id"]))
+    if conn.execute("SELECT 1 FROM pragma_foreign_key_list('FeedbackLog')").fetchone():
+        conn.execute(
+            "CREATE TABLE FeedbackLog_new (id INTEGER PRIMARY KEY, story_id INTEGER, headline TEXT, "
+            "tags TEXT, kind TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))"
+        )
+        conn.execute(
+            "INSERT INTO FeedbackLog_new (id, story_id, headline, tags, kind, created_at) "
+            "SELECT f.id, f.story_id, s.headline, s.tags, f.kind, f.created_at "
+            "FROM FeedbackLog f LEFT JOIN Story s ON s.id = f.story_id"
+        )
+        conn.execute("DROP TABLE FeedbackLog")
+        conn.execute("ALTER TABLE FeedbackLog_new RENAME TO FeedbackLog")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id)")
+    if _table_exists(conn, "Experiment_Embeddings"):
+        conn.execute("DROP TABLE Experiment_Embeddings")
+
+
+# (user_version, migration) — each runs once, inside a transaction.
+_DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention))
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone() is not None
 
 
 def init_db() -> None:
-    """Create the schema (idempotent)."""
+    """Create/upgrade the schema (idempotent)."""
     config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ddl = _SCHEMA_PATH.read_text(encoding="utf-8")
-    with get_conn() as db:
-        db.executescript(ddl)
-        _ensure_columns(db)
-        # vec0 virtual table (guarded — depends on the loaded extension).
-        exists = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Article_Embeddings'"
-        ).fetchone()
-        if not exists:
-            db.execute(
-                f"CREATE VIRTUAL TABLE Article_Embeddings USING vec0("
-                f"article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])"
+    with get_conn() as conn:
+        conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        for table, column, ddl in _MIGRATIONS:
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        for ddl in _INDEXES:
+            conn.execute(ddl)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        for target, migrate in _DATA_MIGRATIONS:
+            if version < target:
+                conn.execute("BEGIN")
+                try:
+                    migrate(conn)
+                    conn.execute(f"PRAGMA user_version = {target}")
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+        for row in conn.execute(
+            "SELECT id, content_raw FROM Article WHERE content_class IS NULL"
+        ).fetchall():
+            conn.execute(
+                "UPDATE Article SET content_class = ? WHERE id = ?",
+                (classify_content(row["content_raw"]), row["id"]),
             )
-        db.commit()
+        # One-time rebuild so retention can hand freed pages back with incremental_vacuum.
+        if conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            conn.execute("VACUUM")
 
 
-def embed_blob(vector: list[float]) -> bytes:
-    return pack_floats(vector)
+def reclaim_space() -> None:
+    with get_conn() as conn:
+        conn.execute("PRAGMA incremental_vacuum").fetchall()  # each step frees a page
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+# --- helpers ---------------------------------------------------------------
+def utcnow() -> str:
+    """Naive-UTC timestamp in SQLite's datetime('now') format."""
+    return dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_ts(ts: str | None) -> dt.datetime | None:
+    if not ts:
+        return None
+    try:
+        return dt.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def pack_floats(vector: list[float]) -> bytes:
+    return sqlite_vec.serialize_float32(vector)
+
+
+def unpack_floats(blob: bytes) -> list[float]:
+    return list(struct.unpack(f"<{len(blob) // 4}f", blob))
+
+
+def json_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        v = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def json_list(raw: str | None) -> list[Any]:
+    try:
+        v = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return v if isinstance(v, list) else []

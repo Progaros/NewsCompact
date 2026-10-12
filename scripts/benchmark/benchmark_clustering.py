@@ -7,9 +7,9 @@ file from the current database, then evaluate labeled pairs against:
 * candidate retrieval followed by the optional LLM event verifier.
 
 Examples:
-    PYTHONPATH=. uv run python scripts/benchmark_clustering.py --export /tmp/pairs.json
-    PYTHONPATH=. uv run python scripts/benchmark_clustering.py --labels /tmp/pairs.labeled.json
-    PYTHONPATH=. uv run python scripts/benchmark_clustering.py --labels /tmp/pairs.labeled.json --llm
+    uv run python scripts/benchmark/benchmark_clustering.py --export /tmp/pairs.json
+    uv run python scripts/benchmark/benchmark_clustering.py --labels /tmp/pairs.labeled.json
+    uv run python scripts/benchmark/benchmark_clustering.py --labels /tmp/pairs.labeled.json --llm
 
 Exported records have ``label: null``. Reviewers should set it to 1 only when
 the two articles describe the same specific event, otherwise 0. Existing
@@ -27,7 +27,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app import db, harness  # noqa: E402
 
 DEFAULT_THRESHOLDS = (0.55, 0.60, 0.62, 0.64, 0.66, 0.70)
@@ -56,7 +56,7 @@ def load_articles(conn) -> tuple[dict[int, dict[str, Any]], dict[int, list[float
 
     vectors: dict[int, list[float]] = {}
     for row in conn.execute(
-        "SELECT article_id, embedding FROM Article_Embeddings"
+        "SELECT article_id, embedding FROM Article_Vectors"
     ):
         article_id = row["article_id"]
         if article_id in articles:
@@ -229,7 +229,7 @@ def evaluate(
                 "summary": story.get("summary", ""),
             })
         for start in range(0, len(pending_pairs), 8):
-            decisions = harness.harness.classify_event_pairs(pending_pairs[start:start + 8])
+            decisions = harness.classify_event_pairs(pending_pairs[start:start + 8])
             verification_cache.update(decisions)
         for record in labeled:
             key = f"{record['left_id']}:{record['right_id']}"

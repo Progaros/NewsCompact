@@ -22,12 +22,11 @@ TAG_ALIASES = {
     "large language models": "llm",
     "llms": "llm",
     "ml": "machine learning",
-    "mlp": "mlp",
     "usa": "us",
     "u s": "us",
-    "uk": "uk",
-    "eu": "eu",
-    "eur union": "eu",
+    "united states": "us",
+    "united kingdom": "uk",
+    "european union": "eu",
 }
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")

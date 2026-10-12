@@ -1,147 +1,69 @@
-"""Display_Score ranking and the feedback loop.
+"""Ranking (relevance + display score) and the 👍/👎 feedback loop.
 
-The personalization core is a **relevance score** built from three 0-10
-components (quality, credibility, user_impact), weighted by normalized
-weights (sum to 1) so the base stays on a 0-10 scale:
+    relevance = 10·(quality·WQ + credibility·WC + user_impact·WI)        (0..10)
+    display   = relevance + urgency·W1 + clamp(interest·W3, ±INTEREST_CAP)
+                + distance·W_DISTANCE − time_decay
 
-    relevance = quality*WQ + credibility*WC + user_impact*WI     (0..10)
-    display   = relevance + urgency*W1 + clamp(user_interest*W3, +/-INTEREST_CAP)
-                + distance*W_DISTANCE - time_decay
-
-- quality      : per-story harness quality (1-10).
-- credibility  : corroboration — distinct sources backing the story
-                 (single-source is low; 5+ maxes out). Honest proxy: a
-                 single uncorroborated report scores lower than the same
-                 story covered by many feeds.
-- user_impact  : how much this affects the user. Driven by collected user
-                 data (location/regions) in UserProfile.preferences; a neutral
-                 0.5 baseline when nothing is set.
-- user_interest: sum of the user's tag weights for the story's tags — the
-                 personalization tilt, added on top of relevance (like before).
-
-time_decay is an exponential ramp: 0 at "now", approaching TIME_DECAY_MAX as a
-story ages (half-life = TIME_DECAY_HALF_LIFE_HOURS).
-
-Feedback nudges the user's tag weights by a small learning rate (FEEDBACK_ALPHA)
-so a single click can't dominate the feed; the raw vote is logged separately in
-FeedbackLog.
-
-tag_weights are never decayed, so the *contribution* of the interest term is
-clamped to +/- INTEREST_CAP display points in display_score (see
-user_interest_points). That bounds personalization against urgency (<= W1*10)
-and time decay (<= TIME_DECAY_MAX) while leaving the raw weights intact.
+- quality      story quality (median of member article qualities), 0..1
+- credibility  corroboration by distinct feeds: 1→0.25 … 5+→1.0
+- user_impact  0.5 baseline, +0.25 per preferences.interest_regions/locations hit in tags
+- interest     sum of the user's tag weights; clamped because weights never decay
+- distance     story location/language vs USER_CITY/COUNTRY/LANGUAGE: 1.0/0.6/0.35/0
+- time_decay   TIME_DECAY_MAX·(1 − e^(−age_h/half_life)) on Story.updated_at
 """
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import json
 import math
+import sqlite3
 from typing import Any
 
 from . import config, db
 from .tags import normalize_tags
 
-
-def _story_tags(story) -> list[str]:
-    try:
-        tags = json.loads(story["tags"] or "[]")
-    except json.JSONDecodeError:
-        tags = []
-    # Normalize at read time: pre-fix stories still carry mixed spellings in
-    # the DB, and feedback bumps normalized keys.
-    return normalize_tags([t for t in tags if isinstance(t, str)])
-
-
-def _story_metrics(story) -> dict:
-    try:
-        m = json.loads(story["metrics"] or "{}")
-    except json.JSONDecodeError:
-        m = {}
-    return m
-
-
-def _hours_since(ts: str | None) -> float:
-    if not ts:
-        return 0.0
-    try:
-        dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return 0.0
-    return max(0.0, (datetime.datetime.utcnow() - dt).total_seconds() / 3600)
-
-
-def time_decay_penalty(updated_at: str | None) -> float:
-    age_hours = _hours_since(updated_at)
-    # ramp from 0 -> TIME_DECAY_MAX over many half-lives
-    return config.TIME_DECAY_MAX * (1.0 - math.exp(-age_hours / config.TIME_DECAY_HALF_LIFE_HOURS))
-
-
-def user_interest_score(story, tag_weights: dict[str, float]) -> float:
-    return sum(tag_weights.get(t, 0.0) for t in _story_tags(story))
-
-
-def user_interest_points(story, tag_weights: dict[str, float]) -> float:
-    """The clamped display contribution of the interest term.
-
-    The raw tag-weight sum can drift over time (feedback is never decayed),
-    so ranking uses the contribution clamped to +/- INTEREST_CAP; the raw
-    sum is kept for transparency and for re-deriving ranks later."""
-    contrib = user_interest_score(story, tag_weights) * config.W3_INTEREST
-    return max(-config.INTEREST_CAP, min(config.INTEREST_CAP, contrib))
+_DEFAULT_PREFS = {"min_quality": 0.0, "summary_length": "medium"}
 
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def story_tags(story: sqlite3.Row) -> list[str]:
+    return normalize_tags([t for t in db.json_list(story["tags"]) if isinstance(t, str)])
+
+
+def time_decay_penalty(updated_at: str | None) -> float:
+    ts = db.parse_ts(updated_at)
+    if ts is None:
+        return 0.0
+    age_h = max(0.0, (dt.datetime.now(dt.UTC).replace(tzinfo=None) - ts).total_seconds() / 3600)
+    return config.TIME_DECAY_MAX * (1.0 - math.exp(-age_h / config.TIME_DECAY_HALF_LIFE_HOURS))
+
+
 def credibility_score(source_count: int) -> float:
-    """0..1. Corroboration: a single uncorroborated source is low; more
-    distinct sources raise it. 1=0.25, 2=0.45, 3=0.65, 4=0.85, 5+=1.0."""
     return _clamp01(0.25 + 0.20 * max(0, source_count - 1))
 
 
-def user_impact_score(story, preferences: dict[str, Any]) -> float:
-    """0..1. How much the story affects the user, from collected user data.
-
-    Neutral 0.5 baseline. +0.25 for each configured region/location that
-    matches a story tag (substring, case-insensitive), capped at 1.0. This is
-    the hook for "collect user data like location" — set
-    preferences.interest_regions / preferences.locations to raise impact for
-    stories that touch them.
-    """
+def user_impact_score(tags: list[str], preferences: dict[str, Any]) -> float:
     impact = 0.5
-    tags = [t.lower() for t in _story_tags(story)]
     for key in ("interest_regions", "locations"):
-        vals = preferences.get(key) or []
-        if not isinstance(vals, list):
+        values = preferences.get(key)
+        if not isinstance(values, list):
             continue
-        for v in vals:
+        for v in values:
             v = str(v).lower().strip()
             if v and any(v in t for t in tags):
                 impact += 0.25
     return _clamp01(impact)
 
 
-def distance_score(story) -> float:
-    """0..1 physical + cultural proximity to the user's location.
-
-    The location/language come from Story.metrics — extracted by the existing
-    Prompt2 call, not a separate classifier. Bands:
-      city match (USER_CITY in the location string)   -> 1.0
-      country match (USER_COUNTRY)                     -> 0.6
-      language match (USER_LANGUAGE)                   -> 0.35
-      nothing / unknown                                -> 0.0 (neutral)
-
-    Pre-distance stories (no metrics.location) score 0 — neutral, never
-    penalized, so existing stories are unaffected.
-    """
-    m = _story_metrics(story)
-    location = str(m.get("location") or "").lower()
-    language = str(m.get("language") or "").lower()
+def distance_score(metrics: dict[str, Any]) -> float:
+    location = str(metrics.get("location") or "").lower()
+    language = str(metrics.get("language") or "").lower()
+    city, country = config.USER_CITY.lower().strip(), config.USER_COUNTRY.lower().strip()
     score = 0.0
     if location:
-        city = config.USER_CITY.lower().strip()
-        country = config.USER_COUNTRY.lower().strip()
         if city and city in location:
             score = 1.0
         elif country and country in location:
@@ -152,132 +74,145 @@ def distance_score(story) -> float:
     return score
 
 
-def distance_points(story) -> float:
-    """Display-point contribution of the distance term (W_DISTANCE * 0..1)."""
-    return config.W_DISTANCE * distance_score(story)
-
-
-def relevance_score(story, tag_weights: dict[str, float], source_count: int = 1,
-                    preferences: dict | None = None) -> dict:
-    """The relevance breakdown (the personalization base), each component on
-    a 0-10 scale plus the weighted 0-10 base. Returned to the frontend so the
-    calculation is visible on each card."""
-    preferences = preferences or {}
+def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any]) -> tuple[dict[str, float], float]:
+    """Return ``(relevance breakdown, display score)`` for one story."""
+    tags = story_tags(story)
+    metrics = db.json_dict(story["metrics"])
     try:
         quality = _clamp01(float(story["quality_score"] or 5.0) / 10.0)
     except (TypeError, ValueError):
         quality = 0.5
     credibility = credibility_score(source_count)
-    impact = user_impact_score(story, preferences)
-    interest = user_interest_score(story, tag_weights)
+    impact = user_impact_score(tags, profile["preferences"])
     base = 10.0 * (
         config.W_RELEVANCE_QUALITY * quality
         + config.W_RELEVANCE_CREDIBILITY * credibility
         + config.W_RELEVANCE_IMPACT * impact
     )
-    interest = user_interest_score(story, tag_weights)
-    distance = distance_score(story)
-    return {
-        "quality": round(quality * 10, 1),
-        "credibility": round(credibility * 10, 1),
-        "user_impact": round(impact * 10, 1),
-        "user_interest": round(interest, 2),
-        "user_interest_points": round(user_interest_points(story, tag_weights), 2),
-        "distance": round(distance * 10, 1),
-        "distance_points": round(distance_points(story), 2),
-        "base": round(base, 2),
-    }
-
-
-def display_score(story, tag_weights: dict[str, float], source_count: int = 1,
-                  preferences: dict | None = None) -> float:
-    rel = relevance_score(story, tag_weights, source_count, preferences)
-    metrics = _story_metrics(story)
+    interest = sum(profile["tag_weights"].get(t, 0.0) for t in tags)
+    interest_pts = max(-config.INTEREST_CAP, min(config.INTEREST_CAP, interest * config.W3_INTEREST))
+    distance = distance_score(metrics)
     try:
         urgency = float(metrics.get("urgency_level", 5))
     except (TypeError, ValueError):
         urgency = 5.0
-    decay = time_decay_penalty(story["updated_at"])
-    return (
-        rel["base"]
-        + urgency * config.W1_URGENCY
-        + user_interest_points(story, tag_weights)
-        + distance_points(story)
-        - decay
+    display = (base + urgency * config.W1_URGENCY + interest_pts
+               + distance * config.W_DISTANCE - time_decay_penalty(story["updated_at"]))
+    relevance = {
+        "quality": round(quality * 10, 1),
+        "credibility": round(credibility * 10, 1),
+        "user_impact": round(impact * 10, 1),
+        "user_interest": round(interest, 2),
+        "user_interest_points": round(interest_pts, 2),
+        "distance": round(distance * 10, 1),
+        "distance_points": round(distance * config.W_DISTANCE, 2),
+        "base": round(base, 2),
+    }
+    return relevance, display
+
+
+def source_counts(conn: sqlite3.Connection) -> dict[int, int]:
+    rows = conn.execute(
+        "SELECT story_id, COUNT(DISTINCT feed_id) FROM Article WHERE story_id IS NOT NULL GROUP BY story_id"
     )
+    return {r[0]: r[1] for r in rows}
 
 
-def get_user_profile() -> dict:
-    with db.get_conn() as conn:
-        row = conn.execute("SELECT * FROM UserProfile WHERE id=1").fetchone()
-        if row is None:
-            conn.execute(
-                "INSERT INTO UserProfile (id, tag_weights, source_weights, preferences) "
-                "VALUES (1,'{}','{}','{}')"
-            )
-            conn.commit()
-            row = conn.execute("SELECT * FROM UserProfile WHERE id=1").fetchone()
+def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = None, *,
+                   archived: bool = False, query: str = "", tag: str = "") -> list[dict[str, Any]]:
+    """Finished stories as ``[{story, source_count, relevance, display}]``.
+
+    Active stories (updated within STORY_ACTIVE_DAYS) are ranked by display
+    score; ``archived`` returns the older ones, newest update first.
+    Honors ``preferences.min_quality`` and optional text / tag filters.
+    """
+    profile = profile or get_user_profile(conn)
+    counts = source_counts(conn)
+    cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    sql = "SELECT * FROM Story WHERE headline IS NOT NULL AND updated_at " + ("< ?" if archived else ">= ?")
+    params: list[Any] = [cutoff]
+    if query:
+        sql += " AND (headline LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+        like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        params += [like, like, like]
+    try:
+        min_quality = float(profile["preferences"].get("min_quality") or 0)
+    except (TypeError, ValueError):
+        min_quality = 0.0
+    wanted_tag = normalize_tags([tag])[0] if tag and normalize_tags([tag]) else ""
+    out = []
+    for s in conn.execute(sql, params):
+        n = counts.get(s["id"], 0)
+        if n == 0 or (s["quality_score"] or 0) < min_quality:
+            continue
+        if wanted_tag and wanted_tag not in story_tags(s):
+            continue
+        relevance, display = score_story(s, n, profile)
+        out.append({"story": s, "source_count": n, "relevance": relevance, "display": display})
+    if archived:
+        out.sort(key=lambda x: x["story"]["updated_at"] or "", reverse=True)
+    else:
+        out.sort(key=lambda x: x["display"], reverse=True)
+    return out
+
+
+# --- profile + feedback ----------------------------------------------------
+def get_user_profile(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    if conn is None:
+        with db.get_conn() as c:
+            return get_user_profile(c)
+    row = conn.execute("SELECT * FROM UserProfile WHERE id = 1").fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO UserProfile (id, tag_weights, source_weights, preferences) VALUES (1, '{}', '{}', ?)",
+            (json.dumps(_DEFAULT_PREFS),),
+        )
+        return {"id": 1, "tag_weights": {}, "source_weights": {}, "preferences": dict(_DEFAULT_PREFS)}
     return {
         "id": 1,
-        "tag_weights": json.loads(row["tag_weights"] or "{}"),
-        "source_weights": json.loads(row["source_weights"] or "{}"),
-        "preferences": json.loads(row["preferences"] or "{}"),
+        "tag_weights": db.json_dict(row["tag_weights"]),
+        "source_weights": db.json_dict(row["source_weights"]),
+        "preferences": db.json_dict(row["preferences"]),
     }
 
 
-def update_preferences(new_prefs: dict) -> dict:
-    """Merge user-provided preferences (location, interest_regions, ...) into
-    the profile. Feeds the user_impact term of the relevance score."""
+def update_profile(preferences: dict[str, Any] | None = None,
+                   tag_weights: dict[str, float] | None = None) -> dict[str, Any]:
+    """Merge validated preferences; ``tag_weights`` (if given) replaces the stored weights."""
     with db.get_conn() as conn:
-        row = conn.execute("SELECT preferences FROM UserProfile WHERE id=1").fetchone()
-        prefs = json.loads(row["preferences"] or "{}") if row else {}
-        merged = {**prefs, **new_prefs}
-        conn.execute(
-            "UPDATE UserProfile SET preferences = ? WHERE id=1",
-            (json.dumps(merged),),
-        )
-        conn.commit()
-    return get_user_profile()
+        profile = get_user_profile(conn)
+        prefs = {**profile["preferences"], **(preferences or {})}
+        conn.execute("UPDATE UserProfile SET preferences = ? WHERE id = 1", (json.dumps(prefs),))
+        if tag_weights is not None:
+            clean = {}
+            for tag, w in tag_weights.items():
+                key = normalize_tags([tag])
+                if key:
+                    clean[key[0]] = max(-10.0, min(10.0, float(w)))
+            conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = 1", (json.dumps(clean),))
+        return get_user_profile(conn)
 
 
-def apply_feedback(story_id: int, kind: str) -> dict:
-    """kind: 'up' | 'down'.
-
-    Records the raw vote in FeedbackLog (kept separate from the derived profile
-    so the signal can be re-derived / the algorithm adjusted later) and nudges
-    the tag weights so the feedback takes effect immediately.
-    """
+def apply_feedback(story_id: int, kind: str) -> dict[str, Any] | None:
+    """Log the raw vote and nudge the story's tag weights by ±FEEDBACK_ALPHA·10 (clamped ±10)."""
     with db.get_conn() as conn:
-        story = conn.execute("SELECT * FROM Story WHERE id=?", (story_id,)).fetchone()
+        story = conn.execute("SELECT headline, tags FROM Story WHERE id = ?", (story_id,)).fetchone()
         if story is None:
-            return {}
-        # Raw up/down signal, stored separately from the profile mutation below.
-        conn.execute(
-            "INSERT INTO FeedbackLog (story_id, kind) VALUES (?, ?)",
-            (story_id, kind),
-        )
-        profile = get_user_profile()
-        tag_weights = profile["tag_weights"]
-        direction = 1.0 if kind == "up" else -1.0
-        for tag in _story_tags(story):
-            base = tag_weights.get(tag, 0.0)
-            new = base + direction * config.FEEDBACK_ALPHA * 10  # scale to visible effect
-            # clamp so weights stay in a sensible band
-            tag_weights[tag] = max(-10.0, min(10.0, new))
-        conn.execute(
-            "UPDATE UserProfile SET tag_weights = ? WHERE id=1",
-            (json.dumps(tag_weights),),
-        )
-        conn.commit()
-    return profile
+            return None
+        conn.execute("INSERT INTO FeedbackLog (story_id, headline, tags, kind) VALUES (?, ?, ?, ?)",
+                     (story_id, story["headline"], story["tags"], kind))
+        profile = get_user_profile(conn)
+        weights = profile["tag_weights"]
+        step = (1.0 if kind == "up" else -1.0) * config.FEEDBACK_ALPHA * 10
+        for tag in story_tags(story):
+            weights[tag] = max(-10.0, min(10.0, weights.get(tag, 0.0) + step))
+        conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = 1", (json.dumps(weights),))
+        return profile
 
 
-def feedback_log(limit: int = 200) -> list[dict]:
-    """Raw 👍/👎 votes, kept separate from the profile for later tuning."""
+def feedback_log(limit: int = 200) -> list[dict[str, Any]]:
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT story_id, kind, created_at FROM FeedbackLog "
-            "ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return [dict(r) for r in rows]
+            "SELECT story_id, headline, tags, kind, created_at FROM FeedbackLog ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        return [dict(r) for r in rows]

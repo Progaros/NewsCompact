@@ -1,5 +1,8 @@
 # Performance & AI quality analysis
 
+> Historical audit (2026-10-11). Most ranked items have since been implemented —
+> see [`plan.md`](./plan.md) → Changelog; open ones are in [`todo.md`](./todo.md).
+
 Quality audit of every AI-driven component, with evidence from the live DB,
 `server.log`, and spot-reads. Companion to [`findings.md`](./findings.md)
 (raw load/utilisation numbers live there) — this doc is about **whether the

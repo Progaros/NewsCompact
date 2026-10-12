@@ -1,8 +1,6 @@
--- Schema for the AI News Aggregator.
--- Applied by app/db.py after the sqlite-vec extension is loaded on the connection.
---
--- Note: Article_Embeddings is a sqlite-vec virtual table; its creation depends on
--- the extension being loaded, so db.py guards it separately.
+-- Schema for the AI News Aggregator (applied idempotently by app/db.py).
+-- Timestamps are naive UTC strings 'YYYY-MM-DD HH:MM:SS'.
+-- Columns added after the first release are also listed in db._MIGRATIONS.
 
 PRAGMA foreign_keys = ON;
 
@@ -15,84 +13,98 @@ CREATE TABLE IF NOT EXISTS Feed (
     last_fetched_at TEXT,
     etag            TEXT,
     last_modified   TEXT,
-    enabled         INTEGER NOT NULL DEFAULT 1
+    enabled         INTEGER NOT NULL DEFAULT 1,   -- 0 = fetch RSS rows only, no AI
+    last_error      TEXT                          -- NULL after a successful fetch
 );
 
 CREATE TABLE IF NOT EXISTS Article (
-    id             INTEGER PRIMARY KEY,
-    feed_id        INTEGER NOT NULL REFERENCES Feed(id) ON DELETE CASCADE,
-    story_id       INTEGER REFERENCES Story(id) ON DELETE SET NULL,
-    title          TEXT,
-    url            TEXT UNIQUE,
-    author         TEXT,
-    content_raw    TEXT,
-    hero_image_url TEXT,
-    published_date TEXT,
-    created_at     TEXT DEFAULT (datetime('now')),
-    quality        REAL,
-    content_class  TEXT
+    id                INTEGER PRIMARY KEY,
+    feed_id           INTEGER NOT NULL REFERENCES Feed(id) ON DELETE CASCADE,
+    story_id          INTEGER REFERENCES Story(id) ON DELETE SET NULL,  -- NULL = pending
+    title             TEXT,
+    url               TEXT UNIQUE,
+    author            TEXT,
+    content_raw       TEXT,
+    content_class     TEXT,      -- ok | thin | broken | empty (app/content_quality.py)
+    hero_image_url    TEXT,
+    published_date    TEXT,
+    created_at        TEXT DEFAULT (datetime('now')),   -- first seen (ingest)
+    quality           REAL,
+    pipeline_failures INTEGER,
+    processed_at      TEXT,      -- pipeline finished (story written)
+    t_embed_s         REAL,      -- per-stage wall times of the successful run
+    t_cluster_s       REAL,
+    t_harness_s       REAL,
+    t_story_s         REAL,
+    t_wall_s          REAL,
+    t_merge_s         REAL,      -- time of the recall merge that moved it (if any)
+    duplicate_of      INTEGER,   -- cross-feed copy of this article (skips the AI pipeline)
+    url_key           TEXT,      -- canonical URL (dedup.url_key)
+    title_key         TEXT       -- normalized title (dedup.title_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_article_story ON Article(story_id);
-CREATE INDEX IF NOT EXISTS idx_article_feed  ON Article(feed_id);
+CREATE INDEX IF NOT EXISTS idx_article_story   ON Article(story_id);
+CREATE INDEX IF NOT EXISTS idx_article_feed    ON Article(feed_id);
+CREATE INDEX IF NOT EXISTS idx_article_created ON Article(created_at);
 
 CREATE TABLE IF NOT EXISTS Story (
-    id                 INTEGER PRIMARY KEY,
-    headline           TEXT,
-    summary            TEXT,
-    tags               TEXT DEFAULT '[]',
-    metrics            TEXT DEFAULT '{}',
-    quality_score      REAL DEFAULT 5.0,
-    created_at         TEXT DEFAULT (datetime('now')),
-    updated_at         TEXT DEFAULT (datetime('now'))
+    id            INTEGER PRIMARY KEY,
+    headline      TEXT,
+    summary       TEXT,
+    tags          TEXT DEFAULT '[]',
+    metrics       TEXT DEFAULT '{}',   -- urgency_level, impact_scale, status, location, language
+    quality_score REAL DEFAULT 5.0,    -- median of member article qualities
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now')),
+    merge_checked_at TEXT              -- last recall-merge check (re-checked after updates)
 );
 
 CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);
 
+-- Single local user.
 CREATE TABLE IF NOT EXISTS UserProfile (
-    id            INTEGER PRIMARY KEY,
-    tag_weights   TEXT DEFAULT '{}',
+    id             INTEGER PRIMARY KEY,
+    tag_weights    TEXT DEFAULT '{}',
     source_weights TEXT DEFAULT '{}',
-    preferences   TEXT DEFAULT '{"min_quality": 0.0, "summary_length": "medium"}'
+    preferences    TEXT DEFAULT '{}'
 );
 
--- Single local user.
 INSERT OR IGNORE INTO UserProfile (id, tag_weights, source_weights, preferences)
 VALUES (1, '{}', '{}', '{"min_quality": 0.0, "summary_length": "medium"}');
 
--- Raw 👍/👎 feedback, kept SEPARATE from UserProfile so the raw signal can be
--- re-derived / the algorithm adjusted later without touching the live profile.
--- (Click/engagement tracking is intentionally NOT recorded here — votes only.)
+-- Raw votes, kept separate from UserProfile so weights can be re-derived later.
+-- Headline/tags are snapshotted: votes outlive the story (retention).
 CREATE TABLE IF NOT EXISTS FeedbackLog (
-    id          INTEGER PRIMARY KEY,
-    story_id    INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
-    kind        TEXT    NOT NULL,
-    created_at  TEXT    DEFAULT (datetime('now'))
+    id         INTEGER PRIMARY KEY,
+    story_id   INTEGER,
+    headline   TEXT,
+    tags       TEXT,
+    kind       TEXT    NOT NULL,   -- up | down
+    created_at TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id);
 
--- Per-story chat. Single local user, so a session is keyed by story_id only
--- (one session per story; history survives restarts). Deleting a story
--- cascades to its session and the session cascades to its messages.
-CREATE TABLE IF NOT EXISTS ChatSession (
-    id          INTEGER PRIMARY KEY,
-    story_id    INTEGER NOT NULL UNIQUE REFERENCES Story(id) ON DELETE CASCADE,
-    created_at  TEXT    DEFAULT (datetime('now')),
-    updated_at  TEXT    DEFAULT (datetime('now'))
+-- URLs of deleted articles, so feeds that still list them don't re-ingest them.
+CREATE TABLE IF NOT EXISTS ArticleTombstone (
+    url        TEXT PRIMARY KEY,
+    deleted_at TEXT DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_chat_session_story ON ChatSession(story_id);
+
+-- Per-story chat: one session per story (single user).
+CREATE TABLE IF NOT EXISTS ChatSession (
+    id         INTEGER PRIMARY KEY,
+    story_id   INTEGER NOT NULL UNIQUE REFERENCES Story(id) ON DELETE CASCADE,
+    created_at TEXT    DEFAULT (datetime('now')),
+    updated_at TEXT    DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS ChatMessage (
-    id          INTEGER PRIMARY KEY,
-    session_id  INTEGER NOT NULL REFERENCES ChatSession(id) ON DELETE CASCADE,
-    role        TEXT    NOT NULL,        -- 'user' | 'assistant'
-    content     TEXT    NOT NULL,
-    created_at  TEXT    DEFAULT (datetime('now'))
+    id         INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES ChatSession(id) ON DELETE CASCADE,
+    role       TEXT    NOT NULL,   -- user | assistant
+    content    TEXT    NOT NULL,
+    created_at TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_chat_message_session ON ChatMessage(session_id);
 
--- The vec0 virtual table (created by db.py once the extension is loaded):
---   CREATE VIRTUAL TABLE Article_Embeddings USING vec0(
---       article_id INTEGER,
---       embedding  FLOAT[1024]
---   );
+-- Article_Vectors (sqlite-vec vec0, cosine, PK article_id) is created by db.py once the extension is loaded.

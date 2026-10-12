@@ -4,17 +4,20 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Feeds — AI News Aggregator</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
+<body class="wide">
   <header class="topbar">
-    <div class="brand">
-      <span class="dot"></span>
-      <h1><a href="/" class="brand-link">Feeds</a></h1>
-    </div>
+    <a href="/" class="brand"><span class="dot"></span><h1>News</h1></a>
+    <nav class="nav">
+      <a href="/">Stories</a>
+      <a href="/list">Articles</a>
+      <a href="/feeds" id="feeds-link" class="active">Feeds</a>
+    </nav>
     <div class="controls">
       <span id="feed-status" class="status">loading…</span>
-      <button id="reload" class="btn">Reload</button>
+      <button id="reload" class="btn" type="button">Reload</button>
     </div>
   </header>
 
@@ -22,24 +25,29 @@
     <section class="heads-up">
       <div class="heads-up-label">Add feed</div>
       <form id="add-feed" class="add-feed">
-        <input name="xml_url" placeholder="https://example.com/rss.xml" required />
+        <input name="xml_url" type="url" placeholder="https://example.com/rss.xml" required />
         <input name="title" placeholder="Title (auto-fetched from URL if left empty)" />
         <input name="category" list="catlist" placeholder="Category (pick existing or type new)" />
         <button class="btn" type="submit">Add</button>
       </form>
       <datalist id="catlist"></datalist>
       <p class="hint">
-        Disabling a feed stops its AI ingestion (embedding/clustering/scoring) — it still
-        keeps fetching RSS rows so its 24h / 7d volume stays live. Category totals only
-        count enabled feeds. Re-enabling processes the accumulated backlog.
+        Disabling a feed stops its AI processing — it still keeps fetching RSS rows
+        (without full-text extraction) so its 24h / 7d volume stays live. Category
+        totals only count enabled feeds. Re-enabling processes the accumulated backlog.
       </p>
     </section>
 
-    <section class="feed" id="feed-list" aria-label="Feeds">
+    <div class="toolbar">
+      <input id="feed-search" type="search" placeholder="Filter feeds…" />
+      <label class="check"><input id="only-errors" type="checkbox" /> only failing</label>
+    </div>
+    <section class="table-wrap" id="feed-list" aria-label="Feeds">
       <div class="empty">Loading feeds…</div>
     </section>
   </main>
 
+  <script src="/static/common.js"></script>
   <script src="/static/auth.js"></script>
   <script src="/static/feeds.js"></script>
 </body>

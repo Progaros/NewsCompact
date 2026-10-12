@@ -1,8 +1,8 @@
 """Export unreviewed golden-set candidates as compact Markdown.
 
 Usage:
-    PYTHONPATH=. uv run python scripts/export_for_review.py
-    PYTHONPATH=. uv run python scripts/export_for_review.py \
+    uv run python scripts/benchmark/export_for_review.py
+    uv run python scripts/benchmark/export_for_review.py \
         --input benchmark_pairs_200.json --output review_candidates.md
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app import db  # noqa: E402
 
 
@@ -72,8 +72,8 @@ def render(pairs: list[dict[str, Any]], articles: dict[int, dict], stories: dict
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=Path("benchmark_pairs_200.json"))
-    parser.add_argument("--output", type=Path, default=Path("review_candidates.md"))
+    parser.add_argument("--input", type=Path, default=Path(__file__).with_name("benchmark_pairs_200.json"))
+    parser.add_argument("--output", type=Path, default=Path(__file__).with_name("review_candidates.md"))
     args = parser.parse_args()
 
     records = json.loads(args.input.read_text(encoding="utf-8"))

@@ -12,7 +12,9 @@ The instance is assumed to expose a searchapi.io-compatible endpoint
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 
 import httpx
 
@@ -68,14 +70,34 @@ def search(query: str, max_results: int | None = None) -> list[dict[str, str]]:
         return []
 
 
-def scrape(url: str) -> str:
-    """Fetch a URL and extract article text (ingest's trafilatura/newspaper
-    chain). Returns "" on any failure. Reuses ingest.extract_content so the
-    chat agent reads the same text the pipeline ingests."""
+def _is_public(url: str) -> bool:
+    """Search results are untrusted: never let them point the scraper at the LAN."""
+    if not ingest.is_http_url(url):
+        return False
+    host = httpx.URL(url).host
     try:
-        with _client() as c:
-            r = c.get(url, headers={"User-Agent": config.USER_AGENT})
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+
+
+def scrape(url: str) -> str:
+    """Fetch a public URL and extract article text; "" on any failure."""
+    try:
+        with httpx.Client(timeout=config.SEARCHNGX_TIMEOUT, follow_redirects=False) as c:
+            for _ in range(4):  # redirects are re-checked hop by hop
+                if not _is_public(url):
+                    return ""
+                r = c.get(url, headers={"User-Agent": config.USER_AGENT})
+                if not r.is_redirect:
+                    break
+                url = str(r.next_request.url) if r.next_request else ""
+            else:
+                return ""
             r.raise_for_status()
+            if "html" not in r.headers.get("content-type", "html").lower():
+                return ""
             return ingest.extract_content(r.text, url).strip()
     except Exception as e:  # noqa: BLE001 — best-effort, degrade to empty text
         log.debug("searchngx scrape failed for %s: %s", url, e)

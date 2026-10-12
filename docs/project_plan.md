@@ -2,7 +2,7 @@
 
 > **Status:** original design spec (2026-09-27), kept as-is. This file is *not*
 > updated as the project evolves — for current state see
-> [`README.md`](./README.md) (usage) and [`plan.md`](./plan.md) (progress/changelog);
+> [`README.md`](../README.md) (usage) and [`plan.md`](./plan.md) (progress/changelog);
 > technical discoveries are in [`findings.md`](./findings.md).
 
 ## 1. System Overview

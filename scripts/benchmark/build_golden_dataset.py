@@ -6,7 +6,7 @@ automatic truth labeling, so every generated record includes provenance and
 should receive a human review before model scoring.
 
 Usage:
-    PYTHONPATH=. uv run python scripts/build_golden_dataset.py \
+    uv run python scripts/benchmark/build_golden_dataset.py \
         --input benchmark_pairs.json --output benchmark_pairs.json --target 200
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app import db
 
 _WORD_RE = re.compile(r"[^a-z0-9]+")
@@ -134,7 +134,7 @@ def main() -> None:
             articles[item["id"]] = item
         vectors = {
             row["article_id"]: normalize(unpack(bytes(row["embedding"])))
-            for row in conn.execute("SELECT article_id, embedding FROM Article_Embeddings")
+            for row in conn.execute("SELECT article_id, embedding FROM Article_Vectors")
             if row["article_id"] in articles
         }
 

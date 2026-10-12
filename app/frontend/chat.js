@@ -12,17 +12,11 @@ const Chat = (() => {
   let busy = false;        // a reply is in flight (guards double-send)
 
   // --- markdown (compact, HTML-safe) ---------------------------------------
-  function esc(s) {
-    return (s ?? "").toString().replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
-
   function inline(s) {
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     return s;
   }
 
@@ -157,7 +151,7 @@ const Chat = (() => {
       .catch(() => { /* history is non-critical; the input still works */ });
   }
 
-  function send() {
+  async function send() {
     if (busy) return;
     const storyId = currentStory;
     const input = document.getElementById("chat-input");
@@ -169,31 +163,55 @@ const Chat = (() => {
     box.querySelector(".chat-empty")?.remove();
     box.appendChild(msgEl("user", text));
     input.value = "";
-    const thinking = msgEl("assistant", "", true);
-    box.appendChild(thinking);
+    const reply = msgEl("assistant", "", true);
+    box.appendChild(reply);
     box.scrollTop = box.scrollHeight;
     busy = true;
-    fetch(`/api/stories/${storyId}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, search_turns: turns }),
-    })
-      .then((res) => {
-        if (Auth.unauth(res)) { thinking.remove(); return null; }
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json();
-      })
-      .then((d) => {
-        thinking.remove();
-        box.appendChild(msgEl("assistant", d.reply));
-        box.scrollTop = box.scrollHeight;
-      })
-      .catch((err) => {
-        thinking.remove();
-        box.appendChild(msgEl("assistant", `(error: ${err.message || err})`));
-        box.scrollTop = box.scrollHeight;
-      })
-      .finally(() => { busy = false; });
+
+    let answer = "";
+    let rendered = 0;
+    const setStatus = (s) => { reply.querySelector(".chat-thinking").textContent = s; };
+    const render = () => {
+      reply.innerHTML = `<span class="chat-who">AI</span><span class="chat-body">${mdToHtml(answer)}</span>`;
+      rendered = answer.length;
+      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+      if (nearBottom) box.scrollTop = box.scrollHeight;
+    };
+    try {
+      const res = await fetch(`/api/stories/${storyId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, search_turns: turns }),
+      });
+      if (Auth.unauth(res)) { reply.remove(); return; }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          const ev = JSON.parse(line);
+          if (ev.type === "status" && !answer) setStatus(ev.text);
+          else if (ev.type === "delta") answer += ev.text;
+          else if (ev.type === "error") throw new Error(ev.text);
+        }
+        if (answer.length > rendered) render();
+      }
+      if (!answer) throw new Error("empty reply");
+      render();
+    } catch (err) {
+      answer += `${answer ? "\n\n" : ""}(error: ${err.message || err})`;
+      render();
+    } finally {
+      busy = false;
+    }
   }
 
   return { open, close };

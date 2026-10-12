@@ -1,17 +1,61 @@
-"""Entrypoint: uvicorn serving the FastAPI app (see app/api.py)."""
+"""Entrypoint: serve the FastAPI app with uvicorn (see app/api.py)."""
+import gzip
 import logging
+import logging.handlers
+import os
+import shutil
 
 import uvicorn
 
-from app import config
+from app import bus, config
 
-# App loggers (news.*) log at INFO: pipeline/harness progress, ingest stats.
-logging.basicConfig(level=logging.INFO,
-                      format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def _gzip_rotator(source: str, dest: str) -> None:
+    with open(source, "rb") as src, gzip.open(dest, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    os.remove(source)
+
+
+def setup_logging() -> None:
+    if config.LOG_FILE:
+        handler: logging.Handler = logging.handlers.RotatingFileHandler(
+            config.LOG_FILE, maxBytes=int(config.LOG_MAX_MB * 1024 * 1024),
+            backupCount=config.LOG_BACKUPS, encoding="utf-8",
+        )
+        handler.namer = lambda name: name + ".gz"  # server.log.1.gz, server.log.2.gz, ...
+        handler.rotator = _gzip_rotator
+    else:
+        handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(_FORMAT))
+    logging.basicConfig(level=config.LOG_LEVEL, handlers=[handler], force=True)
+    # Per-request client logs (hundreds of feed fetches per cycle) drown the pipeline lines.
+    for noisy in ("httpx", "httpcore", "trafilatura"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+class _Server(uvicorn.Server):
+    def handle_exit(self, sig, frame) -> None:
+        # Uvicorn waits for open responses before shutting down; end the endless SSE streams now.
+        bus.close_all()
+        super().handle_exit(sig, frame)
 
 
 def main() -> None:
-    uvicorn.run("app.api:app", host=config.HOST, port=config.PORT)
+    setup_logging()
+    config.PID_FILE.write_text(str(os.getpid()))
+    try:
+        # log_config=None: uvicorn's loggers propagate to the handler above.
+        server = _Server(uvicorn.Config(
+            "app.api:app", host=config.HOST, port=config.PORT, log_config=None,
+            proxy_headers=True, forwarded_allow_ips=config.FORWARDED_ALLOW_IPS,
+            timeout_graceful_shutdown=5,
+        ))
+        server.run()
+    finally:
+        if config.PID_FILE.exists() and config.PID_FILE.read_text().strip() == str(os.getpid()):
+            config.PID_FILE.unlink()
 
 
 if __name__ == "__main__":

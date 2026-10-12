@@ -1,84 +1,157 @@
-"""Background worker: periodically runs ingest + AI pipeline.
+"""Background worker: an ingest loop and a pipeline loop on separate threads.
 
-Runs on a daemon thread with a lock so cycles never overlap. A manual refresh
-endpoint also calls run_cycle() from the API thread.
+Ingest runs every WORKER_INTERVAL_SECONDS (start-to-start). The pipeline
+thread sleeps until ingest stores new articles for an enabled feed (or a
+feed is enabled / a refresh is requested) and then drains the queue, so new
+articles no longer wait for the remaining feeds or the next cycle.
 """
 from __future__ import annotations
 
 import logging
-import resource
 import threading
 import time
+from typing import Any
 
-from . import bus, config, db, ingest, pipeline
+from . import bus, config, db, ingest, merge, pipeline, retention
 
 log = logging.getLogger("news.worker")
 
-_lock = threading.Lock()
+_ingest_lock = threading.Lock()
+_pipeline_lock = threading.Lock()
+_wake = threading.Event()
 _stop = threading.Event()
+_threads: list[threading.Thread] = []
+
+# Live status for /api/health and /list.
+status: dict[str, Any] = {
+    "ingest_running": False,
+    "ingest_last_started": None,
+    "ingest_last_seconds": None,
+    "ingest_last_new": None,
+    "pipeline_running": False,
+    "pipeline_last_finished": None,
+    "pipeline_last_processed": None,
+    "pipeline_last_seconds": None,
+    "merge_last_finished": None,
+    "merge_last_checked": None,
+    "merge_last_merged": None,
+    "merge_last_seconds": None,
+    "retention_last_run": None,
+    "retention_last_deleted_articles": None,
+    "retention_last_deleted_stories": None,
+}
+_retention_due = 0.0  # monotonic time of the next retention run
 
 
-def _proc_cpu() -> float:
-    r = resource.getrusage(resource.RUSAGE_SELF)
-    return r.ru_utime + r.ru_stime
+def wake_pipeline() -> None:
+    _wake.set()
 
 
-def run_cycle() -> dict:
-    """One full ingestion + pipeline pass. Returns a small summary.
+def run_ingest() -> int:
+    with _ingest_lock:
+        status.update(ingest_running=True, ingest_last_started=db.utcnow())
+        t0 = time.perf_counter()
+        try:
+            new = ingest.ingest_all(on_new=wake_pipeline)
+        except Exception:  # noqa: BLE001
+            log.exception("ingest failed")
+            new = 0
+        finally:
+            status["ingest_running"] = False
+        secs = time.perf_counter() - t0
+        status.update(ingest_last_seconds=round(secs, 1), ingest_last_new=new)
+        log.info("ingest done: %d new articles in %.1fs", new, secs)
+        return new
 
-    Callers outside the worker thread (e.g. the refresh endpoint) must use
-    ``run_cycle_locked`` — see below.
-    """
-    result = {"ingest_new": 0, "processed": 0, "error": None}
-    wall0 = time.perf_counter()
-    cpu0 = _proc_cpu()
+
+def _run_retention() -> None:
+    global _retention_due
+    if time.monotonic() < _retention_due:
+        return
+    _retention_due = time.monotonic() + config.RETENTION_INTERVAL_HOURS * 3600
     try:
-        result["ingest_new"] = ingest.ingest_all()
-        ingest_wall, ingest_cpu = time.perf_counter() - wall0, _proc_cpu() - cpu0
-    except Exception as e:  # noqa: BLE001
-        result["error"] = f"ingest: {e}"
-        log.exception("ingest error")
-        ingest_wall, ingest_cpu = time.perf_counter() - wall0, _proc_cpu() - cpu0
-    wall0 = time.perf_counter()
-    cpu0 = _proc_cpu()
+        result = retention.run()
+    except Exception:  # noqa: BLE001
+        log.exception("retention failed")
+        return
+    status.update(retention_last_run=db.utcnow(), retention_last_deleted_articles=result["articles"],
+                  retention_last_deleted_stories=result["stories"])
+
+
+def run_pipeline() -> dict[str, int]:
+    with _pipeline_lock:
+        _run_retention()
+        status["pipeline_running"] = True
+        t0, cpu0 = time.perf_counter(), time.process_time()
+        try:
+            result = pipeline.process_pending(emit=bus.publish, should_stop=_stop.is_set)
+        except Exception:  # noqa: BLE001
+            log.exception("pipeline run failed")
+            result = {"processed": 0, "failed": 0}
+        secs = time.perf_counter() - t0
+        status.update(pipeline_last_finished=db.utcnow(), pipeline_last_processed=result["processed"],
+                      pipeline_last_seconds=round(secs, 1))
+        merged = _run_merge()
+        status["pipeline_running"] = False
+        if result["processed"] or result["failed"]:
+            log.info("pipeline run: %d processed, %d failed in %.1fs (cpu %.1fs)",
+                     result["processed"], result["failed"], secs, time.process_time() - cpu0)
+        if result["processed"] or result["failed"] or merged:
+            bus.publish({"type": "cycle_done", **result, "merged": merged})
+        return result
+
+
+def _run_merge() -> int:
+    if _stop.is_set():
+        return 0
+    t0 = time.perf_counter()
     try:
-        result["processed"] = pipeline.process_new_articles(emit=bus.publish)
-        pipeline_wall, pipeline_cpu = time.perf_counter() - wall0, _proc_cpu() - cpu0
-    except Exception as e:  # noqa: BLE001
-        result["error"] = result.get("error") or f"pipeline: {e}"
-        log.exception("pipeline error")
-        pipeline_wall, pipeline_cpu = time.perf_counter() - wall0, _proc_cpu() - cpu0
-    log.info(
-        "cycle ingest=%.1fs/cpu%.1fs (%d new) pipeline=%.1fs/cpu%.1fs (%d processed)",
-        ingest_wall, ingest_cpu, result["ingest_new"],
-        pipeline_wall, pipeline_cpu, result["processed"],
-    )
-    return result
+        result = merge.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("merge pass failed")
+        return 0
+    status.update(merge_last_finished=db.utcnow(), merge_last_checked=result["checked"],
+                  merge_last_merged=result["merged"], merge_last_seconds=round(time.perf_counter() - t0, 1))
+    return result["merged"]
 
 
-def run_cycle_locked() -> dict:
-    """run_cycle() with the cycle lock held — for endpoints called from a
-    foreign thread. Blocks until any scheduled cycle finishes, then runs."""
-    with _lock:
-        return run_cycle()
+def refresh() -> dict[str, Any]:
+    """Manual refresh: ingest now, then drain the queue (blocks)."""
+    new = run_ingest()
+    return {"ingest_new": new, **run_pipeline()}
 
 
-def _loop() -> None:
+def _ingest_loop() -> None:
     while not _stop.is_set():
-        if _lock.acquire(blocking=False):
-            try:
-                run_cycle()
-                bus.publish({"type": "cycle_done"})
-            finally:
-                _lock.release()
-        _stop.wait(config.WORKER_INTERVAL_SECONDS)
+        started = time.monotonic()
+        run_ingest()
+        _stop.wait(max(0.0, config.WORKER_INTERVAL_SECONDS - (time.monotonic() - started)))
+
+
+def _pipeline_loop() -> None:
+    _wake.set()  # drain any backlog left from the previous run
+    while not _stop.is_set():
+        _wake.wait(timeout=config.WORKER_INTERVAL_SECONDS)
+        _wake.clear()
+        if not _stop.is_set():
+            run_pipeline()
 
 
 def start() -> None:
-    db.init_db()
-    t = threading.Thread(target=_loop, daemon=True)
-    t.start()
+    if _threads:
+        return
+    _stop.clear()
+    for name, target in (("ingest", _ingest_loop), ("pipeline", _pipeline_loop)):
+        t = threading.Thread(target=target, name=f"news-{name}", daemon=True)
+        t.start()
+        _threads.append(t)
 
 
-def stop() -> None:
+def stop(timeout: float = 5.0) -> None:
+    """Signal both loops; the pipeline finishes its current article at most."""
     _stop.set()
+    _wake.set()
+    deadline = time.monotonic() + timeout
+    for t in _threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    _threads.clear()

@@ -1,36 +1,36 @@
-/* Feed management page — plain fetch + DOM. No frameworks. */
+/* Feed management page — plain fetch + DOM. Helpers from common.js. */
 
 const listEl = document.getElementById("feed-list");
 const statusEl = document.getElementById("feed-status");
 const addForm = document.getElementById("add-feed");
-
-function esc(s) {
-  return (s || "").toString().replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
-function fmtDate(s) {
-  if (!s) return "–";
-  const d = new Date(s.replace(" ", "T"));
-  return isNaN(d) ? s : d.toLocaleString();
-}
+const searchEl = document.getElementById("feed-search");
+const onlyErrorsEl = document.getElementById("only-errors");
+let lastData = null;
 
 function avgPerDay(n7) {
   return (n7 / 7).toFixed(1) + "/d";
 }
 
+function visible(f) {
+  const q = searchEl.value.trim().toLowerCase();
+  if (onlyErrorsEl.checked && !f.last_error) return false;
+  return !q || `${f.title} ${f.xml_url} ${f.category || ""}`.toLowerCase().includes(q);
+}
+
 async function loadFeeds() {
   const res = await fetch("/api/feeds");
-  if (Auth.unauth(res)) return;
-  const data = await res.json();
-  renderFeeds(data);
+  if (Auth.unauth(res) || !res.ok) return;
+  lastData = await res.json();
+  renderFeeds(lastData);
 }
 
 function renderFeeds(data) {
   const feeds = data.feeds;
+  const shownFeeds = feeds.filter(visible);
   const cats = data.categories || {};
-  statusEl.textContent = `${feeds.length} feeds · ${feeds.filter((f) => f.enabled).length} enabled`;
+  const errors = feeds.filter((f) => f.last_error).length;
+  statusEl.textContent = `${feeds.length} feeds · ${feeds.filter((f) => f.enabled).length} enabled`
+    + (errors ? ` · ${errors} failing` : "");
 
   const table = document.createElement("table");
   table.className = "feeds";
@@ -46,6 +46,8 @@ function renderFeeds(data) {
   dl.innerHTML = existing.map((c) => `<option value="${esc(c)}">`).join("");
 
   for (const [cat, g] of Object.entries(cats)) {
+    const catFeeds = shownFeeds.filter((f) => (f.category || "(uncategorized)") === cat);
+    if (!catFeeds.length) continue;
     const allOn = g.enabled === g.feeds;
     const head = document.createElement("tr");
     head.className = "cat-row";
@@ -61,8 +63,7 @@ function renderFeeds(data) {
     );
     body.appendChild(head);
 
-    for (const f of feeds) {
-      if ((f.category || "(uncategorized)") !== cat) continue;
+    for (const f of catFeeds) {
       const tr = document.createElement("tr");
       tr.className = f.enabled ? "feed-on" : "feed-off";
       tr.innerHTML = `
@@ -70,13 +71,14 @@ function renderFeeds(data) {
         <td class="feed-name">
           <div class="name">${esc(f.title)}</div>
           <div class="url">${esc(f.xml_url)}</div>
+          ${f.last_error ? `<div class="feed-error" title="${esc(f.last_error)}">⚠ fetch failing: ${esc(f.last_error.slice(0, 80))}</div>` : ""}
         </td>
         <td><input class="cat" value="${esc(f.category || "")}" /></td>
         <td>${f.last_24h}</td>
         <td>${f.last_7d}</td>
         <td>${avgPerDay(f.last_7d)}</td>
         <td>${f.article_total}</td>
-        <td class="muted">${fmtDate(f.last_fetched_at)}</td>
+        <td class="muted nowrap" title="${esc(fmtUtc(f.last_fetched_at))}">${esc(timeAgo(f.last_fetched_at))}</td>
         <td><button class="btn del" title="Delete feed + its articles">✕</button></td>`;
       tr.querySelector(".toggle").addEventListener("click", () => {
         patch(f.id, { enabled: f.enabled ? 0 : 1 });
@@ -107,7 +109,7 @@ async function patch(id, body) {
   if (res.ok) {
     loadFeeds();
   } else {
-    alert(`update failed: ${res.status}`);
+    Auth.toast(`update failed: ${res.status}`);
   }
 }
 
@@ -121,7 +123,7 @@ async function setCategory(cat, enabled) {
   if (res.ok) {
     loadFeeds();
   } else {
-    alert(`category update failed: ${res.status}`);
+    Auth.toast(`category update failed: ${res.status}`);
   }
 }
 
@@ -131,7 +133,7 @@ async function del(id) {
   if (res.ok) {
     loadFeeds();
   } else {
-    alert(`delete failed: ${res.status}`);
+    Auth.toast(`delete failed: ${res.status}`);
   }
 }
 
@@ -165,7 +167,7 @@ addForm.addEventListener("submit", async (e) => {
     title = titleInput.value.trim();
   }
   if (!title) {
-    alert("Could not fetch a title from the URL — please enter one manually.");
+    Auth.toast("Could not fetch a title from the URL — please enter one manually.");
     return;
   }
   const res = await fetch("/api/feeds", {
@@ -180,13 +182,17 @@ addForm.addEventListener("submit", async (e) => {
   if (Auth.unauth(res)) return;
   if (res.ok) {
     addForm.reset();
+    Auth.toast("Feed added — it is fetched with the next ingest run.");
     loadFeeds();
   } else {
-    alert(`add failed: ${res.status}`);
+    const detail = (await res.json().catch(() => ({}))).detail;
+    Auth.toast(`add failed: ${typeof detail === "string" ? detail : res.status}`);
   }
 });
 
 document.getElementById("reload").addEventListener("click", loadFeeds);
+searchEl.addEventListener("input", () => lastData && renderFeeds(lastData));
+onlyErrorsEl.addEventListener("change", () => lastData && renderFeeds(lastData));
 
 (async function boot() {
   await Auth.init();

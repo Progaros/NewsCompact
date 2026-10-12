@@ -11,14 +11,14 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app import db, harness  # noqa: E402
 from scripts.benchmark_clustering import load_articles, story_context  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--labels", type=Path, default=Path("benchmark_pairs_200.json"))
+    parser.add_argument("--labels", type=Path, default=Path(__file__).with_name("benchmark_pairs_200.json"))
     parser.add_argument("--output", type=Path, default=Path("false_negatives.md"))
     parser.add_argument("--threshold", type=float, default=0.55)
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main() -> None:
     decisions: dict[str, dict[str, str]] = {}
     for start in range(0, len(pending), 1):
         batch = pending[start:start + 1]
-        decisions.update(harness.harness.analyze_event_pairs(batch))
+        decisions.update(harness.analyze_event_pairs(batch))
 
     false_negatives = []
     for item in pending:

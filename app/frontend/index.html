@@ -4,35 +4,44 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI News Aggregator</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="dot"></span>
-      <h1>AI News Aggregator</h1>
-    </div>
+    <a href="/" class="brand"><span class="dot"></span><h1>News</h1></a>
+    <nav class="nav">
+      <a href="/" class="active">Stories</a>
+      <a href="/list">Articles</a>
+      <a href="/feeds" id="feeds-link">Feeds</a>
+    </nav>
     <div class="controls">
       <span id="status" class="status">loading…</span>
-      <a href="/feeds" id="feeds-link" class="btn">Feeds</a>
-      <a href="/list" class="btn">List</a>
     </div>
   </header>
 
   <main>
-    <section class="heads-up" id="heads-up" aria-label="Quick heads up">
+    <section class="heads-up" aria-label="Quick heads up">
       <div class="heads-up-label">Quick Heads Up</div>
       <p id="heads-up-text">Loading brief…</p>
     </section>
 
-    <section class="feed" id="feed" aria-label="Stories">
-      <!-- story cards injected here -->
-    </section>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search headlines, summaries, tags…" maxlength="100" />
+      <div class="segmented" role="group" aria-label="Story scope">
+        <button id="scope-active" class="active" type="button">Active</button>
+        <button id="scope-archive" type="button">Archive</button>
+      </div>
+    </div>
+    <div id="filter-chips" class="chips" hidden></div>
+
+    <section class="feed" id="feed" aria-label="Stories"></section>
     <div class="feed-controls">
       <button id="load-more" class="btn" hidden>Load more</button>
     </div>
   </main>
 
+  <script src="/static/common.js"></script>
   <script src="/static/auth.js"></script>
   <script src="/static/chat.js"></script>
   <script src="/static/app.js"></script>
