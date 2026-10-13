@@ -49,22 +49,38 @@ _SYSTEM_FULL = (
     "mention a notable view only as what commenters say."
     + _METRICS_GUIDE
 )
+_SIGNIFICANCE_GUIDE = (
+    " new_facts lists, before anything else, each concrete fact the New Article reports "
+    "that the Current Summary does not already state or imply (a new event, figure, "
+    "decision or official statement); background, recaps, rewording, analysis, opinion "
+    "and reactions are not new facts. Return [] when there are none — most follow-up "
+    "articles add none. update_significance rates what the New Article adds for a reader "
+    "who already knows the Current Summary: 0 = nothing new (repetition, rewording, "
+    "background, commentary); 1 = minor detail, reaction or opinion; "
+    "2 = notable development that changes what a reader knows (new decision, outcome, "
+    "casualties, major new figures); 3 = major change (escalation, outcome, reversal, "
+    "the story's core changes). When unsure, choose the lower value."
+)
 _SYSTEM_INCREMENTAL = (
     "You are updating an active news story. Review the Current Summary and the "
     "New Article. If the New Article introduces material updates, rewrite the "
-    "summary in 2-4 factual sentences to incorporate them. If it adds no new "
+    "summary in 2-4 factual sentences to incorporate them while keeping the key "
+    "facts already in it. If it adds no new "
     "facts, return the Current Summary exactly as written. Preserve the story "
     "headline: it names the story's core event, not the latest angle or reaction, "
     "and never joins separate events with ';'. Return the same "
     "JSON object schema as requested. location/language describe the story's "
     "setting — return them as-is unless the new article clearly changes it. "
-    "Reader comments (a 'Top comments:' list) are opinions, not facts. "
-    "update_significance rates what the New Article adds for a reader who already knows the "
-    "Current Summary: 0 = nothing new (repetition, rewording, commentary); "
-    "1 = minor detail, reaction or opinion; "
-    "2 = notable development (new facts, figures, decisions, casualties, official statements); "
-    "3 = major change (escalation, outcome, reversal, the story's core changes)."
+    "Reader comments (a 'Top comments:' list) are opinions, not facts."
+    + _SIGNIFICANCE_GUIDE
     + _METRICS_GUIDE
+)
+# Revived story: full rewrite, but rated against the summary readers already saw.
+_SYSTEM_REVIVE = (
+    _SYSTEM_FULL
+    + " Also return new_facts and update_significance for the New Article named below,"
+    " judged against the Current Summary."
+    + _SIGNIFICANCE_GUIDE
 )
 IMPACTS = ("Local", "Regional", "National", "Global")
 STATUSES = ("Breaking", "Ongoing", "Resolved")
@@ -89,13 +105,17 @@ _SCHEMA = {
     },
     "required": ["headline", "summary", "tags", "quality", "metrics"],
 }
-_INCREMENTAL_SCHEMA = {
+# new_facts comes first so the rating is grounded in an explicit list.
+_RATED_SCHEMA = {
     **_SCHEMA,
-    "properties": {**_SCHEMA["properties"],
+    "properties": {"new_facts": {"type": "array", "items": {"type": "string"}},
+                   **_SCHEMA["properties"],
                    "update_significance": {"type": "integer", "minimum": 0, "maximum": 3}},
-    "required": [*_SCHEMA["required"], "update_significance"],
+    "required": ["new_facts", *_SCHEMA["required"], "update_significance"],
 }
 SIGNIFICANCE_MAX = 3
+# Escalations only count when the story reaches this urgency ("major event" anchor).
+_ESCALATION_MIN_URGENCY = 7
 _INCREMENTAL_MAX_WORDS = 1500
 _SENTENCE_SPLIT = re.compile(r"[.!?]+\s*")
 _LANG_RE = re.compile(r"[a-z]{2,3}(-[a-z]{2,4})?")
@@ -177,7 +197,13 @@ def _build_prompt(story: sqlite3.Row | None, arts: list[dict[str, Any]],
         )
         return _SYSTEM_INCREMENTAL, user
     titles = "\n".join(f"- {a.get('title')}" for a in arts)
-    return _SYSTEM_FULL, f"Attached source articles:\n{titles}\n\nFull article text:\n{_combined_text(arts)}"
+    user = f"Attached source articles:\n{titles}\n\nFull article text:\n{_combined_text(arts)}"
+    new = next((a for a in arts if a.get("id") == article_id), None) if article_id else None
+    if new is not None and story is not None and story["summary"]:
+        user += (f"\n\nCurrent Summary (what readers already know):\n{story['summary']}\n\n"
+                 f"New Article Title:\n{new.get('title', '')}")
+        return _SYSTEM_REVIVE, user
+    return _SYSTEM_FULL, user
 
 
 def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = False,
@@ -190,10 +216,11 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
         return 0
     story = conn.execute("SELECT headline, summary, metrics FROM Story WHERE id = ?", (story_id,)).fetchone()
     system, user = _build_prompt(story, arts, article_id, force_full)
-    incremental = system is _SYSTEM_INCREMENTAL
+    rated = system is not _SYSTEM_FULL
+    prev_summary = (story["summary"] or "") if story is not None else ""
 
     out = ollama.structured(
-        _INCREMENTAL_SCHEMA if incremental else _SCHEMA,
+        _RATED_SCHEMA if rated else _SCHEMA,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.2,
         prose_fallback=True,
@@ -230,9 +257,11 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
         except (TypeError, ValueError):
             quality = 5.0
     headline = (out.get("headline") or "").strip() or arts[-1].get("title") or "Untitled"
-    significance = update_significance(out, prev, metrics, incremental)
-    if incremental:
-        log.info("story %s update significance=%d", story_id, significance)
+    significance = update_significance(out, prev, metrics, rated, prev_summary)
+    if rated:
+        facts = out.get("new_facts")
+        log.info("story %s update significance=%d (model=%s new_facts=%s)", story_id, significance,
+                 out.get("update_significance"), len(facts) if isinstance(facts, list) else "-")
 
     conn.execute(
         "UPDATE Story SET headline=?, summary=?, tags=?, metrics=?, quality_score=?, "
@@ -244,14 +273,33 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
     return len(user)
 
 
+def _shows_breaking(m: dict[str, Any]) -> bool:
+    """Same rule as the UI's Breaking badge."""
+    try:
+        return m.get("status") == "Breaking" and int(m.get("urgency_level")) >= 8
+    except (TypeError, ValueError):
+        return False
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
 def update_significance(out: dict[str, Any], prev: dict[str, Any], metrics: dict[str, Any],
-                        incremental: bool) -> int:
+                        rated: bool, prev_summary: str = "") -> int:
     """0-3: how much this rewrite matters to a reader who already read the story.
 
-    Full rewrites (new, revived or merged story) and urgency escalations count as major.
+    Unrated rewrites count as major for a new story and as nothing for an existing
+    one (merge, rescore). Rated ones with no new facts or an unchanged summary are 0;
+    otherwise the model's level, raised to major on a real escalation.
     """
-    if not incremental:
-        return SIGNIFICANCE_MAX
+    if not rated:
+        return 0 if prev_summary else SIGNIFICANCE_MAX
+    facts = out.get("new_facts")
+    if isinstance(facts, list) and not any(isinstance(f, str) and f.strip() for f in facts):
+        return 0
+    if prev_summary and _norm(out.get("summary") or "") == _norm(prev_summary):
+        return 0
     try:
         level = max(0, min(SIGNIFICANCE_MAX, int(out.get("update_significance", 1))))
     except (TypeError, ValueError):
@@ -260,6 +308,7 @@ def update_significance(out: dict[str, Any], prev: dict[str, Any], metrics: dict
         prev_urgency = int(prev.get("urgency_level"))
     except (TypeError, ValueError):
         prev_urgency = metrics["urgency_level"]
-    escalated = (metrics["urgency_level"] - prev_urgency >= 2
-                 or (metrics["status"] == "Breaking" and prev.get("status") != "Breaking"))
+    escalated = ((metrics["urgency_level"] - prev_urgency >= 2
+                  and metrics["urgency_level"] >= _ESCALATION_MIN_URGENCY)
+                 or (_shows_breaking(metrics) and not _shows_breaking(prev)))
     return SIGNIFICANCE_MAX if escalated else level

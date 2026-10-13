@@ -69,7 +69,7 @@ def test_urgency_escalation_resurfaces(client, feed_id, llm):
     sid = _ids(client)[0][0]
     client.post(f"/api/stories/{sid}/read")
     _age_read(sid)
-    llm.significance, llm.urgency = 0, 7
+    llm.significance, llm.urgency = 1, 7
     add_article(feed_id, "Storm hits coast")
     pipeline.process_pending()
     assert client.get(f"/api/stories/{sid}").json()["read"] == "updated"
@@ -77,8 +77,37 @@ def test_urgency_escalation_resurfaces(client, feed_id, llm):
 
 def test_update_significance_rules():
     m = {"urgency_level": 4, "status": "Ongoing"}
-    assert story.update_significance({"update_significance": 2}, m, dict(m), incremental=True) == 2
-    assert story.update_significance({"update_significance": "x"}, m, dict(m), incremental=True) == 1
-    assert story.update_significance({}, m, dict(m), incremental=False) == story.SIGNIFICANCE_MAX
-    breaking = {"urgency_level": 4, "status": "Breaking"}
-    assert story.update_significance({"update_significance": 0}, m, breaking, True) == story.SIGNIFICANCE_MAX
+    fact = {"new_facts": ["x"], "summary": "New."}
+    assert story.update_significance({**fact, "update_significance": 2}, m, dict(m), True, "Old.") == 2
+    assert story.update_significance({**fact, "update_significance": "x"}, m, dict(m), True, "Old.") == 1
+    # no new facts / summary returned unchanged -> nothing to resurface
+    assert story.update_significance({"new_facts": [""], "update_significance": 3}, m, dict(m), True, "Old.") == 0
+    assert story.update_significance({"new_facts": ["x"], "summary": " old. ", "update_significance": 2},
+                                     m, dict(m), True, "Old.") == 0
+    # unrated full rewrite: new story is major, merge/rescore of an existing one is not
+    assert story.update_significance({}, m, dict(m), False) == story.SIGNIFICANCE_MAX
+    assert story.update_significance({}, m, dict(m), False, "Old.") == 0
+    # escalation: only into the Breaking badge or a +2 jump to urgency >= 7
+    low_breaking = {"urgency_level": 5, "status": "Breaking"}
+    assert story.update_significance({**fact, "update_significance": 0}, m, low_breaking, True, "Old.") == 0
+    breaking = {"urgency_level": 8, "status": "Breaking"}
+    assert story.update_significance({**fact, "update_significance": 0}, m, breaking, True, "Old.") == story.SIGNIFICANCE_MAX
+    jitter = {"urgency_level": 6, "status": "Ongoing"}
+    assert story.update_significance({**fact, "update_significance": 1}, m, jitter, True, "Old.") == 1
+
+
+def test_merge_does_not_resurface(client, feed_id, llm):
+    from app import merge
+
+    add_article(feed_id, "Quake strikes city")
+    pipeline.process_pending()
+    sid = _ids(client)[0][0]
+    client.post(f"/api/stories/{sid}/read")
+    _age_read(sid)
+    aid = add_article(feed_id, "Quake aftermath")
+    with db.get_conn() as conn:
+        drop = conn.execute("INSERT INTO Story (headline, summary) VALUES ('Dup', 'Dup.')").lastrowid
+        conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (drop, aid))
+        merge._absorb(conn, sid, drop)
+        story.update_story(conn, sid, force_full=True)
+    assert client.get(f"/api/stories/{sid}").json()["read"] == "read"

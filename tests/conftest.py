@@ -62,8 +62,9 @@ class FakeLLM:
         self.calls.append("story")
         user = messages[-1]["content"]
         return {
+            "new_facts": ["New detail"] * self.significance,
             "headline": "Headline " + user[:30].replace("\n", " "),
-            "summary": "First sentence. Second sentence.",
+            "summary": f"First sentence. Second sentence {len(self.calls)}.",
             "tags": ["AI", "Machine-Learning"],
             "quality": 6,
             "location": "Munich, Germany",
