@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS Story (
     quality_score REAL DEFAULT 5.0,    -- median of member article qualities
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
-    merge_checked_at TEXT              -- last recall-merge check (re-checked after updates)
+    merge_checked_at TEXT,             -- last recall-merge check (re-checked after updates)
+    material_at   TEXT                 -- last update significant enough to resurface a read story
 );
 
 CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);
@@ -83,6 +84,14 @@ CREATE TABLE IF NOT EXISTS FeedbackLog (
     created_at TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id);
+
+-- Stories marked read (single user). A story is unread again once
+-- COALESCE(Story.material_at, Story.created_at) > read_at.
+CREATE TABLE IF NOT EXISTS StoryRead (
+    story_id INTEGER PRIMARY KEY REFERENCES Story(id) ON DELETE CASCADE,
+    read_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    summary  TEXT                     -- the summary as it was when marked read
+);
 
 -- URLs of deleted articles, so feeds that still list them don't re-ingest them.
 CREATE TABLE IF NOT EXISTS ArticleTombstone (

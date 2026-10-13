@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import ipaddress
 import json
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -16,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, bus, chat, clustering, config, db, heads_up, ingest, pipeline, scoring, worker
+from . import auth, bus, chat, clustering, config, db, heads_up, ingest, pipeline, reports, scoring, worker
 
 _FRONTEND = Path(__file__).with_name("frontend")
 _NO_CACHE = {"Cache-Control": "no-cache"}
@@ -28,33 +29,43 @@ class Feedback(BaseModel):
     kind: str
 
 
+class ReportSchedule(BaseModel):
+    kind: Literal["brief", "pipeline"]
+    time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    days: list[Annotated[int, Field(ge=0, le=6)]] = Field(default_factory=lambda: list(range(7)), max_length=7)
+    enabled: bool = True
+
+
 class Preferences(BaseModel):
     interest_regions: list[Annotated[str, Field(max_length=80)]] | None = Field(None, max_length=50)
     locations: list[Annotated[str, Field(max_length=80)]] | None = Field(None, max_length=50)
     min_quality: float | None = Field(None, ge=0, le=10)
+    ntfy_reports: list[ReportSchedule] | None = Field(None, max_length=20)
 
 
 class ProfileUpdate(BaseModel):
     preferences: Preferences = Field(default_factory=Preferences)
     tag_weights: dict[Annotated[str, Field(max_length=80)], float] | None = Field(None, max_length=500)
+    source_weights: dict[Annotated[str, Field(max_length=200)], Annotated[float, Field(ge=0, le=1)]] | None = (
+        Field(None, max_length=100))
 
 
 class FeedCreate(BaseModel):
-    title: str
-    xml_url: str
-    category: str | None = None
-    site_url: str | None = None
+    title: str = Field(max_length=300)
+    xml_url: str = Field(max_length=2000)
+    category: str | None = Field(None, max_length=200)
+    site_url: str | None = Field(None, max_length=2000)
 
 
 class FeedUpdate(BaseModel):
     enabled: int | None = None
-    title: str | None = None
-    category: str | None = None
-    xml_url: str | None = None
+    title: str | None = Field(None, max_length=300)
+    category: str | None = Field(None, max_length=200)
+    xml_url: str | None = Field(None, max_length=2000)
 
 
 class CategoryUpdate(BaseModel):
-    category: str | None
+    category: str | None = Field(max_length=200)
     enabled: int
 
 
@@ -68,6 +79,7 @@ class ChatSend(BaseModel):
 
 
 _CHAT_HISTORY_MAX = 20  # prior messages sent to the model
+_SSE_MAX_CLIENTS = 50  # /api/events is public; each stream holds a connection
 
 
 # --- helpers -----------------------------------------------------------------
@@ -84,7 +96,7 @@ def _articles_by_story(conn: sqlite3.Connection, story_ids: list[int]) -> dict[i
         return out
     marks = ",".join("?" * len(story_ids))
     rows = conn.execute(
-        "SELECT a.id, a.story_id, a.title, a.url, a.author, a.published_date, a.hero_image_url, "
+        "SELECT a.id, a.story_id, a.title, a.url, a.author, a.published_date, a.created_at, a.hero_image_url, "
         "f.title AS feed FROM Article a JOIN Feed f ON f.id = a.feed_id "
         f"WHERE a.story_id IN ({marks}) ORDER BY a.published_date DESC",
         story_ids,
@@ -108,6 +120,9 @@ def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]
         "display_score": round(item["display"], 3),
         "created_at": s["created_at"],
         "updated_at": s["updated_at"],
+        "read": item.get("read"),
+        "read_at": item.get("read_at"),
+        "read_summary": item.get("read_summary"),
         "articles": articles,
     }
 
@@ -119,8 +134,11 @@ def _load_story(conn: sqlite3.Connection, story_id: int) -> dict[str, Any]:
     n = conn.execute(
         "SELECT COUNT(DISTINCT feed_id) FROM Article WHERE story_id = ?", (story_id,)
     ).fetchone()[0]
-    relevance, display = scoring.score_story(s, n, scoring.get_user_profile(conn))
-    item = {"story": s, "source_count": n, "relevance": relevance, "display": display}
+    profile = scoring.get_user_profile(conn)
+    _n, trust = scoring.source_stats(conn, scoring.trust_weights(conn, profile), story_id).get(story_id, (0, 0.0))
+    relevance, display = scoring.score_story(s, n, profile, trust)
+    item = {"story": s, "source_count": n, "relevance": relevance, "display": display,
+            **scoring.read_states(conn).get(story_id, {"read": None})}
     return _story_payload(item, _articles_by_story(conn, [story_id])[story_id])
 
 
@@ -187,12 +205,12 @@ async def lifespan(_app: FastAPI):
             "auth is OFF: management, chat and refresh are limited to LAN clients; "
             "set NEWS_AUTH_PASSWORD for remote access.")
     worker.start()
-    heads_up.start_scheduler()
+    reports.start_scheduler()
     try:
         yield
     finally:
         bus.close_all()
-        heads_up.stop_scheduler()
+        reports.stop_scheduler()
         await asyncio.to_thread(worker.stop)
 
 
@@ -219,6 +237,10 @@ def create_app() -> FastAPI:
         # Cross-site writes (CSRF; also covers open mode, where no cookie protects anything).
         if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
             return JSONResponse(status_code=403, content={"detail": "cross-origin request rejected"})
+        # SameSite=Lax still sends the cookie on cross-site top-level GETs (e.g. /api/feeds/preview).
+        if (request.url.path.startswith("/api/") and not _is_public(request)
+                and request.headers.get("sec-fetch-site") == "cross-site"):
+            return JSONResponse(status_code=403, content={"detail": "cross-site request rejected"})
         resp = await call_next(request)
         resp.headers.update(_SECURITY_HEADERS)
         if config.PUBLIC_BASE.startswith("https"):
@@ -240,28 +262,62 @@ def create_app() -> FastAPI:
     def list_page():
         return FileResponse(_FRONTEND / "list.html", headers=_NO_CACHE)
 
+    def _is_owner(request: Request) -> bool:
+        return auth.is_authenticated(request.cookies.get(config.AUTH_COOKIE))
+
+    def _private(payload: dict[str, Any], owner: bool) -> dict[str, Any]:
+        """The owner's read state is not part of the public read-only view."""
+        if not owner:
+            payload.update(read=None, read_at=None, read_summary=None)
+        return payload
+
     # --- stories ---
     @app.get("/api/stories")
-    def list_stories(limit: int = Query(50, ge=1, le=1000), archived: bool = False,
-                     q: str = Query("", max_length=100), tag: str = Query("", max_length=80)):
+    def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archived: bool = False,
+                     q: str = Query("", max_length=100), tag: str = Query("", max_length=80),
+                     hide_read: bool = False, keep: str = Query("", max_length=4000)):
+        """``hide_read`` drops stories marked read (not those updated since); ``keep`` = ids exempt from it."""
+        owner = _is_owner(request)
+        keep_ids = {int(x) for x in keep.split(",") if x.strip().isdigit()}
         with db.get_conn() as conn:
             ranked = scoring.ranked_stories(conn, archived=archived, query=q.strip(), tag=tag.strip())
+            hidden = 0
+            if hide_read and owner and not archived:
+                visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
+                hidden, ranked = len(ranked) - len(visible), visible
             page = ranked[:limit]
             arts = _articles_by_story(conn, [i["story"]["id"] for i in page])
             pending = pipeline.pending_count(conn)
             last_article = conn.execute("SELECT MAX(created_at) FROM Article").fetchone()[0]
         return {
             "count": len(ranked),
+            "hidden_read": hidden,
             "pending": pending,
             "last_article": last_article,
             "active_days": config.STORY_ACTIVE_DAYS,
-            "stories": [_story_payload(i, arts[i["story"]["id"]]) for i in page],
+            "stories": [_private(_story_payload(i, arts[i["story"]["id"]]), owner) for i in page],
         }
 
     @app.get("/api/stories/{story_id}")
-    def get_story(story_id: int):
+    def get_story(story_id: int, request: Request):
         with db.get_conn() as conn:
-            return _load_story(conn, story_id)
+            return _private(_load_story(conn, story_id), _is_owner(request))
+
+    @app.post("/api/stories/{story_id}/read")
+    def mark_read(story_id: int):
+        with db.get_conn() as conn:
+            s = conn.execute("SELECT summary FROM Story WHERE id = ?", (story_id,)).fetchone()
+            if s is None:
+                raise HTTPException(404, "story not found")
+            conn.execute("INSERT OR REPLACE INTO StoryRead (story_id, read_at, summary) "
+                         "VALUES (?, datetime('now'), ?)", (story_id, s["summary"]))
+        return {"ok": True, "read": "read"}
+
+    @app.delete("/api/stories/{story_id}/read")
+    def mark_unread(story_id: int):
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM StoryRead WHERE story_id = ?", (story_id,))
+        return {"ok": True, "read": None}
 
     @app.get("/api/heads-up")
     def get_heads_up():
@@ -449,7 +505,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/profile")
     def get_profile():
-        return scoring.get_user_profile()
+        with db.get_conn() as conn:
+            profile = scoring.get_user_profile(conn)
+            trust = scoring.trust_weights(conn, profile)
+        return {
+            **profile,
+            "source_trust": trust,
+            "ntfy_reports": reports.schedules(profile),
+            "ntfy": {"enabled": bool(config.HEADS_UP_NTFY_URL), "kinds": reports.KINDS,
+                     "server_time": dt.datetime.now().strftime("%H:%M")},
+        }
 
     @app.put("/api/profile")
     def put_profile(body: ProfileUpdate):
@@ -457,7 +522,29 @@ def create_app() -> FastAPI:
         for key in ("interest_regions", "locations"):
             if key in prefs:
                 prefs[key] = [v.strip() for v in prefs[key] if v.strip()]
-        return scoring.update_profile(prefs, body.tag_weights)
+        for s in prefs.get("ntfy_reports", []):
+            s["days"] = sorted(set(s["days"]))
+        scoring.update_profile(prefs, body.tag_weights, body.source_weights)
+        return get_profile()
+
+    # --- scheduled ntfy reports ---
+    def _report_kind(kind: str) -> str:
+        if kind not in reports.KINDS:
+            raise HTTPException(404, "unknown report")
+        return kind
+
+    @app.get("/api/reports/{kind}")
+    def preview_report(kind: str):
+        return {"text": reports.render(_report_kind(kind), fresh=False)}
+
+    @app.post("/api/reports/{kind}/send")
+    def send_report(kind: str):
+        if not config.HEADS_UP_NTFY_URL:
+            raise HTTPException(409, "ntfy is not configured (NEWS_HEADS_UP_NTFY_URL)")
+        sent, text = reports.send(_report_kind(kind))
+        if not sent:
+            raise HTTPException(502, "no report text" if not text else "ntfy push failed")
+        return {"ok": True, "text": text}
 
     # --- worker ---
     @app.post("/api/refresh")
@@ -597,6 +684,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/events")
     async def events(request: Request):
+        if bus.subscriber_count() >= _SSE_MAX_CLIENTS:
+            return JSONResponse(status_code=503, content={"detail": "too many live connections"})
+
         async def stream():
             q = bus.subscribe()
             try:

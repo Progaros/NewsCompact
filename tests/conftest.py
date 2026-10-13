@@ -18,6 +18,7 @@ from app import config, db, ollama  # noqa: E402
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(config, "HEADS_UP_NTFY_TIMES", [])
+    monkeypatch.setattr(config, "HEADS_UP_NTFY_URL", "")
     db.init_db()
     return config.DB_PATH
 
@@ -35,6 +36,8 @@ class FakeLLM:
     def __init__(self):
         self.calls: list[str] = []
         self.verdict = "EXACT_MATCH"
+        self.significance = 1
+        self.urgency = 4
         self.fail = False
         self.down = False
 
@@ -65,7 +68,8 @@ class FakeLLM:
             "quality": 6,
             "location": "Munich, Germany",
             "language": "de",
-            "metrics": {"urgency_level": 4, "impact_scale": "Local", "status": "Ongoing"},
+            "update_significance": self.significance,
+            "metrics": {"urgency_level": self.urgency, "impact_scale": "Local", "status": "Ongoing"},
         }
 
     def chat(self, messages, **_kw):

@@ -37,6 +37,8 @@ EVENT_CLASSES = (
     "UNRELATED",
 )
 MERGE_CLASSES = frozenset({"EXACT_MATCH", "CONTINUING_DEVELOPMENT"})
+# Story-vs-story "continuation" chained a whole saga into one 102-article story (2026-10-13).
+STORY_MERGE_CLASSES = frozenset({"EXACT_MATCH"})
 # Shared by the production verifier and the benchmark so the benchmark stays a
 # faithful proxy. The CONTINUING_DEVELOPMENT clause is stated flatly on purpose:
 # phrased as a condition, the 27B model read it as a rejection gate (recall -0.05).
@@ -87,7 +89,8 @@ def assess_article(title: str, content: str) -> dict[str, Any]:
     Bodies that are not real article text (broken/thin/empty) are judged from
     the headline alone so a bot-blocked fetch can't poison the story quality.
     """
-    if content_quality.classify(content) == "ok":
+    full = content_quality.classify(content) == "ok"
+    if full:
         context, criteria = f"Title: {title}\n\n{content[:12000]}", QUALITY_FULL
     else:
         context, criteria = f"Title: {title}", QUALITY_TITLE
@@ -104,7 +107,10 @@ def assess_article(title: str, content: str) -> dict[str, Any]:
             "required": ["quality", "breaking"],
         },
     )
-    return {"quality": max(1, min(10, int(res["quality"]))), "breaking": bool(res["breaking"])}
+    quality = max(1, min(10, int(res["quality"])))
+    if not full:
+        quality = min(quality, config.TITLE_QUALITY_MAX)
+    return {"quality": quality, "breaking": bool(res["breaking"])}
 
 
 # --- event verification (two-stage clustering) ------------------------------

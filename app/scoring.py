@@ -5,7 +5,8 @@
                 + distance·W_DISTANCE − time_decay
 
 - quality      story quality (median of member article qualities), 0..1
-- credibility  corroboration by distinct feeds: 1→0.25 … 5+→1.0
+- credibility  corroboration: summed trust of the distinct feeds (feed category
+               weight 0..1, SOURCE_TRUST / profile source_weights): 1.0→0.25 … 5.0→1.0
 - user_impact  0.5 baseline, +0.25 per preferences.interest_regions/locations hit in tags
 - interest     sum of the user's tag weights; clamped because weights never decay
 - distance     story location/language vs USER_CITY/COUNTRY/LANGUAGE: 1.0/0.6/0.35/0
@@ -41,8 +42,34 @@ def time_decay_penalty(updated_at: str | None) -> float:
     return config.TIME_DECAY_MAX * (1.0 - math.exp(-age_h / config.TIME_DECAY_HALF_LIFE_HOURS))
 
 
-def credibility_score(source_count: int) -> float:
-    return _clamp01(0.25 + 0.20 * max(0, source_count - 1))
+def credibility_score(trust: float) -> float:
+    """``trust`` = summed trust of the distinct feeds (= feed count when all are fully trusted)."""
+    return _clamp01(0.05 + 0.20 * max(0.0, trust))
+
+
+def trust_weights(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[str, float]:
+    """Effective trust per feed category ('' = uncategorized): profile > SOURCE_TRUST > default."""
+    out = {}
+    for (cat,) in conn.execute("SELECT DISTINCT COALESCE(category, '') FROM Feed"):
+        w = profile["source_weights"].get(cat, config.SOURCE_TRUST.get(cat, config.SOURCE_TRUST_DEFAULT))
+        try:
+            out[cat] = _clamp01(float(w))
+        except (TypeError, ValueError):
+            out[cat] = config.SOURCE_TRUST_DEFAULT
+    return out
+
+
+def source_stats(conn: sqlite3.Connection, trust: dict[str, float],
+                 story_id: int | None = None) -> dict[int, tuple[int, float]]:
+    """``{story_id: (distinct feeds, summed trust of those feeds)}``."""
+    sql = ("SELECT DISTINCT a.story_id, a.feed_id, COALESCE(f.category, '') FROM Article a "
+           "JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
+    rows = conn.execute(sql + " AND a.story_id = ?", (story_id,)) if story_id is not None else conn.execute(sql)
+    out: dict[int, tuple[int, float]] = {}
+    for sid, _feed, cat in rows:
+        n, t = out.get(sid, (0, 0.0))
+        out[sid] = (n + 1, t + trust.get(cat, config.SOURCE_TRUST_DEFAULT))
+    return out
 
 
 def user_impact_score(tags: list[str], preferences: dict[str, Any]) -> float:
@@ -74,15 +101,20 @@ def distance_score(metrics: dict[str, Any]) -> float:
     return score
 
 
-def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any]) -> tuple[dict[str, float], float]:
-    """Return ``(relevance breakdown, display score)`` for one story."""
+def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
+                trust: float | None = None) -> tuple[dict[str, float], float]:
+    """Return ``(relevance breakdown, display score)`` for one story.
+
+    ``trust`` = summed source trust (see ``source_stats``); defaults to ``source_count``.
+    """
     tags = story_tags(story)
     metrics = db.json_dict(story["metrics"])
     try:
         quality = _clamp01(float(story["quality_score"] or 5.0) / 10.0)
     except (TypeError, ValueError):
         quality = 0.5
-    credibility = credibility_score(source_count)
+    trust = float(source_count) if trust is None else trust
+    credibility = credibility_score(trust)
     impact = user_impact_score(tags, profile["preferences"])
     base = 10.0 * (
         config.W_RELEVANCE_QUALITY * quality
@@ -101,6 +133,7 @@ def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any]) 
     relevance = {
         "quality": round(quality * 10, 1),
         "credibility": round(credibility * 10, 1),
+        "source_trust": round(trust, 2),
         "user_impact": round(impact * 10, 1),
         "user_interest": round(interest, 2),
         "user_interest_points": round(interest_pts, 2),
@@ -111,23 +144,28 @@ def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any]) 
     return relevance, display
 
 
-def source_counts(conn: sqlite3.Connection) -> dict[int, int]:
+def read_states(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    """``{story_id: {read: "read"|"updated", read_at, read_summary}}`` for stories marked read."""
     rows = conn.execute(
-        "SELECT story_id, COUNT(DISTINCT feed_id) FROM Article WHERE story_id IS NOT NULL GROUP BY story_id"
+        "SELECT r.story_id, r.read_at, r.summary, COALESCE(s.material_at, s.created_at) > r.read_at "
+        "FROM StoryRead r JOIN Story s ON s.id = r.story_id"
     )
-    return {r[0]: r[1] for r in rows}
+    return {sid: {"read": "updated" if newer else "read", "read_at": at, "read_summary": summary}
+            for sid, at, summary, newer in rows}
 
 
 def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = None, *,
                    archived: bool = False, query: str = "", tag: str = "") -> list[dict[str, Any]]:
-    """Finished stories as ``[{story, source_count, relevance, display}]``.
+    """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
     Active stories (updated within STORY_ACTIVE_DAYS) are ranked by display
     score; ``archived`` returns the older ones, newest update first.
     Honors ``preferences.min_quality`` and optional text / tag filters.
+    ``read`` is None, "read" or "updated" (significant update since it was read).
     """
     profile = profile or get_user_profile(conn)
-    counts = source_counts(conn)
+    stats = source_stats(conn, trust_weights(conn, profile))
+    reads = read_states(conn)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     sql = "SELECT * FROM Story WHERE headline IS NOT NULL AND updated_at " + ("< ?" if archived else ">= ?")
     params: list[Any] = [cutoff]
@@ -142,13 +180,14 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     wanted_tag = normalize_tags([tag])[0] if tag and normalize_tags([tag]) else ""
     out = []
     for s in conn.execute(sql, params):
-        n = counts.get(s["id"], 0)
+        n, trust = stats.get(s["id"], (0, 0.0))
         if n == 0 or (s["quality_score"] or 0) < min_quality:
             continue
         if wanted_tag and wanted_tag not in story_tags(s):
             continue
-        relevance, display = score_story(s, n, profile)
-        out.append({"story": s, "source_count": n, "relevance": relevance, "display": display})
+        relevance, display = score_story(s, n, profile, trust)
+        out.append({"story": s, "source_count": n, "relevance": relevance, "display": display,
+                    **reads.get(s["id"], {"read": None})})
     if archived:
         out.sort(key=lambda x: x["story"]["updated_at"] or "", reverse=True)
     else:
@@ -177,12 +216,16 @@ def get_user_profile(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
 
 
 def update_profile(preferences: dict[str, Any] | None = None,
-                   tag_weights: dict[str, float] | None = None) -> dict[str, Any]:
-    """Merge validated preferences; ``tag_weights`` (if given) replaces the stored weights."""
+                   tag_weights: dict[str, float] | None = None,
+                   source_weights: dict[str, float] | None = None) -> dict[str, Any]:
+    """Merge validated preferences; ``tag_weights`` / ``source_weights`` (if given) replace the stored ones."""
     with db.get_conn() as conn:
         profile = get_user_profile(conn)
         prefs = {**profile["preferences"], **(preferences or {})}
         conn.execute("UPDATE UserProfile SET preferences = ? WHERE id = 1", (json.dumps(prefs),))
+        if source_weights is not None:
+            clean_sw = {str(k): _clamp01(float(v)) for k, v in source_weights.items()}
+            conn.execute("UPDATE UserProfile SET source_weights = ? WHERE id = 1", (json.dumps(clean_sw),))
         if tag_weights is not None:
             clean = {}
             for tag, w in tag_weights.items():

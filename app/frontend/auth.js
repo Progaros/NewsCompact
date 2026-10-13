@@ -52,12 +52,14 @@ const Auth = (() => {
       controls.appendChild(el);
     }
     if (!state.authEnabled || state.authenticated) {
-      el.textContent = "\u2699 Preferences";
+      el.innerHTML = `<span aria-hidden="true">\u2699</span><span class="btn-label"> Preferences</span>`;
       el.title = state.authEnabled ? "Preferences & sign out" : "Preferences";
+      el.setAttribute("aria-label", "Preferences");
       el.onclick = () => showUserModal();
     } else {
       el.textContent = "Sign in";
       el.title = "";
+      el.removeAttribute("aria-label");
       el.onclick = () => showLoginModal();
     }
   }
@@ -98,12 +100,20 @@ const Auth = (() => {
     overlay.querySelector("#user-signout")?.addEventListener("click", () => { close(); signOut(); });
 
     let weights = {};
+    let reports = [];
+    let ntfy = { enabled: false, kinds: {} };
     fetch("/api/profile")
       .then((res) => (unauth(res) ? null : res.json()))
       .then((p) => {
         if (!p) return close();
         weights = { ...(p.tag_weights || {}) };
-        box.innerHTML = renderProfileForm(p.preferences || {});
+        reports = (p.ntfy_reports || []).map((r) => ({ ...r, days: [...(r.days || [])] }));
+        ntfy = p.ntfy || ntfy;
+        box.innerHTML = renderProfileForm(p.preferences || {}, p.source_trust || {}, ntfy);
+        box.querySelectorAll("input[data-trust]").forEach((i) => i.addEventListener("input", () => {
+          i.nextElementSibling.textContent = Number(i.value).toFixed(1);
+        }));
+        renderReports(box, reports, ntfy);
         renderWeights(box, weights);
       })
       .catch(() => { box.textContent = "(profile unavailable)"; });
@@ -112,6 +122,8 @@ const Auth = (() => {
       e.preventDefault();
       const list = (name) => form.elements[name].value.split(",").map((s) => s.trim()).filter(Boolean);
       const minQ = parseFloat(form.elements.min_quality.value);
+      const sourceWeights = {};
+      form.querySelectorAll("input[data-trust]").forEach((i) => { sourceWeights[i.dataset.trust] = parseFloat(i.value); });
       const res = await fetch("/api/profile", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -120,8 +132,10 @@ const Auth = (() => {
             interest_regions: list("interest_regions"),
             locations: list("locations"),
             min_quality: isNaN(minQ) ? 0 : Math.min(10, Math.max(0, minQ)),
+            ntfy_reports: reports.filter((r) => r.time),
           },
           tag_weights: weights,
+          source_weights: sourceWeights,
         }),
       });
       if (unauth(res)) return;
@@ -132,8 +146,12 @@ const Auth = (() => {
     });
   }
 
-  function renderProfileForm(prefs) {
+  function renderProfileForm(prefs, trust, ntfy) {
     const join = (v) => (Array.isArray(v) ? v.join(", ") : "");
+    const trustRows = Object.entries(trust).sort((a, b) => a[0].localeCompare(b[0])).map(([cat, w]) => `
+      <label class="trust-row"><span>${esc(cat || "(uncategorized)")}</span>
+        <input type="range" min="0" max="1" step="0.1" value="${esc(w)}" data-trust="${esc(cat)}" />
+        <output>${Number(w).toFixed(1)}</output></label>`).join("");
     return `
       <label class="field">Interest regions <span class="hint">comma-separated; matching story tags raise "impact"</span>
         <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
@@ -142,9 +160,63 @@ const Auth = (() => {
       <label class="field">Minimum story quality <span class="hint">0 = show everything</span>
         <input name="min_quality" type="number" min="0" max="10" step="0.5" value="${esc(prefs.min_quality ?? 0)}" /></label>
       <div class="user-section">
+        <div class="user-section-label">Source trust</div>
+        <p class="hint">How much a feed category counts as independent confirmation (credibility). 0 = ignore, 1 = full.</p>
+        ${trustRows || `<div class="muted">No feeds yet.</div>`}
+      </div>
+      <div class="user-section">
+        <div class="user-section-label">Scheduled ntfy reports <button type="button" class="link" id="add-report">+ add</button></div>
+        <p class="hint">${ntfy.enabled ? `Server time now ${esc(ntfy.server_time)}.` : "ntfy is not configured on the server (NEWS_HEADS_UP_NTFY_URL)."}</p>
+        <div id="reports"></div>
+      </div>
+      <div class="user-section">
         <div class="user-section-label">Learned tag weights <button type="button" class="link" id="reset-weights">reset all</button></div>
         <div id="weights"></div>
       </div>`;
+  }
+
+  const DAY_NAMES = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+  const REPORT_LABELS = { brief: "News brief", pipeline: "Pipeline report" };
+
+  function renderReports(box, reports, ntfy) {
+    const el = box.querySelector("#reports");
+    const kinds = Object.keys(ntfy.kinds || {}).map((k) => [k, REPORT_LABELS[k] || ntfy.kinds[k]]);
+    el.innerHTML = reports.length ? reports.map((r, i) => `
+      <div class="report-row${r.enabled === false ? " off" : ""}" data-i="${i}">
+        <input type="checkbox" data-f="enabled" title="Enabled" ${r.enabled === false ? "" : "checked"} />
+        <select data-f="kind">${kinds.map(([k, label]) => `<option value="${esc(k)}" ${k === r.kind ? "selected" : ""}>${esc(label)}</option>`).join("")}</select>
+        <input type="time" data-f="time" value="${esc(r.time)}" required />
+        <span class="days">${DAY_NAMES.map((d, di) => `<button type="button" class="day${r.days.includes(di) ? " on" : ""}" data-day="${di}" aria-pressed="${r.days.includes(di)}">${d}</button>`).join("")}</span>
+        <button type="button" class="link" data-act="send" title="Send this report now" ${ntfy.enabled ? "" : "disabled"}>send now</button>
+        <button type="button" class="link" data-act="del" title="Remove">\u00d7</button>
+      </div>`).join("")
+      : `<div class="muted">No scheduled reports.</div>`;
+    el.querySelectorAll(".report-row").forEach((row) => {
+      const r = reports[Number(row.dataset.i)];
+      row.querySelector('[data-f="enabled"]').onchange = (e) => { r.enabled = e.target.checked; row.classList.toggle("off", !r.enabled); };
+      row.querySelector('[data-f="kind"]').onchange = (e) => { r.kind = e.target.value; };
+      row.querySelector('[data-f="time"]').onchange = (e) => { r.time = e.target.value; };
+      row.querySelectorAll(".day").forEach((b) => b.addEventListener("click", () => {
+        const d = Number(b.dataset.day);
+        r.days = r.days.includes(d) ? r.days.filter((x) => x !== d) : [...r.days, d].sort();
+        b.classList.toggle("on", r.days.includes(d));
+        b.setAttribute("aria-pressed", r.days.includes(d));
+      }));
+      row.querySelector('[data-act="del"]').onclick = () => { reports.splice(Number(row.dataset.i), 1); renderReports(box, reports, ntfy); };
+      row.querySelector('[data-act="send"]').onclick = async (e) => {
+        e.target.disabled = true;
+        e.target.textContent = "sending\u2026";
+        const res = await fetch(`/api/reports/${encodeURIComponent(r.kind)}/send`, { method: "POST" });
+        e.target.disabled = false;
+        e.target.textContent = "send now";
+        if (unauth(res)) return;
+        toast(res.ok ? "Report sent." : `Sending failed: ${(await res.json().catch(() => ({}))).detail || res.status}`);
+      };
+    });
+    box.querySelector("#add-report").onclick = () => {
+      reports.push({ kind: "pipeline", time: "07:00", days: [0, 1, 2, 3, 4, 5, 6], enabled: true });
+      renderReports(box, reports, ntfy);
+    };
   }
 
   function renderWeights(box, weights) {

@@ -5,7 +5,7 @@ its *anchor* members (non-broken members; all members for broken-only
 stories) — never a centroid, which drifted into catch-all "mush" stories.
 
 Tier 1 joins a story updated within CLUSTER_WINDOW_HOURS; tier 2 revives an
-older story on a slightly looser threshold instead of spawning a duplicate.
+older (stale) story instead of spawning a duplicate.
 In ``two_stage`` mode the cosine step only retrieves candidates and the
 harness verifier decides; only EXACT_MATCH / CONTINUING_DEVELOPMENT attach.
 """
@@ -110,9 +110,11 @@ def window_cutoff() -> str:
 
 
 def nearest_stories(conn: sqlite3.Connection, vec: Vector, anchors: AnchorCache, *,
-                    since: str | None = None, exclude: int | None = None) -> list[tuple[int, float]]:
+                    since: str | None = None, before: str | None = None,
+                    exclude: int | None = None) -> list[tuple[int, float]]:
     """``[(story_id, max anchor similarity)]`` for the stories of the nearest articles.
 
+    ``since`` / ``before`` keep only stories updated at/after resp. before that time.
     Gating on the nearest member is safe: max-anchor-sim >= sim to it.
     """
     neighbours = knn(conn, vec, config.KNN_CANDIDATES)
@@ -130,6 +132,8 @@ def nearest_stories(conn: sqlite3.Connection, vec: Vector, anchors: AnchorCache,
             continue
         sid, updated = meta[aid]
         if sid == exclude or sid in story_ids or (since and (updated or "") < since):
+            continue
+        if before and (updated or "") >= before:
             continue
         story_ids.append(sid)
     vec_u = normalize(vec)
@@ -151,7 +155,8 @@ def _best_clearing(cands: list[tuple[int, float]], threshold: float) -> tuple[in
 
 
 def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[int, float]],
-           threshold: float, log_ref: Any = None) -> tuple[int | None, float]:
+           threshold: float, log_ref: Any = None,
+           accept: frozenset[str] = harness.MERGE_CLASSES) -> tuple[int | None, float]:
     """LLM-verify the best few candidates; a verifier failure rejects them all."""
     rows = []
     for sid, sim in sorted(cands, key=lambda c: c[1], reverse=True)[: config.CLUSTER_VERIFY_MAX_CANDIDATES]:
@@ -170,7 +175,7 @@ def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[in
     for c in rows:
         cls = decisions.get(c["id"], "UNRELATED")
         log.info("verify %s story=%s sim=%.3f class=%s", log_ref, c["id"], c["sim"], cls)
-        if cls in harness.MERGE_CLASSES:
+        if cls in accept:
             return c["id"], c["sim"]
     return None, -1.0
 
@@ -190,12 +195,14 @@ def decide_story(conn: sqlite3.Connection, vec: Vector,
     Without ``article`` (maintenance scripts) the cosine path is used.
     """
     anchors = AnchorCache(conn)
-    sid, _ = _pick(conn, article, nearest_stories(conn, vec, anchors, since=window_cutoff()),
+    cutoff = window_cutoff()
+    sid, _ = _pick(conn, article, nearest_stories(conn, vec, anchors, since=cutoff),
                    config.CLUSTER_VERIFY_RETRIEVE_THRESHOLD, config.CLUSTER_SIM_THRESHOLD)
     if sid is not None:
         return sid, False, False
 
-    sid, sim = _pick(conn, article, nearest_stories(conn, vec, anchors),
+    # Fresh stories were already judged in tier 1; re-asking only repeats the verdict.
+    sid, sim = _pick(conn, article, nearest_stories(conn, vec, anchors, before=cutoff),
                      config.CLUSTER_REVIVE_SIM_THRESHOLD, config.CLUSTER_REVIVE_SIM_THRESHOLD)
     if sid is not None:
         log.info("reviving story %d (anchor sim=%.3f)", sid, sim)

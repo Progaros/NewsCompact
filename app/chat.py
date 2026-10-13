@@ -130,6 +130,8 @@ def _gather_context(story: dict, user_question: str,
             break
         yield "status", f"Searching: {query}"
         results = searchngx.search(query)
+        if not results:
+            yield "status", "Web search returned no results"
         added = False
         for res in results:
             if len(context) >= config.CHAT_CONTEXT_MAX:
@@ -158,6 +160,11 @@ def stream(story: dict, history: list[dict], user_question: str,
     system = story_system_prompt(story)
     if context:
         system += f"\n\nWEB RESEARCH (fresh, from searchngx — may help answer):\n{context}"
+    elif turns > 0:
+        system += "\n\nA web search was run for this message but returned nothing usable; say so if relevant."
+    else:
+        system += ("\n\nWeb search is off for this message. If the user asks for one, tell them to "
+                   "pick 'Web search ×N' in the selector next to the input and ask again.")
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for h in history:

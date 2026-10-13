@@ -15,7 +15,7 @@ import sqlite3
 import time
 from typing import Callable
 
-from . import clustering, config, db, ollama, story
+from . import clustering, config, db, harness, ollama, story
 
 log = logging.getLogger("news.merge")
 
@@ -46,7 +46,8 @@ def _check(conn: sqlite3.Connection, s: sqlite3.Row, since: str) -> tuple[bool, 
     if not cands:
         return False, None, None
     target, _ = clustering.verify(conn, s["headline"] or "", s["summary"] or "", cands,
-                                  config.MERGE_SIM_THRESHOLD, f"story={s['id']}")
+                                  config.MERGE_SIM_THRESHOLD, f"story={s['id']}",
+                                  accept=harness.STORY_MERGE_CLASSES)
     if target is None:
         return True, None, None
     # Keep the bigger story (older on ties) so its id / chat / votes survive.

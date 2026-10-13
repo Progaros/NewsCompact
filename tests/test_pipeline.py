@@ -34,9 +34,29 @@ def test_verifier_rejection_creates_new_story(feed_id, llm):
     first = add_article(feed_id, "Flood hits town")
     pipeline.process_pending()
     llm.verdict = "SAME_TOPIC_DISTINCT_EVENT"
+    llm.calls.clear()
     second = add_article(feed_id, "Flood elsewhere")
     pipeline.process_pending()
     assert _story_of(first) != _story_of(second)
+    assert llm.calls.count("verify") == 1  # the revival tier does not re-ask about fresh stories
+
+
+def test_stale_story_is_revived(feed_id, llm):
+    first = add_article(feed_id, "Flood hits town")
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Story SET updated_at = datetime('now', '-5 days')")
+    second = add_article(feed_id, "Flood returns")
+    pipeline.process_pending()
+    assert _story_of(first) == _story_of(second)
+
+
+def test_headline_only_quality_is_capped(feed_id, llm):
+    aid = add_article(feed_id, "Short item", body="tiny", content_class="thin")
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        q = conn.execute("SELECT quality FROM Article WHERE id = ?", (aid,)).fetchone()[0]
+    assert q == config.TITLE_QUALITY_MAX < 7
 
 
 def test_newest_articles_are_processed_first(feed_id, llm):

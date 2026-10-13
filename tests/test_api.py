@@ -63,6 +63,25 @@ def test_profile_put_validates(client):
     assert client.put("/api/profile", json={"preferences": {"locations": ["x" * 200]}}).status_code == 422
 
 
+def test_profile_reports_and_source_trust(client, feed_id):
+    p = client.get("/api/profile").json()
+    assert p["source_trust"] == {"News": 1.0} and p["ntfy"]["enabled"] is False
+    sched = [{"kind": "pipeline", "time": "06:45", "days": [4, 0, 0]}]
+    r = client.put("/api/profile", json={"preferences": {"ntfy_reports": sched}, "source_weights": {"News": 0.4}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ntfy_reports"] == [{"kind": "pipeline", "time": "06:45", "days": [0, 4], "enabled": True}]
+    assert body["source_trust"] == {"News": 0.4}
+    bad = [{"kind": "pipeline", "time": "25:00"}], [{"kind": "spam", "time": "06:00"}], \
+        [{"kind": "brief", "time": "06:00", "days": [7]}]
+    for b in bad:
+        assert client.put("/api/profile", json={"preferences": {"ntfy_reports": b}}).status_code == 422
+    assert client.put("/api/profile", json={"source_weights": {"News": 2}}).status_code == 422
+    assert "processed" in client.get("/api/reports/pipeline").json()["text"]
+    assert client.get("/api/reports/nope").status_code == 404
+    assert client.post("/api/reports/pipeline/send").status_code == 409  # ntfy off in tests
+
+
 def test_chat_streams_and_persists(client, story, llm):
     import json
 

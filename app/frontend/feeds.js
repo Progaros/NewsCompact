@@ -31,6 +31,7 @@ function renderFeeds(data) {
   const errors = feeds.filter((f) => f.last_error).length;
   statusEl.textContent = `${feeds.length} feeds · ${feeds.filter((f) => f.enabled).length} enabled`
     + (errors ? ` · ${errors} failing` : "");
+  statusEl.title = statusEl.textContent;
 
   const table = document.createElement("table");
   table.className = "feeds";

@@ -1,20 +1,23 @@
-"""Thin client for the local ``searchngx`` web search (searchapi.io-style).
+"""Thin client for the SearXNG instance ("searchngx") used by the per-story chat.
 
-Used only by the per-story chat agent (app/chat.py) to gather fresh context
-before answering. Both calls are *best-effort*: any network/parse failure
-returns an empty result rather than raising, so a search outage can never
-break a chat answer — it just degrades to the story context alone.
+Used only by the chat agent (app/chat.py) to gather fresh context before
+answering. Both calls are *best-effort*: any network/parse failure returns an
+empty result rather than raising, so a search outage can never break a chat
+answer — it just degrades to the story context alone.
 
-The instance is assumed to expose a searchapi.io-compatible endpoint
-(config.SEARCHNGX_BASE_URL + config.SEARCHNGX_ENDPOINT) returning::
+SearXNG JSON API (``search.formats`` must include ``json``)::
 
-    {"results": [{"title", "url", "description"}, ...], ...}
+    GET {SEARCHNGX_BASE_URL}/search?q=…&format=json&categories=general,news
+    -> {"results": [{"title", "url", "content", "engine"}, ...],
+        "unresponsive_engines": [[name, reason], ...], ...}
+
+Upstream engines regularly answer the instance with CAPTCHAs / rate limits;
+an empty result is retried once with SEARCHNGX_FALLBACK_ENGINES.
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
-import socket
+from typing import Any
 
 import httpx
 
@@ -28,7 +31,7 @@ def _client() -> httpx.Client:
 
 
 def _auth_headers() -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
+    headers = {"Accept": "application/json"}
     if config.SEARCHNGX_API_KEY:
         headers["Authorization"] = f"Bearer {config.SEARCHNGX_API_KEY}"
     return headers
@@ -39,66 +42,52 @@ def _endpoint_url() -> str:
     return f"{base}/{config.SEARCHNGX_ENDPOINT.strip('/')}"
 
 
+def _query(c: httpx.Client, query: str, selector: dict[str, str]) -> dict[str, Any]:
+    r = c.get(_endpoint_url(), params={"q": query, "format": "json", **selector}, headers=_auth_headers())
+    r.raise_for_status()
+    return r.json()
+
+
 def search(query: str, max_results: int | None = None) -> list[dict[str, str]]:
     """Run a web search; return ``[{title, url, description}]`` (may be empty)."""
     max_results = max_results or config.SEARCHNGX_MAX_RESULTS
+    selectors = [{"categories": config.SEARCHNGX_CATEGORIES}]
+    if config.SEARCHNGX_FALLBACK_ENGINES:
+        selectors.append({"engines": config.SEARCHNGX_FALLBACK_ENGINES})
     try:
         with _client() as c:
-            r = c.post(
-                _endpoint_url(),
-                json={"engine": "google", "query": query, "max_results": max_results},
-                headers=_auth_headers(),
-            )
-            r.raise_for_status()
-            data = r.json()
-        results = data.get("results") or []
-        out = []
-        for res in results[:max_results]:
-            url = (res.get("url") or "").strip()
-            if not url:
-                continue
-            out.append(
-                {
-                    "title": (res.get("title") or "").strip(),
-                    "url": url,
-                    "description": (res.get("description") or "").strip(),
-                }
-            )
-        return out
+            for selector in selectors:
+                data = _query(c, query, selector)
+                out, seen = [], set()
+                for res in data.get("results") or []:
+                    url = (res.get("url") or "").strip()
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
+                    out.append({
+                        "title": (res.get("title") or "").strip(),
+                        "url": url,
+                        "description": (res.get("content") or res.get("description") or "").strip(),
+                    })
+                    if len(out) >= max_results:
+                        break
+                if out:
+                    return out
+                log.warning("searchngx: no results for %r via %s (unresponsive: %s)", query, selector,
+                            data.get("unresponsive_engines"))
+        return []
     except Exception as e:  # noqa: BLE001 — best-effort, degrade to no results
-        log.debug("searchngx search failed for %r: %s", query, e)
+        log.warning("searchngx search failed for %r: %s", query, e)
         return []
 
 
-def _is_public(url: str) -> bool:
-    """Search results are untrusted: never let them point the scraper at the LAN."""
-    if not ingest.is_http_url(url):
-        return False
-    host = httpx.URL(url).host
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return False
-    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
-
-
 def scrape(url: str) -> str:
-    """Fetch a public URL and extract article text; "" on any failure."""
+    """Extract article text from an untrusted search result; "" on any failure.
+
+    ``ingest.fetch_page_text`` only follows hops to public addresses and caps the body.
+    """
     try:
-        with httpx.Client(timeout=config.SEARCHNGX_TIMEOUT, follow_redirects=False) as c:
-            for _ in range(4):  # redirects are re-checked hop by hop
-                if not _is_public(url):
-                    return ""
-                r = c.get(url, headers={"User-Agent": config.USER_AGENT})
-                if not r.is_redirect:
-                    break
-                url = str(r.next_request.url) if r.next_request else ""
-            else:
-                return ""
-            r.raise_for_status()
-            if "html" not in r.headers.get("content-type", "html").lower():
-                return ""
-            return ingest.extract_content(r.text, url).strip()
+        return ingest.fetch_page_text(url).strip()
     except Exception as e:  # noqa: BLE001 — best-effort, degrade to empty text
         log.debug("searchngx scrape failed for %s: %s", url, e)
         return ""

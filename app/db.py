@@ -37,6 +37,7 @@ _MIGRATIONS = (
     ("Article", "url_key", "TEXT"),
     ("Article", "title_key", "TEXT"),
     ("Story", "merge_checked_at", "TEXT"),
+    ("Story", "material_at", "TEXT"),
     ("Feed", "enabled", "INTEGER NOT NULL DEFAULT 1"),
     ("Feed", "last_error", "TEXT"),
 )

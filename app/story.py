@@ -43,7 +43,8 @@ _SYSTEM_FULL = (
     "location is the most specific place the news is about as 'City, Country' "
     "(e.g. 'Munich, Germany'), or 'Global' when it has no specific local setting. "
     "language is the two-letter code of the articles' main language (e.g. 'de', 'en'). "
-    "Summary is 2-4 factual sentences. Do not invent facts not present in the articles. "
+    "The headline names the story's single core event; never join separate events "
+    "with ';'. Summary is 2-4 factual sentences. Do not invent facts not present in the articles. "
     "Reader comments (a 'Top comments:' list) are opinions: never state them as facts; "
     "mention a notable view only as what commenters say."
     + _METRICS_GUIDE
@@ -53,10 +54,16 @@ _SYSTEM_INCREMENTAL = (
     "New Article. If the New Article introduces material updates, rewrite the "
     "summary in 2-4 factual sentences to incorporate them. If it adds no new "
     "facts, return the Current Summary exactly as written. Preserve the story "
-    "headline unless the new facts require a clearer headline. Return the same "
+    "headline: it names the story's core event, not the latest angle or reaction, "
+    "and never joins separate events with ';'. Return the same "
     "JSON object schema as requested. location/language describe the story's "
     "setting — return them as-is unless the new article clearly changes it. "
-    "Reader comments (a 'Top comments:' list) are opinions, not facts."
+    "Reader comments (a 'Top comments:' list) are opinions, not facts. "
+    "update_significance rates what the New Article adds for a reader who already knows the "
+    "Current Summary: 0 = nothing new (repetition, rewording, commentary); "
+    "1 = minor detail, reaction or opinion; "
+    "2 = notable development (new facts, figures, decisions, casualties, official statements); "
+    "3 = major change (escalation, outcome, reversal, the story's core changes)."
     + _METRICS_GUIDE
 )
 IMPACTS = ("Local", "Regional", "National", "Global")
@@ -82,6 +89,13 @@ _SCHEMA = {
     },
     "required": ["headline", "summary", "tags", "quality", "metrics"],
 }
+_INCREMENTAL_SCHEMA = {
+    **_SCHEMA,
+    "properties": {**_SCHEMA["properties"],
+                   "update_significance": {"type": "integer", "minimum": 0, "maximum": 3}},
+    "required": [*_SCHEMA["required"], "update_significance"],
+}
+SIGNIFICANCE_MAX = 3
 _INCREMENTAL_MAX_WORDS = 1500
 _SENTENCE_SPLIT = re.compile(r"[.!?]+\s*")
 _LANG_RE = re.compile(r"[a-z]{2,3}(-[a-z]{2,4})?")
@@ -137,6 +151,8 @@ def _log_violations(story_id: int, out: dict[str, Any]) -> None:
         problems.append("empty headline")
     elif len(headline) > 200:
         problems.append(f"headline too long ({len(headline)} chars)")
+    if ";" in headline:
+        problems.append("multi-event headline (';')")
     if not summary:
         problems.append("empty summary")
     else:
@@ -174,9 +190,10 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
         return 0
     story = conn.execute("SELECT headline, summary, metrics FROM Story WHERE id = ?", (story_id,)).fetchone()
     system, user = _build_prompt(story, arts, article_id, force_full)
+    incremental = system is _SYSTEM_INCREMENTAL
 
     out = ollama.structured(
-        _SCHEMA,
+        _INCREMENTAL_SCHEMA if incremental else _SCHEMA,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.2,
         prose_fallback=True,
@@ -213,11 +230,36 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
         except (TypeError, ValueError):
             quality = 5.0
     headline = (out.get("headline") or "").strip() or arts[-1].get("title") or "Untitled"
+    significance = update_significance(out, prev, metrics, incremental)
+    if incremental:
+        log.info("story %s update significance=%d", story_id, significance)
 
     conn.execute(
         "UPDATE Story SET headline=?, summary=?, tags=?, metrics=?, quality_score=?, "
-        "updated_at=datetime('now') WHERE id=?",
+        "updated_at=datetime('now'), "
+        "material_at=CASE WHEN ? THEN datetime('now') ELSE material_at END WHERE id=?",
         (headline, (out.get("summary") or "").strip(), json.dumps(tags),
-         json.dumps(metrics), quality, story_id),
+         json.dumps(metrics), quality, significance >= config.READ_RESURFACE_SIGNIFICANCE, story_id),
     )
     return len(user)
+
+
+def update_significance(out: dict[str, Any], prev: dict[str, Any], metrics: dict[str, Any],
+                        incremental: bool) -> int:
+    """0-3: how much this rewrite matters to a reader who already read the story.
+
+    Full rewrites (new, revived or merged story) and urgency escalations count as major.
+    """
+    if not incremental:
+        return SIGNIFICANCE_MAX
+    try:
+        level = max(0, min(SIGNIFICANCE_MAX, int(out.get("update_significance", 1))))
+    except (TypeError, ValueError):
+        level = 1
+    try:
+        prev_urgency = int(prev.get("urgency_level"))
+    except (TypeError, ValueError):
+        prev_urgency = metrics["urgency_level"]
+    escalated = (metrics["urgency_level"] - prev_urgency >= 2
+                 or (metrics["status"] == "Breaking" and prev.get("status") != "Breaking"))
+    return SIGNIFICANCE_MAX if escalated else level

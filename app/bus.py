@@ -27,6 +27,11 @@ def unsubscribe(q: asyncio.Queue) -> None:
             _subscribers.discard(sub)
 
 
+def subscriber_count() -> int:
+    with _lock:
+        return len(_subscribers)
+
+
 def _put(q: asyncio.Queue, record: dict | None) -> None:
     try:
         q.put_nowait(record)

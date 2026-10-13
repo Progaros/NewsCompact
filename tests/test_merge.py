@@ -17,7 +17,7 @@ def _make_two_stories(feed_id, llm):
 
 def test_merge_pass_folds_verified_duplicates(feed_id, llm):
     _make_two_stories(feed_id, llm)
-    llm.verdict = "CONTINUING_DEVELOPMENT"
+    llm.verdict = "EXACT_MATCH"
     result = merge.run()
     assert result["merged"] >= 1
     with db.get_conn() as conn:
@@ -41,3 +41,10 @@ def test_merge_budget(feed_id, llm, monkeypatch):
     _make_two_stories(feed_id, llm)
     monkeypatch.setattr(config, "MERGE_MAX_CHECKS_PER_RUN", 1)
     assert merge.run()["verified"] <= 1
+
+
+def test_continuation_does_not_merge_stories(feed_id, llm):
+    _make_two_stories(feed_id, llm)
+    llm.verdict = "CONTINUING_DEVELOPMENT"
+    result = merge.run()
+    assert result["verified"] >= 1 and result["merged"] == 0

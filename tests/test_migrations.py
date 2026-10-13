@@ -59,3 +59,5 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'Article_Embeddings'").fetchone() is None
         cols = {r[1] for r in conn.execute("PRAGMA table_info(Feed)")}
         assert {"enabled", "last_error"} <= cols
+        assert "material_at" in {r[1] for r in conn.execute("PRAGMA table_info(Story)")}
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'StoryRead'").fetchone()

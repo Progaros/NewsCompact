@@ -45,6 +45,25 @@ def test_ranking_archive_search_tag_and_min_quality(feed_id):
         assert ids(scoring.ranked_stories(conn)) == [fresh]
 
 
+def test_source_trust_weights_credibility(feed_id):
+    with db.get_conn() as conn:
+        social, news = _story(conn, "Social"), _story(conn, "News")
+        for i in range(3):
+            fid = conn.execute("INSERT INTO Feed (title, xml_url, category) VALUES (?, ?, 'Reddit')",
+                               (f"r{i}", f"https://r{i}.example/rss")).lastrowid
+            conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (social, add_article(fid, f"post {i}")))
+        conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (news, add_article(feed_id, "wire")))
+        ranked = {i["story"]["id"]: i for i in scoring.ranked_stories(conn)}
+    assert ranked[social]["source_count"] == 3 and ranked[social]["relevance"]["source_trust"] == 0.9
+    assert ranked[news]["relevance"]["credibility"] == 2.5
+    assert ranked[social]["relevance"]["credibility"] < ranked[news]["relevance"]["credibility"]
+
+    scoring.update_profile(source_weights={"Reddit": 1.0})
+    with db.get_conn() as conn:
+        ranked = {i["story"]["id"]: i for i in scoring.ranked_stories(conn)}
+    assert ranked[social]["relevance"]["credibility"] == 6.5
+
+
 def test_feedback_nudges_and_profile_replaces_weights(feed_id):
     with db.get_conn() as conn:
         sid = _story(conn, tags=("AI", "Climate"))

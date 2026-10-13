@@ -22,6 +22,8 @@ function hostname(url) {
 // Server timestamps are naive UTC "YYYY-MM-DD HH:MM:SS".
 function parseUtc(s) {
   if (!s) return NaN;
+  // Older rows kept the feed's ISO offset ("…T06:15:00+02:00").
+  if (/[zZ]|[+-]\d\d:?\d\d$/.test(s.slice(10))) return Date.parse(s);
   return Date.parse(s.replace(" ", "T") + "Z");
 }
 

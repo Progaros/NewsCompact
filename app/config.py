@@ -24,6 +24,16 @@ def _list(name: str, default: str) -> list[str]:
     return [p.strip() for p in os.getenv(name, default).split(",") if p.strip()]
 
 
+def _weights(name: str, default: str) -> dict[str, float]:
+    """``"A=0.3,B=0.5"`` -> ``{"A": 0.3, "B": 0.5}``."""
+    out = {}
+    for part in _list(name, default):
+        key, _, value = part.rpartition("=")
+        if key.strip():
+            out[key.strip()] = float(value)
+    return out
+
+
 # --- Paths / server --------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(_env("NEWS_DB_PATH", str(BASE_DIR / "news.db")))
@@ -105,10 +115,14 @@ MERGE_MAX_CHECKS_PER_RUN = _int("NEWS_MERGE_MAX_CHECKS_PER_RUN", 5)
 MERGE_ANCHORS_PER_STORY = _int("NEWS_MERGE_ANCHORS_PER_STORY", 3)
 
 # --- Story generation ------------------------------------------------------
+# Cap for headline-only quality scores: a headline can't show factual density.
+TITLE_QUALITY_MAX = _int("NEWS_TITLE_QUALITY_MAX", 6)
 # A thin article joining a story at/below this quality skips harness + Prompt2.
 JUNK_SKIP_QUALITY_THRESHOLD = _float("NEWS_JUNK_SKIP_QUALITY_THRESHOLD", 2.0)
 # Combined article text budget for full Prompt2 runs before older items are compressed.
 CONTEXT_BUDGET_CHARS = _int("NEWS_CONTEXT_BUDGET_CHARS", 200_000)
+# Update significance (0 none … 3 major, story.py) at which a read story shows up again as updated.
+READ_RESURFACE_SIGNIFICANCE = _int("NEWS_READ_RESURFACE_SIGNIFICANCE", 2)
 
 # --- Scoring ---------------------------------------------------------------
 # Stories without an update for this many days drop out of the ranked feed into
@@ -123,6 +137,9 @@ W_DISTANCE = _float("NEWS_W_DISTANCE", 2.0)
 W_RELEVANCE_QUALITY = _float("NEWS_W_REL_QUALITY", 0.40)
 W_RELEVANCE_CREDIBILITY = _float("NEWS_W_REL_CREDIBILITY", 0.35)
 W_RELEVANCE_IMPACT = _float("NEWS_W_REL_IMPACT", 0.25)
+# Trust (0..1) of a feed category in the credibility term; ⚙ Preferences overrides per category.
+SOURCE_TRUST = _weights("NEWS_SOURCE_TRUST", "Reddit=0.3,Hacker News=0.5,Reviews=0.5")
+SOURCE_TRUST_DEFAULT = _float("NEWS_SOURCE_TRUST_DEFAULT", 1.0)
 TIME_DECAY_HALF_LIFE_HOURS = _float("NEWS_DECAY_HALF_LIFE_HOURS", 18)
 TIME_DECAY_MAX = _float("NEWS_DECAY_MAX", 10.0)
 FEEDBACK_ALPHA = _float("NEWS_FEEDBACK_ALPHA", 0.1)
@@ -130,11 +147,12 @@ USER_CITY = _env("NEWS_USER_CITY", "Munich")
 USER_COUNTRY = _env("NEWS_USER_COUNTRY", "Germany")
 USER_LANGUAGE = _env("NEWS_USER_LANGUAGE", "de")
 
-# --- Heads-up brief --------------------------------------------------------
+# --- Heads-up brief + scheduled ntfy reports ---------------------------------
 HEADS_UP_TTL_MINUTES = _int("NEWS_HEADS_UP_TTL_MINUTES", 3)
-HEADS_UP_NTFY_URL = _env("NEWS_HEADS_UP_NTFY_URL", "https://ntfy.sh/your-topic")
+HEADS_UP_NTFY_URL = _env("NEWS_HEADS_UP_NTFY_URL", "https://ntfy.sh/your-topic")  # empty disables all pushes
 HEADS_UP_NTFY_TITLE = _env("NEWS_HEADS_UP_NTFY_TITLE", "News Heads Up")
-HEADS_UP_NTFY_TIMES = _list("NEWS_HEADS_UP_NTFY_TIMES", "07:00")  # server-local HH:MM
+# Daily brief times (server-local HH:MM) until schedules are saved in ⚙ Preferences.
+HEADS_UP_NTFY_TIMES = _list("NEWS_HEADS_UP_NTFY_TIMES", "07:00")
 
 # --- Auth (empty password = open mode) -------------------------------------
 AUTH_PASSWORD = _env("NEWS_AUTH_PASSWORD", "")
@@ -148,9 +166,12 @@ CHAT_SEARCH_TURNS = sorted(int(t) for t in _list("NEWS_CHAT_SEARCH_TURNS", "0,1,
 CHAT_CONTEXT_PER_SOURCE = _int("NEWS_CHAT_CONTEXT_PER_SOURCE", 1500)
 CHAT_CONTEXT_MAX = _int("NEWS_CHAT_CONTEXT_MAX", 6000)
 
-# --- searchngx (web search for chat) ---------------------------------------
+# --- searchngx (SearXNG web search for chat) ---------------------------------
 SEARCHNGX_BASE_URL = _env("NEWS_SEARCHNGX_BASE_URL", "https://searx.example.org/")
 SEARCHNGX_API_KEY = _env("NEWS_SEARCHNGX_API_KEY", "")
-SEARCHNGX_ENDPOINT = _env("NEWS_SEARCHNGX_ENDPOINT", "api/v2/web_search")
+SEARCHNGX_ENDPOINT = _env("NEWS_SEARCHNGX_ENDPOINT", "search")
+SEARCHNGX_CATEGORIES = _env("NEWS_SEARCHNGX_CATEGORIES", "general,news")
+# Retried with these engines when the default ones return nothing (CAPTCHAs, rate limits).
+SEARCHNGX_FALLBACK_ENGINES = _env("NEWS_SEARCHNGX_FALLBACK_ENGINES", "bing,bing news")
 SEARCHNGX_TIMEOUT = _float("NEWS_SEARCHNGX_TIMEOUT", 30)
 SEARCHNGX_MAX_RESULTS = _int("NEWS_SEARCHNGX_MAX_RESULTS", 5)

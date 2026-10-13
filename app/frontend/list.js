@@ -88,6 +88,7 @@ function render() {
   listEl.innerHTML = "";
   listEl.appendChild(table);
   statusEl.textContent = statusText();
+  statusEl.title = statusEl.textContent;
   moreBtn.hidden = shown >= totalCount;
 }
 

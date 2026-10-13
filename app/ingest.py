@@ -11,8 +11,10 @@ from __future__ import annotations
 import concurrent.futures
 import datetime as dt
 import email.utils
+import ipaddress
 import logging
 import re
+import socket
 import threading
 from typing import Any, Callable
 
@@ -45,6 +47,18 @@ def is_http_url(url: str | None) -> bool:
     return bool(url) and url.lower().startswith(("http://", "https://"))
 
 
+def is_public_url(url: str) -> bool:
+    """http(s) URL whose host resolves only to global addresses (no LAN, loopback, metadata)."""
+    if not is_http_url(url):
+        return False
+    try:
+        host = httpx.URL(url).host
+        infos = socket.getaddrinfo(host, None)
+    except (httpx.InvalidURL, OSError, UnicodeError):
+        return False
+    return bool(infos) and all(ipaddress.ip_address(info[4][0].split("%")[0]).is_global for info in infos)
+
+
 # Pages with no extractable article text (media, JS apps, bot walls).
 _NO_FETCH_HOSTS = ("reddit.com", "redd.it", "youtube.com", "youtu.be", "x.com", "twitter.com",
                    "instagram.com", "tiktok.com", "imgur.com")
@@ -61,23 +75,37 @@ def _worth_fetching(url: str | None) -> bool:
 
 
 _MAX_PAGE_BYTES = 5 * 1024 * 1024  # a stray video/image link must not be read into memory
+_MAX_REDIRECTS = 5
 
 
 def fetch_page_text(url: str) -> str:
-    """Fetch an article page and extract its text ("" for non-HTML or oversized responses)."""
-    with http().stream("GET", url) as r:
-        r.raise_for_status()
-        if "html" not in r.headers.get("content-type", "html").lower():
+    """Fetch an article page and extract its text ("" for non-HTML, oversized or non-public targets).
+
+    Article links come from feed content (anyone can post a link on a subscribed
+    subreddit), so every hop must resolve to a public address — otherwise LAN
+    pages could be fetched and end up in public story summaries.
+    """
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not is_public_url(url):
+            log.info("skip page fetch for non-public URL %s", url)
             return ""
-        if int(r.headers.get("content-length") or 0) > _MAX_PAGE_BYTES:
-            return ""
-        body = bytearray()
-        for chunk in r.iter_bytes():
-            body += chunk
-            if len(body) > _MAX_PAGE_BYTES:
+        with http().stream("GET", url, follow_redirects=False) as r:
+            if r.is_redirect:
+                url = str(r.next_request.url) if r.next_request else ""
+                continue
+            r.raise_for_status()
+            if "html" not in r.headers.get("content-type", "html").lower():
                 return ""
-        html = bytes(body).decode(r.encoding or "utf-8", errors="replace")
-    return extract_content(html, url)
+            if int(r.headers.get("content-length") or 0) > _MAX_PAGE_BYTES:
+                return ""
+            body = bytearray()
+            for chunk in r.iter_bytes():
+                body += chunk
+                if len(body) > _MAX_PAGE_BYTES:
+                    return ""
+            html = bytes(body).decode(r.encoding or "utf-8", errors="replace")
+        return extract_content(html, url)
+    return ""
 
 
 def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -> httpx.Response:
