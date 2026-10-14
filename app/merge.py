@@ -80,6 +80,7 @@ def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
     moved = [r[0] for r in conn.execute("SELECT id FROM Article WHERE story_id = ?", (drop,))]
     conn.execute("UPDATE Article SET story_id = ? WHERE story_id = ?", (keep, drop))
     conn.execute("UPDATE FeedbackLog SET story_id = ? WHERE story_id = ?", (keep, drop))
+    conn.execute("UPDATE StoryUpdate SET story_id = ? WHERE story_id = ?", (keep, drop))
     conn.execute("UPDATE ChatSession SET story_id = ? WHERE story_id = ? AND user_id NOT IN "
                  "(SELECT user_id FROM ChatSession WHERE story_id = ?)", (keep, drop, keep))
     conn.execute("UPDATE Story SET news_at = MAX(COALESCE(news_at, ''), "

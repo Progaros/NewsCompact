@@ -28,7 +28,7 @@ def test_mark_read_hides_keep_exempts_and_unread_restores(client, feed_id, llm):
     assert _ids(client, hide_read="true", keep=str(first)) == ([first, second], 0)
     assert _ids(client) == ([first, second], 0)  # "show read"
     payload = client.get(f"/api/stories/{first}").json()
-    assert payload["read"] == "read" and payload["read_summary"] == payload["summary"]
+    assert payload["read"] == "read" and payload["changes"] == []
 
     assert client.delete(f"/api/stories/{first}/read").status_code == 200
     assert _ids(client, hide_read="true") == ([first, second], 0)
@@ -51,6 +51,7 @@ def test_read_story_resurfaces_only_on_significant_updates(client, feed_id, llm)
     pipeline.process_pending()
     data = client.get(f"/api/stories/{sid}").json()
     assert data["read"] == "updated"
+    assert data["changes"] == ["New detail"]  # minor + notable facts, deduped
     assert sid in _ids(client, hide_read="true")[0]
 
 

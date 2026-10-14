@@ -177,10 +177,16 @@ def _per_user(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE ChatSession_new RENAME TO ChatSession")
 
 
+def _drop_read_summary(conn: sqlite3.Connection) -> None:
+    """v7: "what changed" comes from StoryUpdate; the summary snapshot at read time is unused."""
+    if "summary" in {r[1] for r in conn.execute("PRAGMA table_info(StoryRead)")}:
+        conn.execute("ALTER TABLE StoryRead DROP COLUMN summary")
+
+
 # (user_version, migration) — each runs once, inside a transaction (foreign keys off,
 # so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
-                    (5, _news_at), (6, _per_user))
+                    (5, _news_at), (6, _per_user), (7, _drop_read_summary))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

@@ -27,7 +27,7 @@ def require_uid(request: Request) -> int:
 def private(payload: dict[str, Any], owner: bool) -> dict[str, Any]:
     """A user's read/vote state is not part of the public read-only view."""
     if not owner:
-        payload.update(read=None, read_at=None, read_summary=None, vote=None)
+        payload.update(read=None, read_at=None, changes=[], vote=None)
     return payload
 
 

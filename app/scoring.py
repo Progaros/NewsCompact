@@ -269,16 +269,36 @@ def news_time(story: sqlite3.Row) -> str | None:
     return story["news_at"] or story["updated_at"]
 
 
+CHANGES_MAX = 3
+
+
 def read_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, dict[str, Any]]:
-    """``{story_id: {read: "read"|"updated", read_at, read_summary}}`` for the user's read stories."""
+    """``{story_id: {read: "read"|"updated", read_at, changes}}`` for the user's read stories.
+
+    ``changes`` (updated stories only): up to CHANGES_MAX new facts reported since the
+    user read the story, most significant / newest first.
+    """
     if user_id is None:
         return {}
     rows = conn.execute(
-        "SELECT r.story_id, r.read_at, r.summary, COALESCE(s.material_at, s.created_at) > r.read_at "
+        "SELECT r.story_id, r.read_at, COALESCE(s.material_at, s.created_at) > r.read_at "
         "FROM StoryRead r JOIN Story s ON s.id = r.story_id WHERE r.user_id = ?", (user_id,)
     )
-    return {sid: {"read": "updated" if newer else "read", "read_at": at, "read_summary": summary}
-            for sid, at, summary, newer in rows}
+    out = {sid: {"read": "updated" if newer else "read", "read_at": at, "changes": []}
+           for sid, at, newer in rows}
+    facts = conn.execute(
+        "SELECT u.story_id, u.facts FROM StoryUpdate u JOIN StoryRead r "
+        "ON r.story_id = u.story_id AND r.user_id = ? AND u.created_at > r.read_at "
+        "ORDER BY u.significance DESC, u.id DESC", (user_id,)
+    )
+    for sid, raw in facts:
+        changes = out[sid]["changes"]
+        if out[sid]["read"] != "updated":
+            continue
+        for fact in db.json_list(raw):
+            if len(changes) < CHANGES_MAX and fact not in changes:
+                changes.append(fact)
+    return out
 
 
 def vote_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, str]:

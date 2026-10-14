@@ -44,7 +44,7 @@ def story_payload(item: dict[str, Any], articles: list[dict],
         "news_at": scoring.news_time(s),
         "read": item.get("read"),
         "read_at": item.get("read_at"),
-        "read_summary": item.get("read_summary"),
+        "changes": item.get("changes") or [],
         "vote": item.get("vote"),
         "articles": articles,
         "related": related or [],
@@ -76,12 +76,11 @@ def exists(conn: sqlite3.Connection, story_id: int) -> bool:
 
 
 def mark_read(conn: sqlite3.Connection, user_id: int, story_id: int) -> bool:
-    """Remembers the summary as read (shown again when the story changes); False if no such story."""
-    s = conn.execute("SELECT summary FROM Story WHERE id = ?", (story_id,)).fetchone()
-    if s is None:
+    """Marks the story read (shown again when it changes materially); False if no such story."""
+    if not exists(conn, story_id):
         return False
-    conn.execute("INSERT OR REPLACE INTO StoryRead (user_id, story_id, read_at, summary) "
-                 "VALUES (?, ?, datetime('now'), ?)", (user_id, story_id, s["summary"]))
+    conn.execute("INSERT OR REPLACE INTO StoryRead (user_id, story_id, read_at) "
+                 "VALUES (?, ?, datetime('now'))", (user_id, story_id))
     return True
 
 

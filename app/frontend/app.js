@@ -102,7 +102,7 @@ class StoryCard extends HTMLElement {
     const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE" });
     if (Auth.unauth(res) || !res.ok) return;
     if (markRead) {
-      Object.assign(d, { read: "read", read_at: utcNowDb(), read_summary: d.summary });
+      Object.assign(d, { read: "read", read_at: utcNowDb(), changes: [] });
       sessionReadIds.add(d.id);
     } else {
       d.read = null;
@@ -133,8 +133,8 @@ class StoryCard extends HTMLElement {
         </li>`;
     }).join("");
     const newCount = updated ? articles.filter((a) => (a.created_at || "") > (d.read_at || "")).length : 0;
-    const readSummary = updated && d.read_summary && d.read_summary !== d.summary
-      ? `<details class="read-summary"><summary>Summary when you read it</summary><p>${esc(d.read_summary)}</p></details>` : "";
+    const changes = updated && d.changes?.length
+      ? `<div class="changes"><span class="changes-label">New since you read it</span><ul>${d.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></div>` : "";
     const related = (d.related || []).map((r) =>
       `<li><a href="/s/${Number(r.id)}" target="_blank" rel="noopener">${esc(r.headline)}</a></li>`).join("");
     const readTitle = { read: "Read — click to mark as unread", updated: "Updated since you read it — click to mark as read again" }[d.read]
@@ -158,9 +158,9 @@ class StoryCard extends HTMLElement {
         </div>
         <h2 class="headline">${esc(d.headline)}</h2>
         <p class="summary">${esc(d.summary)}</p>
+        ${changes}
       </div>
       <div class="collapse details"><div>
-        ${readSummary}
         <div class="tags">${tags || `<span class="muted">no tags</span>`}</div>
         <div class="metrics">
           <span class="metric" title="urgency 1-10">Urgency <b>${m.urgency_level ?? "–"}</b></span>

@@ -52,7 +52,8 @@ _SYSTEM_FULL = (
 _SIGNIFICANCE_GUIDE = (
     " new_facts lists, before anything else, each concrete fact the New Article reports "
     "that the Current Summary does not already state or imply (a new event, figure, "
-    "decision or official statement); background, recaps, rewording, analysis, opinion "
+    "decision or official statement), each as one short sentence in the summary's "
+    "language; background, recaps, rewording, analysis, opinion "
     "and reactions are not new facts. Return [] when there are none — most follow-up "
     "articles add none. update_significance rates what the New Article adds for a reader "
     "who already knows the Current Summary: 0 = nothing new (repetition, rewording, "
@@ -117,6 +118,8 @@ SIGNIFICANCE_MAX = 3
 # Escalations only count when the story reaches this urgency ("major event" anchor).
 _ESCALATION_MIN_URGENCY = 7
 _INCREMENTAL_MAX_WORDS = 1500
+_FACTS_PER_UPDATE = 5
+_FACT_MAX_CHARS = 240
 _SENTENCE_SPLIT = re.compile(r"[.!?]+\s*")
 _LANG_RE = re.compile(r"[a-z]{2,3}(-[a-z]{2,4})?")
 
@@ -283,6 +286,11 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
          json.dumps(metrics), quality, significance >= 1,
          significance >= config.READ_RESURFACE_SIGNIFICANCE, story_id),
     )
+    facts = [f.strip()[:_FACT_MAX_CHARS] for f in out.get("new_facts") or []
+             if isinstance(f, str) and f.strip()][:_FACTS_PER_UPDATE] if rated else []
+    if significance >= 1 and facts:
+        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts) VALUES (?, ?, ?)",
+                     (story_id, significance, json.dumps(facts, ensure_ascii=False)))
     return len(user)
 
 

@@ -131,7 +131,7 @@ def test_owner_read_state_is_not_public(exposed):
     exposed.post("/api/auth/logout")
     anon = exposed.get("/api/stories", params={"hide_read": "true"}).json()
     assert anon["hidden_read"] == 0 and anon["stories"][0]["read"] is None
-    assert anon["stories"][0]["read_summary"] is None
+    assert anon["stories"][0]["changes"] == []
     assert exposed.get(f"/api/stories/{sid}").json()["read"] is None
 
 

@@ -56,10 +56,10 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
         assert tuple(conn.execute("SELECT user_id, story_id FROM ChatSession").fetchone()) == (1, 5)
-        assert tuple(conn.execute("SELECT user_id, story_id, summary FROM StoryRead").fetchone()) == (
-            1, 5, "old summary")
+        assert tuple(conn.execute("SELECT user_id, story_id FROM StoryRead").fetchone()) == (1, 5)
+        assert "summary" not in {r[1] for r in conn.execute("PRAGMA table_info(StoryRead)")}
         assert conn.execute("SELECT user_id FROM FeedbackLog").fetchone()[0] == 1
         assert tuple(conn.execute("SELECT name, is_admin FROM AppUser WHERE id = 1").fetchone()) == ("admin", 1)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

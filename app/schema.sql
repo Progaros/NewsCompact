@@ -119,9 +119,19 @@ CREATE TABLE IF NOT EXISTS StoryRead (
     user_id  INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE,
     story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     read_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    summary  TEXT,                    -- the summary as it was when marked read
     PRIMARY KEY (user_id, story_id)
 );
+
+-- New facts of each rated story update (Prompt 2 new_facts); a reader's "what changed"
+-- is the facts of the updates after their read_at.
+CREATE TABLE IF NOT EXISTS StoryUpdate (
+    id           INTEGER PRIMARY KEY,
+    story_id     INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    significance INTEGER NOT NULL,
+    facts        TEXT    NOT NULL,   -- JSON list of short sentences
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_storyupdate_story ON StoryUpdate(story_id, created_at);
 
 -- URLs of deleted articles, so feeds that still list them don't re-ingest them.
 CREATE TABLE IF NOT EXISTS ArticleTombstone (
