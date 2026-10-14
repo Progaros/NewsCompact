@@ -6,13 +6,14 @@ bottleneck). Every successful run stores per-stage wall times plus
 """
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import sqlite3
 import time
 from typing import Any, Callable
 
-from . import clustering, config, db, dedup, harness, ollama, story
+from . import clustering, config, content_quality, db, dedup, harness, ingest, ollama, story
 
 log = logging.getLogger("news.pipeline")
 
@@ -43,6 +44,76 @@ STATUS_SQL = (
 )
 
 
+def article_list(*, limit: int, order: str = "newest", status: str = "", query: str = "") -> dict[str, Any]:
+    """Article rows with pipeline status and stage timings (the /list page); ``count`` ignores ``limit``."""
+    direction = "ASC" if order == "oldest" else "DESC"
+    where, params = [], []
+    if status:
+        where.append(f"({STATUS_SQL}) = ?")
+        params.append(status)
+    if query:
+        like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(a.title LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
+        params += [like, like]
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    base = f"FROM Article a JOIN Feed f ON f.id = a.feed_id {where_sql}"
+    with db.get_conn() as conn:
+        total = conn.execute(f"SELECT count(*) {base}", params).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT a.id, a.title, a.url, a.author, a.published_date, a.created_at,
+                   a.processed_at, a.content_class, a.quality, a.story_id, f.title AS feed,
+                   ({STATUS_SQL}) AS status,
+                   a.t_embed_s, a.t_cluster_s, a.t_harness_s, a.t_story_s, a.t_wall_s, a.t_merge_s,
+                   (julianday(a.processed_at) - julianday(a.created_at)) * 86400 AS latency_s
+            {base}
+            ORDER BY a.created_at {direction}, a.id {direction}
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+    articles = []
+    for r in rows:
+        latency, wall = r["latency_s"], r["t_wall_s"]
+        articles.append({
+            "id": r["id"],
+            "title": r["title"],
+            "url": r["url"],
+            "feed": r["feed"],
+            "author": r["author"],
+            "published_date": r["published_date"],
+            "created_at": r["created_at"],
+            "processed_at": r["processed_at"],
+            "class": r["content_class"],
+            "quality": r["quality"],
+            "story_id": r["story_id"],
+            "status": r["status"],
+            "timings": {
+                "wait": max(0.0, latency - wall) if latency is not None and wall is not None else None,
+                "embed": r["t_embed_s"],
+                "cluster": r["t_cluster_s"],
+                "harness": r["t_harness_s"],
+                "story": r["t_story_s"],
+                "wall": wall,
+                "latency": latency,
+                "merge": r["t_merge_s"],
+            },
+        })
+    return {"count": total, "articles": articles}
+
+
+def counts(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Totals for /api/health and the story list header."""
+    row = conn.execute(
+        "SELECT (SELECT count(*) FROM Article), (SELECT count(*) FROM Story), "
+        "(SELECT count(*) FROM Article WHERE story_id IS NULL AND COALESCE(pipeline_failures, 0) >= ?), "
+        "(SELECT MAX(created_at) FROM Article)",
+        (config.PIPELINE_MAX_FAILURES,),
+    ).fetchone()
+    return {"articles": row[0], "stories": row[1], "pending": pending_count(conn), "dead_letter": row[2],
+            "last_article": row[3]}
+
+
 # --- self-healing (run before every batch) ---------------------------------
 def repair_placeholder_stories() -> int:
     """Re-pend articles of NULL-headline stories (process died before Prompt 2 ran)."""
@@ -54,6 +125,53 @@ def repair_placeholder_stories() -> int:
     if ids:
         log.info("repaired %d placeholder stories", len(ids))
     return len(ids)
+
+
+def repair_boilerplate_bodies() -> int:
+    """Re-extract bodies one feed served identically under several titles (site chrome, not the
+    article) and re-pend those articles; stories that keep other members are rewritten.
+    """
+    with db.get_conn() as conn:
+        arts = [dict(r) for r in conn.execute(
+            "SELECT a.id, a.url, a.story_id, a.content_raw, f.enabled FROM Article a JOIN Feed f ON f.id = a.feed_id "
+            "JOIN (SELECT feed_id, content_raw FROM Article WHERE content_raw != '' GROUP BY feed_id, content_raw "
+            "      HAVING count(DISTINCT title) >= ?) g ON g.feed_id = a.feed_id AND g.content_raw = a.content_raw",
+            (config.BOILERPLATE_MIN_TITLES,),
+        )]
+    if not arts or not ollama.available():  # surviving stories need a Prompt 2 rewrite
+        return 0
+    bodies: dict[int, str] = {}
+    for a in arts:
+        body = ""
+        if a["enabled"] and ingest._worth_fetching(a["url"]):
+            try:
+                body = content_quality.clean_body(ingest.fetch_page_text(a["url"]))
+            except Exception as e:  # noqa: BLE001 - falls back to a title-only article
+                log.debug("re-extraction failed for %s: %s", a["url"], e)
+        bodies[a["id"]] = body
+    seen = collections.Counter(bodies.values())
+    touched: set[int] = set()
+    with db.get_conn() as conn:
+        for a in arts:
+            body = bodies[a["id"]]
+            if body == a["content_raw"] or seen[body] > 1:
+                body = ""
+            conn.execute(
+                "UPDATE Article SET content_raw = ?, content_class = ?, story_id = NULL, quality = NULL, "
+                "pipeline_failures = 0, processed_at = NULL WHERE id = ?",
+                (body, content_quality.classify(body), a["id"]),
+            )
+            conn.execute("UPDATE Article SET story_id = NULL WHERE duplicate_of = ?", (a["id"],))
+            clustering.delete_embeddings(conn, [a["id"]])
+            if a["story_id"] is not None:
+                touched.add(a["story_id"])
+        for sid in touched:
+            try:
+                story.update_story(conn, sid, force_full=True)
+            except Exception:  # noqa: BLE001 - the next joining article rewrites it
+                log.exception("rewrite after boilerplate repair failed for story %s", sid)
+    log.info("repaired %d boilerplate bodies (%d stories touched)", len(arts), len(touched))
+    return len(arts)
 
 
 def reap_orphaned_stories() -> int:
@@ -186,6 +304,7 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
     Each article is tried at most once per call.
     """
     repair_placeholder_stories()
+    repair_boilerplate_bodies()
     reap_orphaned_stories()
     tried: set[int] = set()
     result = {"processed": 0, "failed": 0}

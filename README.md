@@ -30,8 +30,7 @@ NEWS_PUBLIC_BASE=https://news.example.org   # Secure cookie, HSTS, CSRF Origin c
 NEWS_HOST=127.0.0.1                         # when nginx runs on the same host
 ```
 
-- **Open mode** (`NEWS_AUTH_PASSWORD` empty): LAN clients act as user `1` (`admin`, admin) without signing in; non-LAN requests to private routes are rejected (403).
-- **Password mode**: `admin` signs in with `NEWS_AUTH_PASSWORD` (until setting a custom password in ⚙ Preferences). Admins manage feeds (`/feeds`) and users (`/admin`: create, promote/demote, reset password, delete).
+- **Login is required**: startup fails unless `NEWS_AUTH_PASSWORD` is set or an admin already has a stored password. `admin` signs in with `NEWS_AUTH_PASSWORD` (until setting a custom password in ⚙ Preferences). Admins manage feeds (`/feeds`) and users (`/admin`: create, promote/demote, reset password, delete).
 
 ### Reverse proxy (`nginx`, HTTPS)
 
@@ -86,17 +85,17 @@ flowchart LR
   StoryDB --> Rank & Brief
 ```
 
-1. **Ingest** (`app/ingest.py`, `app/dedup.py`): fetches feeds concurrently (ETag / Last-Modified, 5 MB cap). Normalizes bodies (`content_quality.clean_body`; Reddit/HN items keep post text + up to `NEWS_SOCIAL_MAX_COMMENTS` comments). Enabled feeds with short descriptions fetch the linked article HTML (`trafilatura` → `newspaper3k` → `BeautifulSoup`) via a DNS-pinned client that connects only to vetted global IPs. Cross-feed duplicates (canonical URL or ≥ 5-word title within 72 h) attach directly to the original's story without LLM calls.
-2. **Pipeline** (`app/pipeline.py`, `app/clustering.py`, `app/harness.py`, `app/story.py`): processes pending articles newest-first (categories with `SOURCE_TRUST < 0.5` like Reddit wait until higher-trust backlog clears; `broken` bodies are skipped).
+1. **Ingest** (`app/ingest.py`, `app/dedup.py`): fetches feeds concurrently (ETag / Last-Modified, 5 MB cap). Normalizes bodies (`content_quality.clean_body`; Reddit/HN items keep post text + up to `NEWS_SOCIAL_MAX_COMMENTS` comments); a longer `<content:encoded>` beats a teaser description. Enabled feeds with short descriptions fetch the linked article HTML (`trafilatura` → `newspaper3k` → `BeautifulSoup`; link-list extractions such as related-article sidebars are rejected) via a DNS-pinned client that connects only to vetted global IPs. Cross-feed duplicates (canonical URL or ≥ 5-word title within 72 h) attach directly to the original's story without LLM calls.
+2. **Pipeline** (`app/pipeline.py`, `app/clustering.py`, `app/harness.py`, `app/story.py`): processes pending articles newest-first (categories with `SOURCE_TRUST < 0.5` like Reddit wait until higher-trust backlog clears; `broken` bodies are skipped). Before each batch it self-heals: placeholder stories, and bodies one feed served identically under ≥ 3 titles (site chrome) are re-extracted and re-processed.
    - **Embed**: title + first 100 body words (title-only unless `ok`), batched in chunks of `NEWS_EMBED_BATCH` (16) and stored as the article is processed.
    - **Cluster**: `vec0` KNN retrieves candidates scored by max cosine similarity to non-broken member anchors (`AnchorCache`). The 27B verifier classifies top candidates (`≥ 0.55` within 48 h, or `≥ 0.62` stale revival); `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` join, `SAME_TOPIC_DISTINCT_EVENT` is saved in `StoryLink` as a related story.
    - **Harness**: scores article quality (1–10, capped at `NEWS_TITLE_QUALITY_MAX` for non-`ok` bodies) and `breaking` in one schema-constrained call. Thin articles joining a junk story skip Harness & Prompt 2.
    - **Prompt 2**: generates/updates headline, 2–4 sentence summary, tags, `location`, `language`, and anchored `metrics` (`urgency_level`, `impact_scale`, `status`), retrying once on malformed JSON. Story quality is the **trust-weighted median** of member articles. Incremental rewrites rate `update_significance` (0–3): `≥ 1` advances `news_at` (recency), `≥ 2` (or urgency jump / Breaking) advances `material_at` (resurfaces read stories).
-3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges; non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
+3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine to stories updated within 96 h, or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges; non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
 4. **Ranking** (`app/scoring.py`):
    $$\text{relevance} = 10 \cdot (0.40\,\text{quality} + 0.35\,\text{credibility} + 0.25\,\text{impact})$$
    $$\text{display} = \text{relevance} + \text{urgency}\cdot W_1 + \text{clamp}(\text{interest}\cdot W_3, \pm 10) + \text{distance}\cdot W_{\text{dist}} - \text{decay}(\text{news\_at})$$
-   - **Credibility**: summed trust of distinct outlets (`outlet_key` by hostname; multiple feeds from one publisher count once), using category/per-feed trust overrides.
+   - **Credibility**: summed trust of distinct outlets (`outlet_key` by hostname without `www.`/`feeds.`/`rss.` prefixes, merged via `NEWS_OUTLET_GROUPS`; multiple feeds from one publisher count once), using category/per-feed trust overrides. Cards show this outlet count as "N sources" (feed count in the tooltip).
    - **Personalization** (`view=personal`): whole-word region/location tag matches (`impact`), 👍/👎 tag weights (`interest`), home city/country/language (`distance`), excluded feeds (`⊘`), and hiding read stories. `view=default` (**Everyone**) uses `DEFAULT_PROFILE` with `distance = 0`, shows all stories (including read), and shares the same Quick Heads Up brief as signed-out visitors.
 5. **Retention** (`app/retention.py`, hourly): deletes stories/articles older than `NEWS_RETENTION_DAYS` (7), records URL tombstones (30 d) so feeds don't re-import them, keeps `FeedbackLog` snapshots, and runs `incremental_vacuum`.
 
@@ -110,15 +109,11 @@ flowchart TD
   Cookie --> Route{Route class}
 
   Route -->|Public GET<br/>/ /list /s/* /p/*<br/>/api/stories /api/heads-up| Pub[200 OK · strip read state<br/>if anonymous]
-  Route -->|User route<br/>read · vote · profile · chat · share| Mode{Auth enabled?}
-  Mode -->|No: open mode| LAN{From LAN IP?}
-  LAN -->|Yes: act as user 1| UserOK[200 OK · per-user state]
-  LAN -->|No| E403L[403 LAN only]
-  Mode -->|Yes: password mode| SignedIn{Valid session?}
+  Route -->|User route<br/>read · vote · profile · chat · share| SignedIn{Valid session?}
   SignedIn -->|No| E401[401 / 303 redirect]
   SignedIn -->|Yes| AdminCheck{Admin route?<br/>/feeds /admin /api/refresh /api/reports}
   AdminCheck -->|Yes & not admin| E403A[403 Admins only]
-  AdminCheck -->|No or is admin| UserOK
+  AdminCheck -->|No or is admin| UserOK[200 OK · per-user state]
 ```
 
 - **Sessions & passwords** (`app/auth.py`): passwords use salted `scrypt` (`AppUser.password_hash`). Cookie tokens are 256-bit (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS); only `sha256(token)` is stored in `AuthSession` (24 h TTL, max 500 sessions, survives restarts). Changing your password revokes sibling sessions; changing `NEWS_AUTH_PASSWORD` invalidates env-password sessions via `env_stamp`. Login and password changes are rate-limited (5 failures / 60 s per client IP, using the right-most `X-Forwarded-For` hop from a local proxy).
@@ -162,16 +157,19 @@ flowchart TD
 | `NEWS_CLUSTER_MODE` / `NEWS_CLUSTER_WINDOW_HOURS` | `two_stage` / `48` | `two_stage` (LLM verifier) or `cosine` / active join window |
 | `NEWS_CLUSTER_VERIFY_RETRIEVE_THRESHOLD` / `NEWS_CLUSTER_SIM_THRESHOLD` / `NEWS_CLUSTER_REVIVE_SIM_THRESHOLD` | `0.55` / `0.64` / `0.62` | Verifier retrieval / cosine fallback / stale-story revival |
 | `NEWS_MERGE_ENABLED` / `NEWS_MERGE_SIM_THRESHOLD` / `NEWS_MERGE_MAX_CHECKS_PER_RUN` | `1` / `0.62` / `5` | Idle-time recall merge settings |
+| `NEWS_MERGE_CANDIDATE_WINDOW_HOURS` | `96` | Age limit of embedding merge candidates (checked stories stay within the 48 h window) |
 | `NEWS_MERGE_LEXICAL_MIN_TERMS` / `NEWS_MERGE_LEXICAL_MAX_DF` | `3` / `5` | Shared rare headline terms for lexical merge candidates |
 | `NEWS_READ_RESURFACE_SIGNIFICANCE` / `NEWS_TITLE_QUALITY_MAX` | `2` / `6` | Update significance (0–3) to resurface read stories / cap for non-`ok` bodies |
 | `NEWS_STORY_ACTIVE_DAYS` / `NEWS_RETENTION_DAYS` / `NEWS_DEDUP_WINDOW_HOURS` | `2` / `7` / `72` | Active feed window / DB retention (0 = forever) / URL+title dedup window |
+| `NEWS_BOILERPLATE_MIN_TITLES` | `3` | One feed's identical body under this many titles = extracted site chrome; re-extracted (else title-only) and re-processed |
 | `NEWS_SOURCE_TRUST` / `NEWS_SOURCE_TRUST_DEFAULT` | `Reddit=0.3,Hacker News=0.5,Reviews=0.5` / `1.0` | Default category trust weights |
+| `NEWS_OUTLET_GROUPS` | `deutschlandfunkkultur.de=deutschlandfunk.de,act.eff.org=eff.org,wid.cert-bund.de=bsi.bund.de` | Hosts of one organization counted as one outlet (credibility, source count) |
 | `NEWS_W1` / `NEWS_W3` / `NEWS_INTEREST_CAP` / `NEWS_W_DISTANCE` | `1.0` / `1.5` / `10` / `2.0` | Display score weights (urgency, interest, cap, distance) |
 | `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` / `NEWS_FEEDBACK_ALPHA` | `18` / `10` / `0.1` | Time decay (from `news_at`) and 👍/👎 learning rate |
 | `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
 | `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `5` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
 | `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` | `https://searx.example.org/` / `8` | SearXNG URL and safety cap on autonomous chat search turns |
-| `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `24` | Owner login password (empty = open LAN mode) / session TTL |
+| `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `24` | Owner login password (required unless an admin has a stored password; startup fails otherwise) / session TTL |
 | `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |
 | `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty / `10` / `10` | Rotating gzipped log (`start.sh` sets `server.log`) |
 
@@ -184,13 +182,16 @@ flowchart TD
 ```
 main.py                 uvicorn entrypoint & PID file
 app/
-  api.py, auth.py, bus.py       FastAPI routes, scrypt/session auth, SSE bus
+  api.py, web.py                App factory + auth/security middleware, shared HTTP helpers
+  routes/                       One APIRouter per area (stories, chat, auth, profile, share, admin, feeds, ...); no SQL
+  auth.py, users.py, bus.py     scrypt/session auth, user administration, SSE bus
+  stories.py, chat_history.py, share.py, feeds.py   Story payloads & read marks, chat tree, share links, feed management
   db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations, env config
   ingest.py, content_quality.py, dedup.py, retention.py
   pipeline.py, clustering.py, merge.py, harness.py, story.py, scoring.py, tags.py
   heads_up.py, reports.py, chat.py, searchngx.py, worker.py
   frontend/                     vanilla JS/CSS UI (index, list, feeds, admin, share)
 scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, rescore_metrics.py, benchmark/
-tests/                  pytest suite (102 tests: API, security, pipeline, merge, scoring, read, ingest, migrations)
+tests/                  pytest suite (108 tests: API, security, pipeline, merge, scoring, read, ingest, migrations)
 docs/                   plan.md (changelog), todo.md, findings.md, future_ideas.md
 ```

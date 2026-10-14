@@ -8,13 +8,6 @@ from conftest import add_article
 
 
 @pytest.fixture
-def client(monkeypatch, llm):
-    monkeypatch.setattr(worker, "start", lambda: None)
-    with TestClient(api.create_app(), client=("192.168.1.20", 50000)) as c:
-        yield c
-
-
-@pytest.fixture
 def story(feed_id, llm):
     add_article(feed_id, "Flood hits town")
     pipeline.process_pending()
@@ -326,18 +319,17 @@ def test_think_tags_are_split_from_the_answer():
     assert kinds == {"thinking": "planning", "content": "\n\nAnswer <b>!"}
 
 
-def test_open_mode_is_lan_only(client, monkeypatch):
+def test_startup_fails_without_any_login(monkeypatch):
     monkeypatch.setattr(worker, "start", lambda: None)
-    with TestClient(api.create_app(), client=("8.8.8.8", 50000)) as remote:
-        assert remote.get("/api/stories").status_code == 200
-        assert remote.get("/api/feeds").status_code == 403
-        assert remote.post("/api/refresh").status_code == 403
-    # Behind nginx on the same host: the proxy-appended address decides, spoofed entries don't help.
-    with TestClient(api.create_app(), client=("127.0.0.1", 50000)) as proxied:
-        assert proxied.get("/api/feeds", headers={"X-Forwarded-For": "8.8.8.8"}).status_code == 403
-        spoof = {"X-Forwarded-For": "10.0.0.2, 8.8.8.8"}
-        assert proxied.get("/api/feeds", headers=spoof).status_code == 403
-        assert proxied.get("/api/feeds", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 200
+    monkeypatch.setattr(config, "AUTH_PASSWORD", "")
+    with pytest.raises(RuntimeError, match="NEWS_AUTH_PASSWORD"):
+        with TestClient(api.create_app()):
+            pass
+    with db.get_conn() as conn:  # an admin with a stored password is enough
+        conn.execute("UPDATE AppUser SET password_hash = ? WHERE id = 1", (auth.hash_password("owner pw 123"),))
+    with TestClient(api.create_app()) as c:
+        assert c.get("/api/profile").status_code == 401  # no implicit user anymore
+        assert c.get("/api/auth/session").json() == {"authenticated": False, "user": None}
 
 
 def test_auth_allowlist(client, story, monkeypatch):

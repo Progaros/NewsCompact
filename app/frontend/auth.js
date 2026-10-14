@@ -4,7 +4,7 @@
 const Auth = (() => {
   const TOAST_MS = 8000; // toasts auto-dismiss after this (spec: 5–10 s)
 
-  const state = { authenticated: false, authEnabled: false, user: null };
+  const state = { authenticated: false, user: null };
   const listeners = [];
   let toastTimer = null;
 
@@ -14,7 +14,6 @@ const Auth = (() => {
       if (res.ok) {
         const d = await res.json();
         state.authenticated = !!d.authenticated;
-        state.authEnabled = !!d.auth_enabled;
         state.user = d.user || null;
       }
     } catch {
@@ -37,7 +36,7 @@ const Auth = (() => {
   /* body class makes the page read-only for a not-signed-in viewer:
    * hides 👍/👎 (`.interaction`); `.is-admin` shows the management links (Feeds, Users). */
   function applyDom() {
-    document.body.classList.toggle("unsigned-in", state.authEnabled && !state.authenticated);
+    document.body.classList.toggle("unsigned-in", !state.authenticated);
     document.body.classList.toggle("is-admin", !!(state.authenticated && state.user?.is_admin));
     renderHeader();
   }
@@ -53,10 +52,10 @@ const Auth = (() => {
       el.className = "btn";
       controls.appendChild(el);
     }
-    if (!state.authEnabled || state.authenticated) {
+    if (state.authenticated) {
       const name = state.user?.name || "Preferences";
       el.innerHTML = `<span aria-hidden="true">\u2699</span><span class="btn-label"> ${esc(name)}</span>`;
-      el.title = state.authEnabled ? "Preferences & sign out" : "Preferences";
+      el.title = "Preferences & sign out";
       el.setAttribute("aria-label", "Preferences");
       el.onclick = () => showUserModal();
     } else {
@@ -88,7 +87,7 @@ const Auth = (() => {
         <h2>Preferences${state.user ? ` <span class="muted">· ${esc(state.user.name)}</span>` : ""}</h2>
         <div id="user-profile" class="user-profile">Loading\u2026</div>
         <div class="login-row">
-          ${state.authEnabled ? `<button type="button" class="btn" id="user-signout">Sign out</button>` : ""}
+          <button type="button" class="btn" id="user-signout">Sign out</button>
           <span class="spacer"></span>
           <button type="button" class="btn" id="user-close">Cancel</button>
           <button type="submit" class="btn primary">Save</button>
@@ -488,10 +487,9 @@ const Auth = (() => {
   }
 
   /* Call after each API call: on 401 show the login toast once and return
-   * true so the caller can bail. Non-401 / open-mode responses pass through
-   * and return false. */
+   * true so the caller can bail. Other responses pass through and return false. */
   function unauth(res) {
-    if (res && res.status === 401 && state.authEnabled) {
+    if (res && res.status === 401) {
       toast("Not signed in — full access requires login.", {
         label: "Sign in",
         onClick: showLoginModal,

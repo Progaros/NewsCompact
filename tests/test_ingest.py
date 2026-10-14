@@ -21,6 +21,22 @@ def test_published_date_is_utc():
     assert ingest._published_utc(entry) == "2026-10-12 09:29:25"
 
 
+def test_content_encoded_beats_teaser_description():
+    rss = b"""<?xml version="1.0"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>T</title><item><title>A</title><link>https://x/a</link><description>Teaser.</description>
+<content:encoded><![CDATA[<p>Full article text here.</p>]]></content:encoded></item></channel></rss>"""
+    assert ingest._entry_description(feedparser.parse(rss).entries[0]) == "Full article text here."
+    assert ingest._entry_description(feedparser.parse(RSS).entries[1]) == "short"
+
+
+def test_link_list_extraction_is_rejected():
+    sidebar = "\n".join(f"- Headline {i} with a teaser sentence about something" for i in range(16))
+    assert ingest.is_link_list(sidebar)
+    assert not ingest.is_link_list("Intro paragraph.\n- one point\n- two\nMore text.\nEven more.")
+    article = "<html><body><article>" + "".join(f"<p>{'word ' * 30}</p>" for _ in range(5)) + "</article></body></html>"
+    assert ingest.extract_content(article, "https://x/a").startswith("word")
+
+
 def test_worth_fetching_skips_social_and_media_hosts():
     assert ingest._worth_fetching("https://news.example/a")
     assert not ingest._worth_fetching("https://www.reddit.com/r/x")

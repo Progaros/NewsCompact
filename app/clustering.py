@@ -117,8 +117,8 @@ class AnchorCache:
         return out
 
 
-def window_cutoff() -> str:
-    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=config.CLUSTER_WINDOW_HOURS)
+def window_cutoff(hours: float | None = None) -> str:
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=config.CLUSTER_WINDOW_HOURS if hours is None else hours)
     return cutoff.strftime("%Y-%m-%d %H:%M:%S")
 
 

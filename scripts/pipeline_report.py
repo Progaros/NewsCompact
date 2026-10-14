@@ -64,6 +64,19 @@ def main() -> None:
         FROM Article a JOIN Feed f ON f.id = a.feed_id GROUP BY 1 ORDER BY 2 DESC"""):
         print(f"  {status:<32} {n}")
 
+    # Same opening under many titles = extraction picked up site chrome (sidebar, disclaimer, paywall).
+    print("\n== Repeated body openings (one feed, >= 3 titles, last 48h of ingests)")
+    repeated = q("""
+        SELECT f.title, count(DISTINCT a.title), substr(a.content_raw, 1, 70) FROM Article a
+        JOIN Feed f ON f.id = a.feed_id
+        WHERE a.content_raw != '' AND a.created_at >= (SELECT datetime(max(created_at), '-48 hours') FROM Article)
+        GROUP BY a.feed_id, substr(a.content_raw, 1, 120) HAVING count(DISTINCT a.title) >= 3
+        ORDER BY 2 DESC""").fetchall()
+    for feed, n, head in repeated:
+        print(f"  {n:>3}x  {feed[:30]:<30}  {head!r}")
+    if not repeated:
+        print("  none")
+
     rows = q(f"""
         SELECT (julianday({processed_a}) - julianday(a.created_at)) * 86400, a.t_wall_s
         FROM Article a

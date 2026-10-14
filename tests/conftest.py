@@ -13,12 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import config, db, ollama  # noqa: E402
 
+TEST_PASSWORD = "test env password 0123456789"
+
 
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(config, "HEADS_UP_NTFY_TIMES", [])
     monkeypatch.setattr(config, "HEADS_UP_NTFY_URL", "")
+    monkeypatch.setattr(config, "AUTH_PASSWORD", TEST_PASSWORD)
     db.init_db()
     return config.DB_PATH
 
@@ -112,6 +115,20 @@ def llm(monkeypatch):
 
 
 @pytest.fixture
+def client(monkeypatch, llm):
+    """API client signed in as the owner (user 1, admin)."""
+    from fastapi.testclient import TestClient
+
+    from app import api, auth, worker
+
+    monkeypatch.setattr(worker, "start", lambda: None)
+    auth._failures.clear()
+    with TestClient(api.create_app()) as c:
+        assert c.post("/api/auth/login", json={"password": TEST_PASSWORD}).status_code == 200
+        yield c
+
+
+@pytest.fixture
 def feed_id():
     with db.get_conn() as conn:
         return conn.execute(
@@ -122,7 +139,7 @@ def feed_id():
 def add_article(feed_id: int, title: str, body: str = "", url: str | None = None, **extra) -> int:
     from app.content_quality import classify
 
-    body = body or ("word " * 300)
+    body = body or f"{title} " + "word " * 300
     with db.get_conn() as conn:
         return conn.execute(
             "INSERT INTO Article (feed_id, title, url, content_raw, content_class, created_at, published_date) "

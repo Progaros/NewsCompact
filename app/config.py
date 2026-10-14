@@ -89,6 +89,9 @@ SOCIAL_MAX_COMMENTS = _int("NEWS_SOCIAL_MAX_COMMENTS", 10)
 # within the window) skip the AI pipeline and join the original's story.
 DEDUP_WINDOW_HOURS = _int("NEWS_DEDUP_WINDOW_HOURS", 72)
 DEDUP_TITLE_MIN_WORDS = _int("NEWS_DEDUP_TITLE_MIN_WORDS", 5)
+# One feed serving the same body under this many titles = extracted site chrome; re-extracted.
+# (Two titles is usually a retitled article.)
+BOILERPLATE_MIN_TITLES = _int("NEWS_BOILERPLATE_MIN_TITLES", 3)
 
 # --- Retention -------------------------------------------------------------
 # Stories without an update for this many days are deleted with their articles;
@@ -116,6 +119,8 @@ MERGE_ENABLED = _env("NEWS_MERGE_ENABLED", "1") == "1"
 MERGE_SIM_THRESHOLD = _float("NEWS_MERGE_SIM_THRESHOLD", 0.62)
 MERGE_MAX_CHECKS_PER_RUN = _int("NEWS_MERGE_MAX_CHECKS_PER_RUN", 5)
 MERGE_ANCHORS_PER_STORY = _int("NEWS_MERGE_ANCHORS_PER_STORY", 3)
+# Embedding candidates may be older than the cluster window, so a duplicate isn't lost at 48h.
+MERGE_CANDIDATE_WINDOW_HOURS = _int("NEWS_MERGE_CANDIDATE_WINDOW_HOURS", 96)
 # Lexical channel: stories sharing this many headline terms that occur in at most
 # MERGE_LEXICAL_MAX_DF window stories are verified too (catches cross-language copies).
 MERGE_LEXICAL_MIN_TERMS = _int("NEWS_MERGE_LEXICAL_MIN_TERMS", 3)
@@ -147,6 +152,10 @@ W_RELEVANCE_IMPACT = _float("NEWS_W_REL_IMPACT", 0.25)
 # Trust (0..1) of a feed category in the credibility term; ⚙ Preferences overrides per category.
 SOURCE_TRUST = _weights("NEWS_SOURCE_TRUST", "Reddit=0.3,Hacker News=0.5,Reviews=0.5")
 SOURCE_TRUST_DEFAULT = _float("NEWS_SOURCE_TRUST_DEFAULT", 1.0)
+# Outlets of one organization count as one source for credibility ("host=group", hosts without www./feeds.).
+OUTLET_GROUPS = {k.strip(): v.strip() for k, _, v in (p.partition("=") for p in _list(
+    "NEWS_OUTLET_GROUPS",
+    "deutschlandfunkkultur.de=deutschlandfunk.de,act.eff.org=eff.org,wid.cert-bund.de=bsi.bund.de")) if v.strip()}
 TIME_DECAY_HALF_LIFE_HOURS = _float("NEWS_DECAY_HALF_LIFE_HOURS", 18)
 TIME_DECAY_MAX = _float("NEWS_DECAY_MAX", 10.0)
 FEEDBACK_ALPHA = _float("NEWS_FEEDBACK_ALPHA", 0.1)
@@ -161,7 +170,7 @@ HEADS_UP_NTFY_TITLE = _env("NEWS_HEADS_UP_NTFY_TITLE", "News Heads Up")
 # Daily brief times (server-local HH:MM) until schedules are saved in ⚙ Preferences.
 HEADS_UP_NTFY_TIMES = _list("NEWS_HEADS_UP_NTFY_TIMES", "07:00")
 
-# --- Auth (empty password = open mode) -------------------------------------
+# --- Auth (startup fails unless this is set or an admin has a stored password) ---
 AUTH_PASSWORD = _env("NEWS_AUTH_PASSWORD", "")
 AUTH_SESSION_HOURS = _float("NEWS_AUTH_SESSION_HOURS", 24)
 AUTH_COOKIE = _env("NEWS_AUTH_COOKIE", "news_session")

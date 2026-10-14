@@ -54,6 +54,33 @@ def test_stale_story_is_revived(feed_id, llm):
     assert _story_of(first) == _story_of(second)
 
 
+def test_boilerplate_bodies_are_reextracted_and_stories_rewritten(feed_id, llm, monkeypatch):
+    from app import ingest
+
+    sidebar = "\n".join(f"- Other headline {i}" for i in range(16)) + " padding" * 40
+    real = {f"https://example.org/{t}": f"Real text about {t}. " + "fact " * 150 for t in ("Flood", "Fire")}
+    monkeypatch.setattr(ingest, "fetch_page_text", lambda url: real.get(url, sidebar))
+    flood = add_article(feed_id, "Flood hits town", body=sidebar, url="https://example.org/Flood")
+    keeper = add_article(feed_id, "Flood rescue continues")
+    pipeline.process_pending()
+    old_story = _story_of(flood)
+    assert _story_of(keeper) == old_story
+    fire = add_article(feed_id, "Fire in mill", body=sidebar, url="https://example.org/Fire")
+    storm = add_article(feed_id, "Storm warning", body=sidebar, url="https://example.org/Storm")
+    llm.calls.clear()
+
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        rows = {r["id"]: r for r in conn.execute("SELECT id, content_raw, content_class, story_id FROM Article")}
+    assert rows[flood]["content_raw"].startswith("Real text about Flood")
+    assert rows[fire]["content_raw"].startswith("Real text about Fire")
+    assert rows[storm]["content_raw"] == "" and rows[storm]["content_class"] == "empty"  # page still chrome
+    assert all(rows[a]["story_id"] is not None for a in (flood, fire, storm))  # re-processed
+    assert rows[keeper]["story_id"] == old_story
+    assert llm.calls[0] == "story"  # the story that kept a member was rewritten first
+    assert pipeline.repair_boilerplate_bodies() == 0  # idempotent
+
+
 def test_headline_only_quality_is_capped(feed_id, llm):
     aid = add_article(feed_id, "Short item", body="tiny", content_class="thin")
     pipeline.process_pending()

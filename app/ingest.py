@@ -194,14 +194,24 @@ def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -
 
 
 # --- text extraction -------------------------------------------------------
+def is_link_list(text: str) -> bool:
+    """Mostly bullet lines: a related-articles widget, not the article (identical on every page)."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    bullets = sum(ln.lstrip().startswith(("- ", "* ", "• ")) for ln in lines)
+    return bullets >= 5 and bullets * 2 >= len(lines)
+
+
+def _usable(text: str | None) -> bool:
+    return bool(text) and len(text.split()) >= config.EXTRACT_MIN_DESC_WORDS and not is_link_list(text)
+
+
 def extract_content(html: str, url: str) -> str:
     """Best-effort article text via the extraction fallback chain ("" if nothing usable)."""
-    min_words = config.EXTRACT_MIN_DESC_WORDS
     try:
         from trafilatura import extract
 
         text = extract(html, url=url, favor_precision=True, no_fallback=False)
-        if text and len(text.split()) >= min_words:
+        if _usable(text):
             return text.strip()
     except Exception as e:  # noqa: BLE001
         log.debug("trafilatura failed for %s: %s", url, e)
@@ -211,7 +221,7 @@ def extract_content(html: str, url: str) -> str:
         art = Article(url=url)
         art.set_html(html)
         art.parse()
-        if art.text and len(art.text.split()) >= min_words:
+        if _usable(art.text):
             return art.text.strip()
     except Exception as e:  # noqa: BLE001
         log.debug("newspaper3k failed for %s: %s", url, e)
@@ -240,7 +250,10 @@ def _strip_html(text: str) -> str:
 
 
 def _entry_description(entry: Any) -> str:
-    return _strip_html(entry.get("description") or entry.get("summary") or "").strip()
+    """Longest of description and ``<content:encoded>`` (often the full article behind a teaser)."""
+    texts = [_strip_html(entry.get("description") or entry.get("summary") or "").strip()]
+    texts += [_strip_html(c.get("value") or "").strip() for c in entry.get("content") or []]
+    return max(texts, key=lambda t: len(t.split()))
 
 
 def _published_utc(entry: Any) -> str | None:

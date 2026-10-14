@@ -8,8 +8,8 @@ Design decisions (see findings.md, "Authentication & API security"):
 - Passwords are stored as salted scrypt hashes (AppUser.password_hash). User 1
   (the admin from the single-user era) logs in with NEWS_AUTH_PASSWORD until
   it gets a password of its own.
-- When `config.AUTH_PASSWORD` is empty, auth is DISABLED (open mode): requests
-  without a session act as user 1, so the app runs out of the box on a trusted LAN.
+- Startup fails unless NEWS_AUTH_PASSWORD is set or an admin has a password of
+  their own (there is no unauthenticated mode).
 - Login is throttled per client IP (sliding window) so passwords are not a
   brute-force target.
 - The cookie is HttpOnly + SameSite=Lax: JS can't read it, and cross-site
@@ -53,8 +53,13 @@ def verify_password(password: str, stored: str | None) -> bool:
 # --- sessions --------------------------------------------------------------
 
 
-def auth_enabled() -> bool:
-    return bool(config.AUTH_PASSWORD)
+def login_configured() -> bool:
+    """Someone can sign in as admin: NEWS_AUTH_PASSWORD is set or an admin has a stored password."""
+    if config.AUTH_PASSWORD:
+        return True
+    with db.get_conn() as conn:
+        return conn.execute("SELECT 1 FROM AppUser WHERE is_admin = 1 AND COALESCE(password_hash, '') != ''"
+                            ).fetchone() is not None
 
 
 def check_password(candidate: str) -> bool:
@@ -89,7 +94,7 @@ def authenticate(name: str | None, password: str) -> dict[str, Any] | None:
 
 
 def change_password(user_id: int, current: str, new: str) -> bool:
-    """Set a new password after checking the current one (open-mode owner without one: no check)."""
+    """Set a new password after checking the current one."""
     with db.get_conn() as conn:
         row = _user_row(conn, user_id=user_id)
         if row is None:
@@ -97,7 +102,7 @@ def change_password(user_id: int, current: str, new: str) -> bool:
         if row["password_hash"]:
             ok = verify_password(current, row["password_hash"])
         else:
-            ok = check_password(current) if auth_enabled() else row["id"] == OWNER_ID
+            ok = check_password(current)
         if ok:
             conn.execute("UPDATE AppUser SET password_hash = ? WHERE id = ?", (hash_password(new), user_id))
         return ok
@@ -146,10 +151,8 @@ def session_user_id(token: str | None) -> int | None:
 
 
 def current_user(token: str | None) -> dict[str, Any] | None:
-    """The signed-in user (open mode: user 1 without a session); None when anonymous."""
+    """The signed-in user; None when anonymous."""
     uid = session_user_id(token)
-    if uid is None and not auth_enabled():
-        uid = OWNER_ID
     if uid is None:
         return None
     with db.get_conn() as conn:
@@ -158,7 +161,6 @@ def current_user(token: str | None) -> dict[str, Any] | None:
 
 
 def is_authenticated(token: str | None) -> bool:
-    """True in open mode (no password set); otherwise token must be live."""
     return current_user(token) is not None
 
 

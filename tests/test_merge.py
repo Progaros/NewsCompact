@@ -26,6 +26,18 @@ def test_merge_pass_folds_verified_duplicates(feed_id, llm):
         assert conn.execute("SELECT count(*) FROM Article WHERE t_merge_s IS NOT NULL").fetchone()[0] >= 1
 
 
+def test_merge_reaches_stories_older_than_the_cluster_window(feed_id, llm):
+    _make_two_stories(feed_id, llm)
+    with db.get_conn() as conn:
+        oldest = conn.execute("SELECT min(id) FROM Story").fetchone()[0]
+        conn.execute("UPDATE Story SET updated_at = datetime('now', '-60 hours'), merge_checked_at = datetime('now') "
+                     "WHERE id = ?", (oldest,))
+    llm.verdict = "EXACT_MATCH"
+    assert merge.run()["merged"] >= 1
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT count(*) FROM Story").fetchone()[0] == 1
+
+
 def test_merge_pass_respects_rejection_and_marks_checked(feed_id, llm):
     _make_two_stories(feed_id, llm)
     result = merge.run()

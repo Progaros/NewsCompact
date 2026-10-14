@@ -14,7 +14,7 @@ function storyHtml(d) {
     <p class="summary">${esc(d.summary)}</p>
     <div class="tags">${(d.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</div>
     ${related ? `<div class="related"><span class="muted">Related stories</span><ul>${related}</ul></div>` : ""}
-    <div class="shared-label">${d.source_count} ${d.source_count === 1 ? "source" : "sources"}</div>
+    <div class="shared-label">${d.outlet_count ?? d.source_count} ${(d.outlet_count ?? d.source_count) === 1 ? "source" : "sources"}</div>
     <ol class="article-list">${sources}</ol>`;
 }
 

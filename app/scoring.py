@@ -81,12 +81,26 @@ def feed_trust(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[int, f
     return out
 
 
+def feed_trust_list(conn: sqlite3.Connection, profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every feed with its effective trust and whether the profile overrides it (⚙ Preferences)."""
+    per_feed = feed_trust(conn, profile)
+    return [{"id": f["id"], "title": f["title"], "category": f["category"],
+             "trust": per_feed[f["id"]], "custom": str(f["id"]) in profile["feed_weights"]}
+            for f in conn.execute("SELECT id, title, COALESCE(category, '') AS category FROM Feed "
+                                  "ORDER BY category, title COLLATE NOCASE")]
+
+
+_FEED_HOST_PREFIXES = ("www.", "feeds.", "feed.", "rss.", "nachrichtenfeeds.")
+
+
 def outlet_key(site_url: str | None, xml_url: str | None) -> str:
-    """The publisher behind a feed: site host without ``www.`` (several feeds can share one)."""
+    """The publisher behind a feed: site host without feed subdomains, mapped through OUTLET_GROUPS."""
     for url in (site_url, xml_url):
         host = (urlsplit(url or "").hostname or "").lower()
         if host:
-            return host.removeprefix("www.")
+            for prefix in _FEED_HOST_PREFIXES:
+                host = host.removeprefix(prefix)
+            return config.OUTLET_GROUPS.get(host, host)
     return ""
 
 
@@ -124,12 +138,12 @@ def excluded_feeds(profile: dict[str, Any]) -> set[int]:
 def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
                  story_id: int | None = None, exclude: set[int] = frozenset(),
                  story_ids: list[int] | None = None) -> dict[int, dict[str, Any]]:
-    """``{story_id: {feeds, trust, quality}}`` per story (``story_id`` / ``story_ids`` limit it; default all).
+    """``{story_id: {feeds, outlets, trust, quality}}`` per story (``story_id`` / ``story_ids`` limit it).
 
     ``trust`` = ``feed_trust()``; the result's ``trust`` sums the best feed trust of each distinct
-    outlet; ``quality`` is the trust-weighted median article quality (plain median if all trust
-    is 0, None without scores). Articles of ``exclude`` feeds don't count (a story with only those
-    is left out).
+    outlet (``outlets`` = their count); ``quality`` is the trust-weighted median article quality
+    (plain median if all trust is 0, None without scores). Articles of ``exclude`` feeds don't
+    count (a story with only those is left out).
     """
     sql = ("SELECT a.story_id, a.feed_id, a.quality, f.site_url, f.xml_url "
            "FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
@@ -158,7 +172,8 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
         quality = weighted_median(q)
         if quality is None and q:
             quality = float(statistics.median(v for v, _ in q))
-        out[sid] = {"feeds": len(fids), "trust": sum(outlets[sid].values()), "quality": quality}
+        out[sid] = {"feeds": len(fids), "outlets": len(outlets[sid]), "trust": sum(outlets[sid].values()),
+                    "quality": quality}
     return out
 
 
@@ -322,7 +337,8 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
         if wanted_tag and wanted_tag not in story_tags(s):
             continue
         relevance, display = score_story(s, st["feeds"], profile, st["trust"], quality, personal)
-        out.append({"story": s, "source_count": st["feeds"], "quality": round(quality, 2),
+        out.append({"story": s, "source_count": st["feeds"], "outlet_count": st["outlets"],
+                    "quality": round(quality, 2),
                     "relevance": relevance, "display": display, "vote": votes.get(s["id"]),
                     **reads.get(s["id"], {"read": None})})
     if archived:

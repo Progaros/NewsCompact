@@ -100,7 +100,7 @@ def _size(conn: sqlite3.Connection, story_id: int) -> int:
 
 def _check(conn: sqlite3.Connection, s: sqlite3.Row, since: str,
            index: _TermIndex, anchors: clustering.AnchorCache) -> tuple[bool, int | None, int | None]:
-    """Returns (verifier_called, keep, drop)."""
+    """Returns (verifier_called, keep, drop). ``since`` bounds the embedding candidates."""
     anchors.conn = conn
     best: dict[int, float] = {}
     for vec in anchors(s["id"])[: config.MERGE_ANCHORS_PER_STORY]:
@@ -134,6 +134,7 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
     if not config.MERGE_ENABLED or config.CLUSTER_MODE != "two_stage" or not ollama.available():
         return result
     since = clustering.window_cutoff()
+    candidates_since = clustering.window_cutoff(max(config.MERGE_CANDIDATE_WINDOW_HOURS, config.CLUSTER_WINDOW_HOURS))
     with db.get_conn() as conn:
         todo = conn.execute(
             "SELECT id FROM Story WHERE headline IS NOT NULL AND updated_at >= ? "
@@ -152,7 +153,7 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
             if s is None:  # absorbed earlier in this run
                 continue
             result["checked"] += 1
-            verified, keep, drop = _check(conn, s, since, index, anchors)
+            verified, keep, drop = _check(conn, s, candidates_since, index, anchors)
             result["verified"] += int(verified)
             conn.execute("UPDATE Story SET merge_checked_at = datetime('now') WHERE id = ?", (s["id"],))
             if keep is None:

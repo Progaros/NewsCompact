@@ -104,7 +104,15 @@ def test_feeds_of_one_outlet_count_once(feed_id):
         for i in range(3):
             _attach(conn, sid, _feed(conn, f"dlf{i}", "News", site="https://www.deutschlandfunk.de/x"), f"dlf {i}", 6)
         item = scoring.ranked_stories(conn)[0]
-    assert item["source_count"] == 3 and item["relevance"]["source_trust"] == 1.0
+    assert item["source_count"] == 3 and item["outlet_count"] == 1 and item["relevance"]["source_trust"] == 1.0
+
+
+def test_feed_subdomains_and_outlet_groups_are_one_outlet(monkeypatch):
+    monkeypatch.setattr(config, "OUTLET_GROUPS", {"deutschlandfunkkultur.de": "deutschlandfunk.de"})
+    assert scoring.outlet_key(None, "https://feeds.bbci.co.uk/news/rss.xml") == "bbci.co.uk"
+    assert scoring.outlet_key(None, "https://nachrichtenfeeds.br.de/rdf") == "br.de"
+    assert scoring.outlet_key("https://www.deutschlandfunkkultur.de/", None) == "deutschlandfunk.de"
+    assert scoring.outlet_key(None, "https://googleprojectzero.blogspot.com/feeds") == "googleprojectzero.blogspot.com"
 
 
 def test_user_impact_matches_whole_words():

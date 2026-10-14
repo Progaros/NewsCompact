@@ -112,7 +112,8 @@ class StoryCard extends HTMLElement {
     const m = d.metrics || {};
     const breaking = m.status === "Breaking" && m.urgency_level >= 8;
     const articles = d.articles || [];
-    const srcCount = d.source_count ?? articles.length;
+    const srcCount = d.outlet_count ?? d.source_count ?? articles.length;
+    const feedCount = d.source_count ?? articles.length;
     const rel = d.relevance || {};
     const feeds = [...new Set(articles.map((a) => shortFeed(a.feed || hostname(a.url))).filter(Boolean))];
     const feedPreview = feeds.slice(0, 3).map(esc).join(" · ") + (feeds.length > 3 ? ` +${feeds.length - 3}` : "");
@@ -170,7 +171,7 @@ class StoryCard extends HTMLElement {
         ${related ? `<div class="related"><span class="muted">Related stories</span><ul>${related}</ul></div>` : ""}
       </div></div>
       <div class="card-foot">
-        <button type="button" class="src-toggle" aria-expanded="${srcOpen}" title="Show all source articles">
+        <button type="button" class="src-toggle" aria-expanded="${srcOpen}" title="${srcCount} independent ${srcCount === 1 ? "outlet" : "outlets"} from ${feedCount} ${feedCount === 1 ? "feed" : "feeds"} — show all source articles">
           <span class="src-count">${srcCount} ${srcCount === 1 ? "source" : "sources"}</span>
           <span class="src-names">${feedPreview}</span>
           <span class="chev" aria-hidden="true"></span>

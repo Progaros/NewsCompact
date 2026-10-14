@@ -1,16 +1,6 @@
-import pytest
-from fastapi.testclient import TestClient
-
-from app import api, db, pipeline, story, worker
+from app import db, pipeline, story
 
 from conftest import add_article
-
-
-@pytest.fixture
-def client(monkeypatch, llm):
-    monkeypatch.setattr(worker, "start", lambda: None)
-    with TestClient(api.create_app(), client=("192.168.1.20", 50000)) as c:
-        yield c
 
 
 def _ids(client, **params):
