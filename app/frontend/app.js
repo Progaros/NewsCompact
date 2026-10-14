@@ -407,6 +407,7 @@ function checkStale() {
 async function refreshAll() {
   refreshBtn.disabled = true;
   refreshBtn.classList.add("busy");
+  sessionReadIds.clear();
   try {
     await Promise.all([refreshFeed(), loadHeadsUp()]);
     state.loadedAt = Date.now();
