@@ -379,6 +379,15 @@ body.unsigned-in #feeds-link { display: none; }
 .pref-row span:last-child { color: var(--muted); text-align: right; word-break: break-word; }
 .pref-row .pos { color: var(--accent-2); }
 .pref-row .neg { color: var(--danger); }
+.pref-row { align-items: center; }
+.pref-row input.weight-input, .pref-row input.tag-input {
+  background: var(--panel-2); color: inherit; border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 6px; font-size: 13px; font-family: inherit;
+}
+.pref-row input.weight-input { width: 64px; text-align: right; }
+.pref-row input.tag-input { flex: 1; max-width: 240px; color: var(--text); }
+.pref-row input:focus { outline: none; border-color: var(--accent); }
+.add-weight { border-bottom: 1px dashed var(--border); margin-bottom: 4px; padding-bottom: 6px; }
 .user-profile .muted { color: var(--muted); font-size: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; margin-bottom: 12px; }
 .field .hint { margin: 0; }

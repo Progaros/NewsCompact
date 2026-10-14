@@ -170,7 +170,8 @@ const Auth = (() => {
         <div id="reports"></div>
       </div>
       <div class="user-section">
-        <div class="user-section-label">Learned tag weights <button type="button" class="link" id="reset-weights">reset all</button></div>
+        <div class="user-section-label">Tag weights <button type="button" class="link" id="reset-weights">reset all</button></div>
+        <p class="hint">Learned from 👍/👎; edit any value (−10 … 10) or add tags. Positive = more like this.</p>
         <div id="weights"></div>
       </div>`;
   }
@@ -222,14 +223,39 @@ const Auth = (() => {
   function renderWeights(box, weights) {
     const el = box.querySelector("#weights");
     const entries = Object.entries(weights).sort((a, b) => b[1] - a[1]);
-    el.innerHTML = entries.length
-      ? entries.map(([t, w]) => `<div class="pref-row"><span>#${esc(t)}</span>
-          <span class="${w >= 0 ? "pos" : "neg"}">${Number(w).toFixed(1)}
-          <button type="button" class="link" data-tag="${esc(t)}" title="Forget this tag">\u00d7</button></span></div>`).join("")
-      : `<div class="muted">No tag weights yet \u2014 use \u{1F44D}/\u{1F44E} on stories.</div>`;
-    el.querySelectorAll("button[data-tag]").forEach((b) => b.addEventListener("click", () => {
-      delete weights[b.dataset.tag];
+    el.innerHTML = `<div class="pref-row add-weight">
+          <input type="text" class="tag-input" placeholder="add tag, e.g. climate" maxlength="80" aria-label="New tag" />
+          <span><input type="number" class="weight-input" min="-10" max="10" step="0.5" value="2" aria-label="New tag weight" />
+          <button type="button" class="link" data-add>add</button></span></div>`
+      + (entries.length
+        ? entries.map(([t, w]) => `<div class="pref-row"><span>#${esc(t)}</span>
+          <span class="${w >= 0 ? "pos" : "neg"}">
+          <input type="number" class="weight-input" min="-10" max="10" step="0.5" value="${esc(w)}" data-tag="${esc(t)}" aria-label="Weight of #${esc(t)}" />
+          <button type="button" class="link" data-del="${esc(t)}" title="Forget this tag">\u00d7</button></span></div>`).join("")
+        : `<div class="muted">No tag weights yet \u2014 use \u{1F44D}/\u{1F44E} on stories or add one above.</div>`);
+    el.querySelectorAll("input[data-tag]").forEach((i) => i.addEventListener("change", () => {
+      const v = Math.max(-10, Math.min(10, parseFloat(i.value)));
+      if (isNaN(v)) { i.value = weights[i.dataset.tag]; return; }
+      weights[i.dataset.tag] = v;
+      i.value = v;
+      i.parentElement.className = v >= 0 ? "pos" : "neg";
+    }));
+    el.querySelectorAll("button[data-del]").forEach((b) => b.addEventListener("click", () => {
+      delete weights[b.dataset.del];
       renderWeights(box, weights);
+    }));
+    const add = el.querySelector(".add-weight");
+    const addTag = () => {
+      const tag = add.querySelector(".tag-input").value.trim().replace(/^#/, "").toLowerCase();
+      const v = Math.max(-10, Math.min(10, parseFloat(add.querySelector(".weight-input").value)));
+      if (!tag || isNaN(v)) return;
+      weights[tag] = v;
+      renderWeights(box, weights);
+      box.querySelector(".add-weight .tag-input").focus();
+    };
+    add.querySelector("[data-add]").onclick = addTag;
+    add.querySelectorAll("input").forEach((i) => i.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); addTag(); }
     }));
     box.querySelector("#reset-weights").onclick = () => {
       for (const k of Object.keys(weights)) delete weights[k];

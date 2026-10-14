@@ -114,7 +114,7 @@ flowchart LR
   articles flagged and the old summary to compare, once Prompt 2 rates an update
   at least `NEWS_READ_RESURFACE_SIGNIFICANCE` (or urgency jumps / it turns
   Breaking / it is revived or merged). The Heads Up brief always uses the full feed.
-  👍/👎 train tag weights; **💬 Ask** opens a per-story
+  👍/👎 train tag weights (editable / addable in ⚙ Preferences); **💬 Ask** opens a per-story
   chat whose answer streams in live (optionally after searchngx web-search
   turns; thinking, searches, page reads and tool errors are shown as small
   collapsible steps; edited questions keep their earlier versions, ‹ n/m ›).
