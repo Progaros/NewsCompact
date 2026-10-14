@@ -12,9 +12,12 @@ const scopeBtns = { active: document.getElementById("scope-active"), archive: do
 const showReadBtn = document.getElementById("show-read");
 const viewBtns = { personal: document.getElementById("view-personal"), default: document.getElementById("view-default") };
 const refreshBtn = document.getElementById("refresh-btn");
+const newBtn = document.getElementById("new-btn");
 
 const PAGE = 50;
 const STALE_MS = 10 * 60 * 1000; // offer a refresh once the shown content is this old
+const POLL_MS = 20 * 1000;
+let lastPoll = 0;
 // Expanded parts survive live re-renders: details (tags, metrics) and the source list.
 const openIds = new Set();
 const sourcesOpenIds = new Set();
@@ -257,9 +260,35 @@ async function fetchStories(limit) {
   const data = await res.json();
   Object.assign(state, {
     stories: data.stories, total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0,
-    activeDays: data.active_days,
+    activeDays: data.active_days, loadedTotal: data.count,
+    newestAt: data.stories.reduce((m, s) => (s.news_at > m ? s.news_at : m), ""),
   });
+  newBtn.hidden = true;
   return true;
+}
+
+// Background check: refresh the counters, offer a reload when stories are new or updated.
+async function poll() {
+  if (document.hidden || state.loading) return;
+  lastPoll = Date.now();
+  const url = storiesUrl(PAGE);
+  let data;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    data = await res.json();
+  } catch {
+    return;
+  }
+  if (state.loading || url !== storiesUrl(PAGE)) return; // filters changed meanwhile
+  Object.assign(state, { total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0 });
+  updateStatus();
+  const fresh = data.stories.filter((s) => s.news_at > state.newestAt).length;
+  const n = Math.max(fresh, data.count - state.loadedTotal);
+  if (n > 0) {
+    newBtn.textContent = `↑ ${n} new ${n === 1 ? "update" : "updates"}`;
+    newBtn.hidden = false;
+  }
 }
 
 async function loadMore() {
@@ -389,6 +418,11 @@ async function refreshAll() {
 }
 
 refreshBtn.addEventListener("click", refreshAll);
+newBtn.addEventListener("click", () => {
+  newBtn.hidden = true;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  refreshAll();
+});
 document.getElementById("share-brief").addEventListener("click", async () => {
   const view = Auth.state.authenticated ? state.view : "default";
   const res = await fetch("/api/share", {
@@ -401,11 +435,17 @@ document.getElementById("share-brief").addEventListener("click", async () => {
   copyLink((await res.json()).url);
 });
 setInterval(checkStale, 30000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) checkStale(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  checkStale();
+  if (Date.now() - lastPoll >= POLL_MS) poll();
+});
 
 (async function boot() {
   await Auth.init();
   await reload();
   Auth.onChange(() => { reload(); loadHeadsUp(); }); // sign-in/out or saved preferences
   loadHeadsUp();
+  lastPoll = Date.now();
+  setInterval(poll, POLL_MS);
 })();

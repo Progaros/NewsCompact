@@ -126,6 +126,12 @@ body.unsigned-in .signed-only { display: none; }
 }
 .refresh-btn:hover { border-color: var(--accent); }
 .refresh-btn.busy { opacity: .6; cursor: progress; }
+.new-btn {
+  position: fixed; top: 72px; left: 50%; transform: translateX(-50%); z-index: 20;
+  background: var(--accent); color: #fff; border: 0; border-radius: 999px; padding: 6px 16px;
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: var(--shadow-md);
+}
+.new-btn:hover { filter: brightness(1.1); }
 .heads-up p { margin: 0; color: var(--text); line-height: 1.65; white-space: pre-line; }
 #heads-up-text { transition: opacity .25s, transform .25s; }
 #heads-up-text.swap { opacity: 0; transform: translateY(4px); }
