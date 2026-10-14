@@ -75,14 +75,21 @@ class StoryCard extends HTMLElement {
   }
 
   _feedback(kind) {
+    const next = this._data.vote === kind ? null : kind;
     fetch("/api/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ story_id: this._data.id, kind }),
+      body: JSON.stringify({ story_id: this._data.id, kind: next }),
     }).then((res) => {
       if (Auth.unauth(res) || !res.ok) return;
-      this.querySelectorAll(".fb[data-kind]").forEach((b) => b.classList.toggle("active", b.dataset.kind === kind));
-      Auth.toast(kind === "up" ? "Thanks — more like this." : "Got it — less like this.");
+      this._data.vote = next;
+      this.querySelectorAll(".fb[data-kind]").forEach((b) => {
+        const on = b.dataset.kind === next;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-pressed", on);
+      });
+      Auth.toast(next === "up" ? "Thanks — more like this."
+        : next === "down" ? "Got it — less like this." : "Vote removed.");
     });
   }
 
@@ -170,8 +177,8 @@ class StoryCard extends HTMLElement {
         </button>
         <button type="button" class="icon-btn share-btn" title="Copy a public link to this story" aria-label="Share">🔗</button>
         <div class="interaction">
-          <button type="button" class="icon-btn fb" data-kind="up" title="More like this" aria-label="More like this">👍</button>
-          <button type="button" class="icon-btn fb" data-kind="down" title="Less like this" aria-label="Less like this">👎</button>
+          <button type="button" class="icon-btn fb${d.vote === "up" ? " active" : ""}" data-kind="up" aria-pressed="${d.vote === "up"}" title="More like this" aria-label="More like this">👍</button>
+          <button type="button" class="icon-btn fb${d.vote === "down" ? " active" : ""}" data-kind="down" aria-pressed="${d.vote === "down"}" title="Less like this" aria-label="Less like this">👎</button>
           <button type="button" class="icon-btn chat-btn" title="Ask about this story">💬 Ask</button>
         </div>
       </div>

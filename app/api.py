@@ -28,7 +28,7 @@ _NO_CACHE = {"Cache-Control": "no-cache"}
 # --- request models ----------------------------------------------------------
 class Feedback(BaseModel):
     story_id: int
-    kind: str
+    kind: str | None = None
 
 
 class ReportSchedule(BaseModel):
@@ -170,6 +170,7 @@ def _story_payload(item: dict[str, Any], articles: list[dict],
         "read": item.get("read"),
         "read_at": item.get("read_at"),
         "read_summary": item.get("read_summary"),
+        "vote": item.get("vote"),
         "articles": articles,
         "related": related or [],
     }
@@ -189,7 +190,8 @@ def _load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = N
     quality = st["quality"] if st["quality"] is not None else s["quality_score"]
     relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality, personal)
     item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
-            "display": display, **scoring.read_states(conn, user_id).get(story_id, {"read": None})}
+            "display": display, "vote": scoring.vote_states(conn, user_id).get(story_id),
+            **scoring.read_states(conn, user_id).get(story_id, {"read": None})}
     return _story_payload(item, _articles_by_story(conn, [story_id], exclude)[story_id],
                           clustering.related_stories(conn, [story_id], exclude=exclude)[story_id])
 
@@ -367,9 +369,9 @@ def create_app() -> FastAPI:
         return user["id"]
 
     def _private(payload: dict[str, Any], owner: bool) -> dict[str, Any]:
-        """A user's read state is not part of the public read-only view."""
+        """A user's read/vote state is not part of the public read-only view."""
         if not owner:
-            payload.update(read=None, read_at=None, read_summary=None)
+            payload.update(read=None, read_at=None, read_summary=None, vote=None)
         return payload
 
     # --- stories ---
@@ -692,12 +694,13 @@ def create_app() -> FastAPI:
     # --- feedback / profile ---
     @app.post("/api/feedback")
     def post_feedback(body: Feedback, request: Request):
-        if body.kind not in ("up", "down"):
-            raise HTTPException(400, "kind must be 'up' or 'down'")
-        profile = scoring.apply_feedback(body.story_id, body.kind, _uid(request))
+        kind = None if body.kind in (None, "", "none") else body.kind
+        if kind not in ("up", "down", None):
+            raise HTTPException(400, "kind must be 'up', 'down' or null")
+        profile = scoring.apply_feedback(body.story_id, kind, _uid(request))
         if profile is None:
             raise HTTPException(404, "story not found")
-        return {"ok": True, "profile": profile}
+        return {"ok": True, "vote": kind, "profile": profile}
 
     @app.get("/api/feedback")
     def get_feedback(request: Request, limit: int = Query(200, ge=1, le=5000)):

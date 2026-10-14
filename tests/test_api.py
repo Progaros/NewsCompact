@@ -73,7 +73,7 @@ def test_feed_validation(client, feed_id):
     assert client.get("/api/feeds").json()["feeds"][0]["title"] == "Renamed"
 
 
-def test_profile_put_validates(client):
+def test_profile_put_validates(client, story):
     ok = client.put("/api/profile", json={"preferences": {"locations": [" munich ", ""], "min_quality": 3},
                                           "tag_weights": {"AI": 2}})
     assert ok.status_code == 200
@@ -81,6 +81,14 @@ def test_profile_put_validates(client):
     assert body["preferences"]["locations"] == ["munich"] and body["tag_weights"] == {"ai": 2.0}
     assert client.put("/api/profile", json={"preferences": {"min_quality": 99}}).status_code == 422
     assert client.put("/api/profile", json={"preferences": {"locations": ["x" * 200]}}).status_code == 422
+
+    # Feedback vote + undo via API
+    r = client.post("/api/feedback", json={"story_id": story, "kind": "up"}).json()
+    assert r["vote"] == "up" and r["profile"]["tag_weights"]["ai"] == 3.0
+    assert client.get(f"/api/stories/{story}").json()["vote"] == "up"
+    r2 = client.post("/api/feedback", json={"story_id": story, "kind": None}).json()
+    assert r2["vote"] is None and r2["profile"]["tag_weights"]["ai"] == 2.0
+    assert client.get(f"/api/stories/{story}").json()["vote"] is None
 
 
 def test_home_location_is_per_user(client, story):

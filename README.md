@@ -141,7 +141,7 @@ flowchart TD
 | `POST` / `DELETE /api/stories/{id}/read` | User | Mark story read (snapshots summary) / unread |
 | `GET/POST /api/stories/{id}/chat` · `POST .../chat/switch` | User | Per-story chat tree & NDJSON stream (`step`, `thinking`, `delta`, `done`; `edit_of` branches, `switch` selects version) |
 | `GET /api/heads-up?view=` | Public | Non-blocking top-5 brief (`default` or `personal`; triggers background refresh when stale) |
-| `POST /api/feedback` · `GET /api/feedback` | User | 👍/👎 vote (`up\|down`) · vote log |
+| `POST /api/feedback` · `GET /api/feedback` | User | 👍/👎 vote (`up\|down`, or `null` to undo and revert tag weights) · vote log |
 | `GET/PUT /api/profile` | User | Preferences (`about`, `home_*`, `interest_regions`, `locations`, `min_quality`, `excluded_feeds`, `ntfy_reports`), `tag_weights`, `source_weights`, `feed_weights` |
 | `POST /api/share` · `GET /api/share` · `GET/DELETE /api/share/{token}` | User / Public `GET {token}` | Create snapshot (`/p/<token>`), list own links, view snapshot (public), revoke link |
 | `GET /api/articles` · `GET /api/health` · `GET /api/events` | Public | Article timing table · DB/worker health · SSE stream |

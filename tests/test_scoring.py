@@ -113,12 +113,19 @@ def test_user_impact_matches_whole_words():
     assert scoring.user_impact_score(["us-politics", "bavaria"], prefs) == 1.0
 
 
-def test_feedback_nudges_and_profile_replaces_weights(feed_id):
+def test_feedback_nudges_switches_and_undoes_weights(feed_id):
     with db.get_conn() as conn:
         sid = _story(conn, tags=("AI", "Climate"))
     profile = scoring.apply_feedback(sid, "up")
     assert profile["tag_weights"] == {"ai": 1.0, "climate": 1.0}
+    # Switching from up to down reverses the +1 and applies -1 -> -1.0
+    switched = scoring.apply_feedback(sid, "down")
+    assert switched["tag_weights"] == {"ai": -1.0, "climate": -1.0}
+    assert len(scoring.feedback_log()) == 1 and scoring.feedback_log()[0]["kind"] == "down"
+    # Removing the vote takes back the tag weight changes completely
+    cleared = scoring.apply_feedback(sid, None)
+    assert cleared["tag_weights"] == {}
+    assert scoring.feedback_log() == []
     assert scoring.apply_feedback(999, "up") is None
     updated = scoring.update_profile(tag_weights={"ai": 50})
     assert updated["tag_weights"] == {"ai": 10.0}
-    assert scoring.feedback_log()[0]["kind"] == "up"
