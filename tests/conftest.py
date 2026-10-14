@@ -42,6 +42,7 @@ class FakeLLM:
         self.down = False
         self.malformed = 0  # next N Prompt 2 replies are unparseable
         self.embed_batches: list[int] = []
+        self.queries: list[str] = []  # search queries the chat agent plans before setting done=True
 
     def available(self):
         return not self.down
@@ -63,7 +64,9 @@ class FakeLLM:
         props = schema["properties"]
         if "query" in props:
             self.calls.append("query")
-            return {"query": "flood news", "done": False}
+            if self.queries:
+                return {"query": self.queries.pop(0), "done": False}
+            return {"query": "", "done": True}
         if "breaking" in props:
             self.calls.append("harness")
             return {"quality": 7, "breaking": False}

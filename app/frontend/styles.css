@@ -621,10 +621,7 @@ body.unsigned-in .interaction { display: none; }
   display: flex; gap: 8px; align-items: flex-end;
   padding: 10px 12px; border-top: 1px solid var(--border);
 }
-.chat-input-row select {
-  background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12px;
-}
+.chat-input-row .toggle { white-space: nowrap; flex: none; height: 44px; }
 .chat-input-row textarea {
   flex: 1; background: var(--panel-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;

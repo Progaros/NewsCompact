@@ -127,7 +127,7 @@ flowchart TD
 
 ## UI & Pages
 
-- **Stories (`/`)** — Quick Heads Up brief (per view, background regeneration with `(updating…)` indicator and fade-in, 🔗 share), search, **For you / Everyone** toggle, **Active / Archive** toggle, **Show read** toggle, `#tag` filter chips. Cards show the full summary; clicking expands tags, metrics, relevance breakdown, "Summary when you read it" (on ↻ resurfaced stories) and **Related stories**; the sources bar expands member articles (`new` badges since read). Card actions: ✓ read/unread, 🔗 share `/s/<id>`, 👍/👎 feedback, **💬 Ask** per-story chat (0–N SearXNG web-search turns, collapsible thinking/search/read/error steps, `✎` message editing with `‹ n/m ›` branch switching, 🔗 answer share). A **↻ Refresh** button appears once the view is ≥ 10 min old.
+- **Stories (`/`)** — Quick Heads Up brief (per view, background regeneration with `(updating…)` indicator and fade-in, 🔗 share), search, **For you / Everyone** toggle, **Active / Archive** toggle, **Show read** toggle, `#tag` filter chips. Cards show the full summary; clicking expands tags, metrics, relevance breakdown, "Summary when you read it" (on ↻ resurfaced stories) and **Related stories**; the sources bar expands member articles (`new` badges since read). Card actions: ✓ read/unread, 🔗 share `/s/<id>`, 👍/👎 feedback, **💬 Ask** per-story chat (**Web search** toggle on by default — the AI decides by itself whether and how deep to search via SearXNG; collapsible thinking/search/read/error steps, `✎` message editing with `‹ n/m ›` branch switching, 🔗 answer share). A **↻ Refresh** button appears once the view is ≥ 10 min old.
 - **Articles (`/list`)** — flat article table with search, status filter (`assigned / pending / duplicate / skipped / dead`), sort toggle, stage timings (`Wait / Embed / Cluster / Harness / Story / Work / Latency / Merge`) and worker status bar.
 - **Feeds (`/feeds`, admins)** — add feed (auto-fetches `<title>`), rename, recategorize, delete, enable/disable per feed or category, 24 h / 7 d volume and error filter.
 - **Users (`/admin`, admins)** — create users, toggle admin role, set passwords, delete users, view vote/read/chat counts.
@@ -170,7 +170,7 @@ flowchart TD
 | `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` / `NEWS_FEEDBACK_ALPHA` | `18` / `10` / `0.1` | Time decay (from `news_at`) and 👍/👎 learning rate |
 | `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
 | `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `5` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
-| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_TURNS` | `https://searx.example.org/` / `0,1,2,3,5,7,10` | SearXNG URL and chat web-search turn options |
+| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` | `https://searx.example.org/` / `8` | SearXNG URL and safety cap on autonomous chat search turns |
 | `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `24` | Owner login password (empty = open LAN mode) / session TTL |
 | `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |
 | `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty / `10` / `10` | Rotating gzipped log (`start.sh` sets `server.log`) |

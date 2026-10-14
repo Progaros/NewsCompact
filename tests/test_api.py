@@ -223,14 +223,39 @@ def test_chat_streams_and_persists(client, story, llm):
     import json
 
     assert client.post(f"/api/stories/{story}/chat", json={"message": "x" * 5000}).status_code == 422
+    # Web search is enabled by default; the agent plans a search and decides none is needed.
     r = client.post(f"/api/stories/{story}/chat", json={"message": "What happened?"})
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson")
     events = [json.loads(line) for line in r.text.splitlines() if line]
-    assert [e["type"] for e in events] == ["step", "thinking", "step", "delta", "delta", "done"]
-    assert events[2]["step"]["kind"] == "thinking" and events[2]["step"]["status"] == "ok"
+    assert [e["type"] for e in events] == ["step", "step", "step", "thinking", "step", "delta", "delta", "done"]
+    assert events[1]["step"]["kind"] == "search" and events[1]["step"]["title"] == "No web search needed"
+    assert events[4]["step"]["kind"] == "thinking" and events[4]["step"]["status"] == "ok"
     history = client.get(f"/api/stories/{story}/chat").json()["messages"]
     assert [m["content"] for m in history] == ["What happened?", "Short answer."]
-    assert history[1]["steps"][0]["detail"] == "Hmm. "
+    assert [s["kind"] for s in history[1]["steps"]] == ["search", "thinking"]
+    assert history[1]["steps"][1]["detail"] == "Hmm. "
+
+    # Disabling web_search skips the planning step completely.
+    r2 = client.post(f"/api/stories/{story}/chat", json={"message": "No search please", "web_search": False})
+    events2 = [json.loads(line) for line in r2.text.splitlines() if line]
+    assert [e["type"] for e in events2] == ["step", "thinking", "step", "delta", "delta", "done"]
+
+
+def test_chat_autonomous_multi_turn_web_search(client, story, llm, monkeypatch):
+    from app import searchngx
+
+    searched, scraped = [], []
+    monkeypatch.setattr(searchngx, "search", lambda q, **_k: (
+        searched.append(q), [{"title": f"Result {q}", "url": f"https://example.org/{len(searched)}", "description": "s"}])[1])
+    monkeypatch.setattr(searchngx, "scrape", lambda u: (scraped.append(u), f"Body from {u}")[1])
+    llm.queries = ["flood river level", "flood evacuation order"]
+    r = client.post(f"/api/stories/{story}/chat", json={"message": "How deep and who evacuated?"})
+    assert r.status_code == 200
+    assert searched == ["flood river level", "flood evacuation order"]
+    assert len(scraped) == 2
+    saved = client.get(f"/api/stories/{story}/chat").json()["messages"][-1]["steps"]
+    assert [s["kind"] for s in saved] == ["search", "read", "search", "read", "search", "thinking"]
+    assert saved[4]["title"] == "Enough context gathered"
 
 
 def test_chat_edit_keeps_versions(client, story, llm):
@@ -264,7 +289,8 @@ def test_chat_reports_failed_tools(client, story, llm, monkeypatch):
         raise httpx.ConnectError("search host down")
 
     monkeypatch.setattr(searchngx, "search", boom)
-    r = client.post(f"/api/stories/{story}/chat", json={"message": "Latest?", "search_turns": 1})
+    llm.queries = ["flood news"]
+    r = client.post(f"/api/stories/{story}/chat", json={"message": "Latest?"})
     steps = [json.loads(line)["step"] for line in r.text.splitlines() if '"step"' in line]
     assert steps[-3]["kind"] == "search" and steps[-3]["status"] == "error"
     assert "search host down" in steps[-3]["detail"]
@@ -276,7 +302,7 @@ def test_chat_reports_failed_tools(client, story, llm, monkeypatch):
         yield  # pragma: no cover
 
     monkeypatch.setattr(ollama, "chat_stream", dead_llm)
-    r = client.post(f"/api/stories/{story}/chat", json={"message": "Again?"})
+    r = client.post(f"/api/stories/{story}/chat", json={"message": "Again?", "web_search": False})
     events = [json.loads(line) for line in r.text.splitlines() if line]
     assert events[-1]["type"] == "error" and events[-2]["step"]["title"] == "Answer failed"
     assert client.get(f"/api/stories/{story}/chat").json()["messages"][-1]["steps"][0]["kind"] == "error"

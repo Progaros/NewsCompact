@@ -1,11 +1,12 @@
-"""Per-story chat: system-prompt story context + optional web-search turns.
+"""Per-story chat: system-prompt story context + autonomous web-search agent.
 
 Design (see findings.md, "Per-story chat"):
 - The story's context goes into the SYSTEM prompt so the model stays anchored
   to that story rather than answering as a free-form generalist.
-- Before the final answer, the agent may run up to ``search_turns`` search+
-  scrape turns via searchngx to pull in fresh context. Each turn asks the model
-  for one refined query (a constrained call), then folds the scraped text in.
+- When ``web_search`` is enabled (default), the agent decides by itself whether
+  the story already answers the question or how many search+scrape turns via
+  searchngx it needs (up to ``CHAT_SEARCH_MAX_TURNS`` / ``CHAT_CONTEXT_MAX``),
+  stopping as soon as it sets ``done=true``.
 - History is persisted per-story in the DB (ChatSession / ChatMessage).
 
 The model calls use the same local CHAT_MODEL the pipeline already trusts.
@@ -29,18 +30,12 @@ _SYSTEM_BASE = (
 
 _QUERY_SYSTEM = (
     "You are a web-search agent. Given the user's question about a news story "
-    "and the research gathered so far, propose ONE specific web search query "
-    "that would help answer it. If you already have enough context to answer, "
-    "set done=true and leave query empty."
+    "and the research gathered so far, decide whether a web search is needed. "
+    "If the story summary and articles already answer the question, or the "
+    "research gathered so far is sufficient, set done=true and leave query empty. "
+    "Otherwise propose ONE specific web search query for the missing information "
+    "(do not repeat a previous query)."
 )
-
-
-def _clamp_turns(requested: int) -> int:
-    """Clamp a requested search-turn budget to the configured allowed set."""
-    allowed = config.CHAT_SEARCH_TURNS
-    if requested <= 0 or not allowed:
-        return 0
-    return min(allowed, key=lambda t: abs(t - requested))
 
 
 def story_system_prompt(story: dict, about: str = "") -> str:
@@ -132,11 +127,12 @@ def add_step(steps: list[dict], kind: str, title: str, status: str = "running",
 Event = tuple[str, Any]
 
 
-def _gather_context(story: dict, user_question: str, turns: int,
+def _gather_context(story: dict, user_question: str,
                     steps: list[dict]) -> Generator[Event, None, str]:
-    """Run up to ``turns`` search+scrape turns, yielding step events; returns the context."""
+    """Let the agent run search+scrape turns until it is satisfied (or hits the safety cap)."""
     context = ""
-    for turn in range(turns):
+    seen_queries: set[str] = set()
+    for turn in range(config.CHAT_SEARCH_MAX_TURNS):
         if len(context) >= config.CHAT_CONTEXT_MAX:
             break
         step = add_step(steps, "search", "Planning web search…")
@@ -148,10 +144,11 @@ def _gather_context(story: dict, user_question: str, turns: int,
             step.update(status="error", title="Planning the web search failed", detail=error_text(e))
             yield "step", step
             break
-        if not query:
+        if not query or query.casefold() in seen_queries:
             step.update(status="ok", title="No web search needed" if turn == 0 else "Enough context gathered")
             yield "step", step
             break
+        seen_queries.add(query.casefold())
         log.info("chat web search: %r", query)
         step.update(title=f"Web search: {query}")
         yield "step", step
@@ -191,25 +188,24 @@ def _gather_context(story: dict, user_question: str, turns: int,
     return context
 
 
-def stream(story: dict, history: list[dict], user_question: str, search_turns: int,
+def stream(story: dict, history: list[dict], user_question: str, web_search: bool = True,
            steps: list[dict] | None = None, about: str = "") -> Iterator[Event]:
     """Yield ``("step", step)`` on each agent-step change, ``("thinking", text)`` and ``("delta", text)``.
 
     ``steps`` collects the agent steps (for persistence); ``history`` is the prior
-    messages WITHOUT the new user message; ``search_turns`` is clamped to the configured options.
+    messages WITHOUT the new user message; ``web_search`` enables autonomous web research.
     """
     steps = [] if steps is None else steps
-    turns = _clamp_turns(search_turns)
-    context = (yield from _gather_context(story, user_question, turns, steps)) if turns > 0 else ""
+    context = (yield from _gather_context(story, user_question, steps)) if web_search else ""
 
     system = story_system_prompt(story, about)
     if context:
         system += f"\n\nWEB RESEARCH (fresh, from searchngx — may help answer):\n{context}"
-    elif turns > 0:
+    elif web_search and any(s["kind"] == "search" and s["status"] in ("warn", "error") for s in steps):
         system += "\n\nA web search was run for this message but returned nothing usable; say so if relevant."
-    else:
+    elif not web_search:
         system += ("\n\nWeb search is off for this message. If the user asks for one, tell them to "
-                   "pick 'Web search ×N' in the selector next to the input and ask again.")
+                   "enable the 'Web search' toggle next to the input and ask again.")
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for h in history:

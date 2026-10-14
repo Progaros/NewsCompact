@@ -84,7 +84,7 @@ class Login(BaseModel):
 
 class ChatSend(BaseModel):
     message: str = Field(max_length=4000)
-    search_turns: int = 0
+    web_search: bool = True
     edit_of: int | None = None  # user message this one replaces (as a new version)
 
 
@@ -536,7 +536,6 @@ def create_app() -> FastAPI:
         return {
             "story_id": story_id,
             "messages": _chat_branch(conn, _chat_session(conn, story_id, uid)),
-            "search_turns_options": config.CHAT_SEARCH_TURNS,
         }
 
     @app.get("/api/stories/{story_id}/chat")
@@ -616,7 +615,7 @@ def create_app() -> FastAPI:
                                      "WHERE id = ? AND leaf_id = ?", (reply_id, session_id, question_id))
 
             try:
-                for kind, payload in chat.stream(story, history, text, body.search_turns, steps, about=about):
+                for kind, payload in chat.stream(story, history, text, body.web_search, steps, about=about):
                     if kind == "delta":
                         parts.append(payload)
                     yield ndjson({"type": kind, "step": payload} if kind == "step" else

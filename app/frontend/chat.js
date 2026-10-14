@@ -1,7 +1,8 @@
 /* Per-story chat — a page-level popup, per-user (signed-in only), backed by
  * the local CHAT_MODEL. The story's context is injected server-side into the
- * SYSTEM prompt; before answering the agent may run 0..N searchngx web-search
- * turns to gather fresh context. History persists per-story in the DB.
+ * SYSTEM prompt; when web search is enabled (default), the agent decides by
+ * itself whether and how deep to search via searchngx before answering.
+ * History persists per-story in the DB.
  *
  * Backend: app/chat.py, app/searchngx.py. One popup instance, bound to a
  * single story at a time; reopening for the same story focuses it, a different
@@ -10,6 +11,7 @@
 const Chat = (() => {
   let currentStory = null; // story_id the popup is bound to
   let busy = false;        // a reply is in flight (guards double-send)
+  let webSearch = localStorage.getItem("chatWebSearch") !== "0"; // on by default
 
   // --- markdown (compact, HTML-safe) ---------------------------------------
   function inline(s) {
@@ -135,7 +137,9 @@ const Chat = (() => {
         </div>
         <div class="chat-messages" id="chat-messages"></div>
         <div class="chat-input-row">
-          <select id="chat-turns" title="Web-search turns to run before answering"></select>
+          <button id="chat-search" class="toggle" type="button" aria-pressed="${webSearch}" title="When enabled, the AI decides by itself whether and how deep to search the web">
+            <span class="toggle-track" aria-hidden="true"></span>Web search
+          </button>
           <textarea id="chat-input" rows="2" placeholder="Ask about this story\u2026"></textarea>
           <button id="chat-send" class="btn">Send</button>
         </div>
@@ -147,17 +151,22 @@ const Chat = (() => {
     overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
     overlay.querySelector("#chat-close").onclick = close;
 
-    const sel = overlay.querySelector("#chat-turns");
+    const searchBtn = overlay.querySelector("#chat-search");
+    searchBtn.onclick = () => {
+      webSearch = !webSearch;
+      localStorage.setItem("chatWebSearch", webSearch ? "1" : "0");
+      searchBtn.setAttribute("aria-pressed", webSearch);
+    };
     const input = overlay.querySelector("#chat-input");
     const sendBtn = overlay.querySelector("#chat-send");
     sendBtn.onclick = () => send();
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
     });
-    loadHistory(storyId, sel, input);
+    loadHistory(storyId, input);
   }
 
-  function loadHistory(storyId, sel, input) {
+  function loadHistory(storyId, input) {
     fetch(`/api/stories/${storyId}/chat`)
       .then((res) => {
         if (Auth.unauth(res)) { close(); return null; }
@@ -165,9 +174,6 @@ const Chat = (() => {
       })
       .then((d) => {
         if (!d || !document.getElementById("chat-messages")) return; // popup closed meanwhile
-        sel.innerHTML = (d.search_turns_options || [0])
-          .map((t) => `<option value="${t}">${t === 0 ? "No web search" : "Web search ×" + t}</option>`)
-          .join("");
         renderMessages(d.messages);
         input.focus();
       })
@@ -274,11 +280,9 @@ const Chat = (() => {
   }
 
   // editOf/editEl: resend an edited user message as a new version of it.
-  async function send(edited = null, editOf = null, editEl = null) {
-    if (busy) return;
-    const storyId = currentStory;
-    const input = document.getElementById("chat-input");
-    const sel = document.getElementById("chat-turns");
+  async fubox = document.getElementById("chat-messages");
+    const text = (edited ?? input.value ?? "").trim();
+    if (!text || !storyId) returnturns");
     const box = document.getElementById("chat-messages");
     const text = (edited ?? input.value ?? "").trim();
     if (!text || !storyId) return;
@@ -315,7 +319,7 @@ const Chat = (() => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, search_turns: turns, edit_of: editOf }),
       });
-      if (Auth.unauth(res)) { reply.remove(); return; }
+      if (Auth.unauth(res)) { reply.remove(); web_search: webSearch
       if (!res.ok) throw new Error("HTTP " + res.status);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();

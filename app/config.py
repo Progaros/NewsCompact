@@ -169,7 +169,8 @@ AUTH_COOKIE = _env("NEWS_AUTH_COOKIE", "news_session")
 # --- Per-story chat --------------------------------------------------------
 CHAT_TEMPERATURE = _float("NEWS_CHAT_TEMPERATURE", 0.3)
 CHAT_MAX_TOKENS = _int("NEWS_CHAT_MAX_TOKENS", 1024)
-CHAT_SEARCH_TURNS = sorted(int(t) for t in _list("NEWS_CHAT_SEARCH_TURNS", "0,1,2,3,5,7,10"))
+# Safety cap on autonomous search+scrape turns per message when web search is enabled.
+CHAT_SEARCH_MAX_TURNS = _int("NEWS_CHAT_SEARCH_MAX_TURNS", 8)
 CHAT_CONTEXT_PER_SOURCE = _int("NEWS_CHAT_CONTEXT_PER_SOURCE", 1500)
 CHAT_CONTEXT_MAX = _int("NEWS_CHAT_CONTEXT_MAX", 6000)
 
