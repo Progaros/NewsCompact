@@ -27,6 +27,13 @@ def _legacy_db(path):
                                   kind TEXT NOT NULL, created_at TEXT);
         INSERT INTO Story (id, headline, tags) VALUES (5, 'Voted story', '["ai"]');
         INSERT INTO FeedbackLog (story_id, kind) VALUES (5, 'up');
+        CREATE TABLE ChatSession (id INTEGER PRIMARY KEY, story_id INTEGER NOT NULL UNIQUE,
+                                  created_at TEXT, updated_at TEXT);
+        CREATE TABLE ChatMessage (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, role TEXT NOT NULL,
+                                  content TEXT NOT NULL, created_at TEXT);
+        INSERT INTO ChatSession (id, story_id) VALUES (1, 5);
+        INSERT INTO ChatMessage (id, session_id, role, content) VALUES
+            (1, 1, 'user', 'q1'), (2, 1, 'assistant', 'a1'), (3, 1, 'user', 'q2');
     """)
     conn.execute(f"CREATE VIRTUAL TABLE Experiment_Embeddings USING vec0(article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])")
     conn.execute(f"CREATE VIRTUAL TABLE Article_Embeddings USING vec0(article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])")
@@ -46,7 +53,10 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert [tuple(r) for r in conn.execute("SELECT id, parent_id FROM ChatMessage ORDER BY id")] == [
+            (1, None), (2, 1), (3, 2)]
+        assert conn.execute("SELECT leaf_id FROM ChatSession").fetchone()[0] == 3
         assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'Experiment_Embeddings'").fetchone() is None
         assert conn.execute("SELECT count(*) FROM pragma_foreign_key_list('FeedbackLog')").fetchone()[0] == 0

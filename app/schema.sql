@@ -99,10 +99,12 @@ CREATE TABLE IF NOT EXISTS ArticleTombstone (
     deleted_at TEXT DEFAULT (datetime('now'))
 );
 
--- Per-story chat: one session per story (single user).
+-- Per-story chat: one session per story (single user). Messages form a tree: editing a
+-- message adds a sibling (same parent_id); leaf_id is the end of the branch on screen.
 CREATE TABLE IF NOT EXISTS ChatSession (
     id         INTEGER PRIMARY KEY,
     story_id   INTEGER NOT NULL UNIQUE REFERENCES Story(id) ON DELETE CASCADE,
+    leaf_id    INTEGER,
     created_at TEXT    DEFAULT (datetime('now')),
     updated_at TEXT    DEFAULT (datetime('now'))
 );
@@ -110,6 +112,7 @@ CREATE TABLE IF NOT EXISTS ChatSession (
 CREATE TABLE IF NOT EXISTS ChatMessage (
     id         INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES ChatSession(id) ON DELETE CASCADE,
+    parent_id  INTEGER,        -- previous message in the branch (NULL = first message)
     role       TEXT    NOT NULL,   -- user | assistant
     content    TEXT    NOT NULL,
     steps      TEXT,           -- assistant: JSON list of agent steps (thinking, searches, reads, errors)

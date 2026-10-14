@@ -97,6 +97,28 @@ def test_chat_streams_and_persists(client, story, llm):
     assert history[1]["steps"][0]["detail"] == "Hmm. "
 
 
+def test_chat_edit_keeps_versions(client, story, llm):
+    url = f"/api/stories/{story}/chat"
+    client.post(url, json={"message": "First question"})
+    client.post(url, json={"message": "Follow-up"})
+    msgs = client.get(url).json()["messages"]
+    assert [m["content"] for m in msgs] == ["First question", "Short answer.", "Follow-up", "Short answer."]
+    first = msgs[0]["id"]
+
+    assert client.post(url, json={"message": "Edited", "edit_of": msgs[1]["id"]}).status_code == 404  # not a user msg
+    assert client.post(url, json={"message": "Edited", "edit_of": 9999}).status_code == 404
+    client.post(url, json={"message": "Edited question", "edit_of": first})
+    msgs = client.get(url).json()["messages"]
+    assert [m["content"] for m in msgs] == ["Edited question", "Short answer."]
+    assert msgs[0]["version"] == 2 and msgs[0]["versions"][0] == first
+
+    old = client.post(f"{url}/switch", json={"message_id": first}).json()["messages"]
+    assert [m["content"] for m in old] == ["First question", "Short answer.", "Follow-up", "Short answer."]
+    assert old[0]["version"] == 1 and len(old[0]["versions"]) == 2
+    assert client.get(url).json()["messages"] == old  # the shown branch is remembered
+    assert client.post(f"{url}/switch", json={"message_id": 9999}).status_code == 404
+
+
 def test_chat_reports_failed_tools(client, story, llm, monkeypatch):
     import json
 

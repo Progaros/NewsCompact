@@ -15,7 +15,7 @@ PASSWORD = "correct horse battery staple 42"
 # Every route that must reject anonymous internet clients (method, path).
 PRIVATE = [
     ("POST", "/api/stories/1/read"), ("DELETE", "/api/stories/1/read"),
-    ("GET", "/api/stories/1/chat"), ("POST", "/api/stories/1/chat"),
+    ("GET", "/api/stories/1/chat"), ("POST", "/api/stories/1/chat"), ("POST", "/api/stories/1/chat/switch"),
     ("POST", "/api/feedback"), ("GET", "/api/feedback"),
     ("GET", "/api/profile"), ("PUT", "/api/profile"),
     ("GET", "/api/reports/pipeline"), ("POST", "/api/reports/pipeline/send"),

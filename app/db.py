@@ -41,6 +41,8 @@ _MIGRATIONS = (
     ("Feed", "enabled", "INTEGER NOT NULL DEFAULT 1"),
     ("Feed", "last_error", "TEXT"),
     ("ChatMessage", "steps", "TEXT"),
+    ("ChatMessage", "parent_id", "INTEGER"),
+    ("ChatSession", "leaf_id", "INTEGER"),
 )
 # Indexes on migrated columns (schema.sql runs before the columns exist on old DBs).
 _INDEXES = (
@@ -122,8 +124,17 @@ def _dedup_and_retention(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE Experiment_Embeddings")
 
 
+def _chat_tree(conn: sqlite3.Connection) -> None:
+    """v4: link the linear chat histories into a message tree (each message's parent = previous one)."""
+    conn.execute(
+        "UPDATE ChatMessage SET parent_id = (SELECT MAX(p.id) FROM ChatMessage p "
+        "WHERE p.session_id = ChatMessage.session_id AND p.id < ChatMessage.id)"
+    )
+    conn.execute("UPDATE ChatSession SET leaf_id = (SELECT MAX(id) FROM ChatMessage m WHERE m.session_id = ChatSession.id)")
+
+
 # (user_version, migration) — each runs once, inside a transaction.
-_DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention))
+_DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

@@ -520,6 +520,23 @@ body.unsigned-in #feeds-link { display: none; }
   font-size: 12px; color: var(--muted);
 }
 @keyframes step-pulse { 50% { opacity: .45; } }
+.chat-msg-tools {
+  display: flex; align-items: center; gap: 2px; font-size: 11px; color: var(--muted);
+  opacity: .55; transition: opacity .15s;
+}
+.chat-msg:hover .chat-msg-tools, .chat-msg-tools:focus-within { opacity: 1; }
+.chat-msg-tools button {
+  background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+}
+.chat-msg-tools button:hover:not(:disabled) { color: var(--text); background: var(--panel-2); }
+.chat-msg-tools button:disabled { opacity: .35; cursor: default; }
+.chat-edit-box { display: flex; flex-direction: column; gap: 6px; width: min(420px, 80vw); }
+.chat-edit-box textarea {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 14px; resize: vertical;
+}
+.chat-edit-row { display: flex; justify-content: flex-end; gap: 6px; }
 .chat-input-row {
   display: flex; gap: 8px; align-items: flex-end;
   padding: 10px 12px; border-top: 1px solid var(--border);

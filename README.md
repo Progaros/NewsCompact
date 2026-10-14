@@ -128,7 +128,8 @@ flowchart LR
 | `GET /api/stories?limit=&archived=&q=&tag=` | Ranked (or archived) stories (+ total `count`, `pending`, `last_article`) |
 | `GET /api/stories/{id}` | One story with its articles |
 | `POST` / `DELETE /api/stories/{id}/read` | Mark read / unread (`GET /api/stories?hide_read=true&keep=ids` hides read stories except `keep`; each story has `read`: null \| `read` \| `updated`) |
-| `GET/POST /api/stories/{id}/chat` | Chat history / send `{"message", "search_turns"}` → NDJSON stream (`step` = thinking/search/read/error step, `thinking`, `delta`, `done`/`error`); steps are stored with the reply |
+| `GET/POST /api/stories/{id}/chat` | Chat history (shown branch, with message versions) / send `{"message", "search_turns", "edit_of"?}` → NDJSON stream (`step` = thinking/search/read/error step, `thinking`, `delta`, `done`/`error`); steps are stored with the reply; `edit_of` resends an edited user message as a new version |
+| `POST /api/stories/{id}/chat/switch` | Show another version `{"message_id"}` of a message (with its latest replies) |
 | `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
 | `GET /api/heads-up` | AI brief over the top 5 stories |
 | `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |

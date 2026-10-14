@@ -76,6 +76,11 @@ class Login(BaseModel):
 class ChatSend(BaseModel):
     message: str = Field(max_length=4000)
     search_turns: int = 0
+    edit_of: int | None = None  # user message this one replaces (as a new version)
+
+
+class ChatSwitch(BaseModel):
+    message_id: int
 
 
 _CHAT_HISTORY_MAX = 20  # prior messages sent to the model
@@ -384,21 +389,59 @@ def create_app() -> FastAPI:
         return {"count": total, "order": order, "worker": worker.status, "articles": articles}
 
     # --- chat ---
+    def _chat_session(conn: sqlite3.Connection, story_id: int) -> sqlite3.Row | None:
+        return conn.execute("SELECT id, leaf_id FROM ChatSession WHERE story_id = ?", (story_id,)).fetchone()
+
+    def _chat_branch(conn: sqlite3.Connection, session: sqlite3.Row | None) -> list[dict[str, Any]]:
+        """Messages from the first one to the session's leaf, each with its versions (siblings)."""
+        if session is None:
+            return []
+        rows = {r["id"]: dict(r) for r in conn.execute(
+            "SELECT id, parent_id, role, content, steps FROM ChatMessage WHERE session_id = ? ORDER BY id",
+            (session["id"],))}
+        siblings: dict[int | None, list[int]] = {}
+        for r in rows.values():
+            siblings.setdefault(r["parent_id"], []).append(r["id"])
+        branch, cur = [], rows.get(session["leaf_id"] or max(rows, default=0))
+        while cur is not None:
+            branch.append(cur)
+            cur = rows.get(cur["parent_id"]) if cur["parent_id"] is not None else None
+        out = []
+        for m in reversed(branch):
+            versions = [i for i in siblings[m["parent_id"]] if rows[i]["role"] == m["role"]]
+            out.append({"id": m["id"], "role": m["role"], "content": m["content"],
+                        "steps": db.json_list(m["steps"]), "versions": versions,
+                        "version": versions.index(m["id"]) + 1})
+        return out
+
+    def _chat_payload(conn: sqlite3.Connection, story_id: int) -> dict[str, Any]:
+        return {
+            "story_id": story_id,
+            "messages": _chat_branch(conn, _chat_session(conn, story_id)),
+            "search_turns_options": config.CHAT_SEARCH_TURNS,
+        }
+
     @app.get("/api/stories/{story_id}/chat")
     def get_chat(story_id: int):
         with db.get_conn() as conn:
             if conn.execute("SELECT 1 FROM Story WHERE id = ?", (story_id,)).fetchone() is None:
                 raise HTTPException(404, "story not found")
-            rows = conn.execute(
-                "SELECT m.role, m.content, m.steps FROM ChatMessage m JOIN ChatSession s ON s.id = m.session_id "
-                "WHERE s.story_id = ? ORDER BY m.id",
-                (story_id,),
-            ).fetchall()
-        return {
-            "story_id": story_id,
-            "messages": [{**dict(r), "steps": db.json_list(r["steps"])} for r in rows],
-            "search_turns_options": config.CHAT_SEARCH_TURNS,
-        }
+            return _chat_payload(conn, story_id)
+
+    @app.post("/api/stories/{story_id}/chat/switch")
+    def switch_chat_version(story_id: int, body: ChatSwitch):
+        """Show another version of a message (and the latest replies that follow it)."""
+        with db.get_conn() as conn:
+            session = _chat_session(conn, story_id)
+            if session is None or conn.execute("SELECT 1 FROM ChatMessage WHERE id = ? AND session_id = ?",
+                                               (body.message_id, session["id"])).fetchone() is None:
+                raise HTTPException(404, "message not found")
+            leaf = body.message_id
+            while (child := conn.execute("SELECT MAX(id) FROM ChatMessage WHERE parent_id = ?",
+                                         (leaf,)).fetchone()[0]) is not None:
+                leaf = child
+            conn.execute("UPDATE ChatSession SET leaf_id = ? WHERE id = ?", (leaf, session["id"]))
+            return _chat_payload(conn, story_id)
 
     @app.post("/api/stories/{story_id}/chat")
     def post_chat(story_id: int, body: ChatSend):
@@ -408,18 +451,21 @@ def create_app() -> FastAPI:
         with db.get_conn() as conn:
             story = _load_story(conn, story_id)
             conn.execute("INSERT OR IGNORE INTO ChatSession (story_id) VALUES (?)", (story_id,))
-            session_id = conn.execute(
-                "SELECT id FROM ChatSession WHERE story_id = ?", (story_id,)
-            ).fetchone()[0]
-            history = [dict(r) for r in conn.execute(
-                "SELECT role, content FROM (SELECT id, role, content FROM ChatMessage "
-                "WHERE session_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id",
-                (session_id, _CHAT_HISTORY_MAX),
-            )]
-            conn.execute(
-                "INSERT INTO ChatMessage (session_id, role, content) VALUES (?, 'user', ?)",
-                (session_id, text),
-            )
+            session = _chat_session(conn, story_id)
+            session_id = session["id"]
+            branch = _chat_branch(conn, session)
+            if body.edit_of is not None:
+                idx = next((i for i, m in enumerate(branch)
+                            if m["id"] == body.edit_of and m["role"] == "user"), None)
+                if idx is None:
+                    raise HTTPException(404, "message to edit not found")
+                branch = branch[:idx]
+            history = [{"role": m["role"], "content": m["content"]} for m in branch[-_CHAT_HISTORY_MAX:]]
+            user_id = conn.execute(
+                "INSERT INTO ChatMessage (session_id, parent_id, role, content) VALUES (?, ?, 'user', ?)",
+                (session_id, branch[-1]["id"] if branch else None, text),
+            ).lastrowid
+            conn.execute("UPDATE ChatSession SET leaf_id = ? WHERE id = ?", (user_id, session_id))
 
         def ndjson(record: dict[str, Any]) -> str:
             return json.dumps(record, ensure_ascii=False) + "\n"
@@ -438,13 +484,14 @@ def create_app() -> FastAPI:
                 reply = "".join(parts).strip()
                 if reply or steps:
                     with db.get_conn() as conn:
-                        conn.execute(
-                            "INSERT INTO ChatMessage (session_id, role, content, steps) "
-                            "VALUES (?, 'assistant', ?, ?)",
-                            (session_id, reply, json.dumps(steps, ensure_ascii=False) if steps else None),
-                        )
-                        conn.execute("UPDATE ChatSession SET updated_at = datetime('now') WHERE id = ?",
-                                     (session_id,))
+                        reply_id = conn.execute(
+                            "INSERT INTO ChatMessage (session_id, parent_id, role, content, steps) "
+                            "VALUES (?, ?, 'assistant', ?, ?)",
+                            (session_id, user_id, reply,
+                             json.dumps(steps, ensure_ascii=False) if steps else None),
+                        ).lastrowid
+                        conn.execute("UPDATE ChatSession SET leaf_id = ?, updated_at = datetime('now') "
+                                     "WHERE id = ? AND leaf_id = ?", (reply_id, session_id, user_id))
 
             try:
                 for kind, payload in chat.stream(story, history, text, body.search_turns, steps):

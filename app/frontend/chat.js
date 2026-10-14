@@ -164,35 +164,113 @@ const Chat = (() => {
         return res.json();
       })
       .then((d) => {
-        const box = document.getElementById("chat-messages");
-        if (!box) return; // popup closed meanwhile
+        if (!d || !document.getElementById("chat-messages")) return; // popup closed meanwhile
         sel.innerHTML = (d.search_turns_options || [0])
           .map((t) => `<option value="${t}">${t === 0 ? "No web search" : "Web search ×" + t}</option>`)
           .join("");
-        box.innerHTML = "";
-        if (!d.messages.length) {
-          box.innerHTML = `<div class="chat-empty">Ask a question about this story.</div>`;
-        } else {
-          for (const m of d.messages) box.appendChild(msgEl(m.role, m.content, m.steps));
-        }
-        box.scrollTop = box.scrollHeight;
+        renderMessages(d.messages);
         input.focus();
       })
       .catch(() => { /* history is non-critical; the input still works */ });
   }
 
-  async function send() {
+  // Shows one branch of the conversation; edited user messages get ‹ n/m › version arrows.
+  function renderMessages(messages) {
+    const box = document.getElementById("chat-messages");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!messages.length) {
+      box.innerHTML = `<div class="chat-empty">Ask a question about this story.</div>`;
+      return;
+    }
+    for (const m of messages) {
+      const el = msgEl(m.role, m.content, m.steps);
+      if (m.role === "user") addMsgTools(el, m);
+      box.appendChild(el);
+    }
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function addMsgTools(el, m) {
+    const n = m.versions.length;
+    const tools = document.createElement("div");
+    tools.className = "chat-msg-tools";
+    tools.innerHTML = (n > 1 ? `
+        <button type="button" data-v="-1" title="Previous version" ${m.version <= 1 ? "disabled" : ""}>‹</button>
+        <span>${m.version}/${n}</span>
+        <button type="button" data-v="1" title="Next version" ${m.version >= n ? "disabled" : ""}>›</button>` : "")
+      + `<button type="button" class="chat-edit" title="Edit and resend (keeps the previous version)">✎</button>`;
+    tools.querySelectorAll("[data-v]").forEach((b) => b.addEventListener("click", () => {
+      switchVersion(m.versions[m.version - 1 + Number(b.dataset.v)]);
+    }));
+    tools.querySelector(".chat-edit").addEventListener("click", () => startEdit(el, m));
+    el.appendChild(tools);
+  }
+
+  async function switchVersion(messageId) {
+    if (busy || messageId == null) return;
+    const res = await fetch(`/api/stories/${currentStory}/chat/switch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message_id: messageId }),
+    });
+    if (Auth.unauth(res) || !res.ok) return;
+    renderMessages((await res.json()).messages);
+  }
+
+  function startEdit(el, m) {
+    if (busy || el.querySelector(".chat-edit-box")) return;
+    const body = el.querySelector(".chat-body");
+    const tools = el.querySelector(".chat-msg-tools");
+    const form = document.createElement("div");
+    form.className = "chat-edit-box";
+    form.innerHTML = `<textarea rows="3"></textarea>
+      <div class="chat-edit-row"><button type="button" class="btn" data-a="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-a="send">Send</button></div>`;
+    const ta = form.querySelector("textarea");
+    ta.value = m.content;
+    body.hidden = true;
+    tools.hidden = true;
+    el.insertBefore(form, tools);
+    ta.focus();
+    const cancel = () => { form.remove(); body.hidden = false; tools.hidden = false; };
+    const submit = () => {
+      const text = ta.value.trim();
+      if (!text || text === m.content.trim()) return cancel();
+      send(text, m.id, el);
+    };
+    form.querySelector('[data-a="cancel"]').onclick = cancel;
+    form.querySelector('[data-a="send"]').onclick = submit;
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); cancel(); }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
+    });
+  }
+
+  async function refreshMessages(storyId) {
+    try {
+      const res = await fetch(`/api/stories/${storyId}/chat`);
+      if (res.ok && currentStory === storyId) renderMessages((await res.json()).messages);
+    } catch { /* keep the streamed view */ }
+  }
+
+  // editOf/editEl: resend an edited user message as a new version of it.
+  async function send(edited = null, editOf = null, editEl = null) {
     if (busy) return;
     const storyId = currentStory;
     const input = document.getElementById("chat-input");
     const sel = document.getElementById("chat-turns");
     const box = document.getElementById("chat-messages");
-    const text = (input.value || "").trim();
+    const text = (edited ?? input.value ?? "").trim();
     if (!text || !storyId) return;
     const turns = parseInt(sel.value, 10) || 0;
     box.querySelector(".chat-empty")?.remove();
+    if (editEl) {
+      while (editEl.nextSibling) editEl.nextSibling.remove();
+      editEl.remove();
+    }
     box.appendChild(msgEl("user", text));
-    input.value = "";
+    if (edited == null) input.value = "";
     const reply = msgEl("assistant", "", [], true);
     box.appendChild(reply);
     box.scrollTop = box.scrollHeight;
@@ -203,6 +281,7 @@ const Chat = (() => {
     let answer = "";
     let rendered = 0;
     let failed = "";
+    let finished = false;
     const setStatus = (s) => { const t = bodyEl.querySelector(".chat-thinking"); if (t) t.textContent = s; };
     const render = () => {
       bodyEl.innerHTML = mdToHtml(answer)
@@ -215,7 +294,7 @@ const Chat = (() => {
       const res = await fetch(`/api/stories/${storyId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, search_turns: turns }),
+        body: JSON.stringify({ message: text, search_turns: turns, edit_of: editOf }),
       });
       if (Auth.unauth(res)) { reply.remove(); return; }
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -237,7 +316,8 @@ const Chat = (() => {
             if (!answer) setStatus(ev.step.status === "running" ? ev.step.title : "Working\u2026");
           } else if (ev.type === "thinking") appendThinking(stepsBox, ev.text);
           else if (ev.type === "delta") answer += ev.text;
-          else if (ev.type === "error") failed = ev.text;
+          else if (ev.type === "error") { failed = ev.text; finished = true; }
+          else if (ev.type === "done") finished = true;
         }
         if (answer.length > rendered) render();
       }
@@ -249,6 +329,8 @@ const Chat = (() => {
     } finally {
       busy = false;
     }
+    // Pick up message ids and versions (enables edit / version arrows on the new messages).
+    if (finished) refreshMessages(storyId);
   }
 
   return { open, close };
