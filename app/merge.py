@@ -40,21 +40,37 @@ def headline_terms(headline: str | None) -> set[str]:
 
 
 class _TermIndex:
-    """Distinctive headline terms (document frequency <= MERGE_LEXICAL_MAX_DF) of the window's stories."""
+    """Distinctive headline terms (document frequency <= MERGE_LEXICAL_MAX_DF) of the window's stories.
+
+    Kept current during a run: merged stories are removed, rewritten headlines re-indexed.
+    """
 
     def __init__(self, conn: sqlite3.Connection, since: str):
         rows = conn.execute("SELECT id, headline FROM Story WHERE headline IS NOT NULL AND updated_at >= ?",
                             (since,)).fetchall()
-        terms = {r["id"]: headline_terms(r["headline"]) for r in rows}
-        df = collections.Counter(w for ws in terms.values() for w in ws)
-        self.terms = {sid: {w for w in ws if df[w] <= config.MERGE_LEXICAL_MAX_DF} for sid, ws in terms.items()}
+        self.raw: dict[int, set[str]] = {}
+        self.df: collections.Counter[str] = collections.Counter()
         self.by_term: dict[str, set[int]] = collections.defaultdict(set)
-        for sid, ws in self.terms.items():
-            for w in ws:
-                self.by_term[w].add(sid)
+        for r in rows:
+            self.set(r["id"], r["headline"])
+
+    def remove(self, story_id: int) -> None:
+        for w in self.raw.pop(story_id, ()):
+            self.df[w] -= 1
+            self.by_term[w].discard(story_id)
+
+    def set(self, story_id: int, headline: str | None) -> None:
+        self.remove(story_id)
+        self.raw[story_id] = headline_terms(headline)
+        for w in self.raw[story_id]:
+            self.df[w] += 1
+            self.by_term[w].add(story_id)
+
+    def _distinctive(self, terms: set[str]) -> set[str]:
+        return {w for w in terms if 0 < self.df[w] <= config.MERGE_LEXICAL_MAX_DF}
 
     def candidates(self, story_id: int, headline: str | None) -> set[int]:
-        mine = self.terms.get(story_id) or {w for w in headline_terms(headline) if w in self.by_term}
+        mine = self._distinctive(self.raw.get(story_id) or headline_terms(headline))
         shared = collections.Counter(sid for w in mine for sid in self.by_term[w] if sid != story_id)
         return {sid for sid, n in shared.items() if n >= config.MERGE_LEXICAL_MIN_TERMS}
 
@@ -68,6 +84,12 @@ def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
                  "(SELECT user_id FROM ChatSession WHERE story_id = ?)", (keep, drop, keep))
     conn.execute("UPDATE Story SET news_at = MAX(COALESCE(news_at, ''), "
                  "COALESCE((SELECT news_at FROM Story WHERE id = ?), '')) WHERE id = ?", (drop, keep))
+    for other, relation, source, at in conn.execute(
+        "SELECT CASE WHEN a = ? THEN b ELSE a END, relation, source, checked_at FROM StoryLink "
+        "WHERE a = ? OR b = ?", (drop, drop, drop)).fetchall():
+        if other != keep and not conn.execute("SELECT 1 FROM StoryLink WHERE a = ? AND b = ?",
+                                              sorted((keep, other))).fetchone():
+            clustering.link_stories(conn, keep, other, relation, source, at)
     conn.execute("DELETE FROM Story WHERE id = ?", (drop,))
     return moved
 
@@ -88,11 +110,17 @@ def _check(conn: sqlite3.Connection, s: sqlite3.Row, since: str,
                         if conn.execute("SELECT 1 FROM Story WHERE id = ?", (sid,)).fetchone())
     cands = [(sid, sim) for sid, sim in best.items() if sim >= config.MERGE_SIM_THRESHOLD]
     cands += [(sid, best.get(sid, 0.0)) for sid in lexical if best.get(sid, 0.0) < config.MERGE_SIM_THRESHOLD]
+    # Pairs judged after both stories last changed would get the same verdict again.
+    cands = [(sid, sim) for sid, sim in cands if not clustering.merge_settled(conn, s["id"], sid)]
     if not cands:
         return False, None, None
+    verdicts: dict[int, str] = {}
     target, _ = clustering.verify(conn, s["headline"] or "", s["summary"] or "", cands,
                                   config.MERGE_SIM_THRESHOLD, f"story={s['id']}",
-                                  accept=harness.STORY_MERGE_CLASSES, priority=lexical)
+                                  accept=harness.STORY_MERGE_CLASSES, priority=lexical, verdicts=verdicts)
+    for sid, cls in verdicts.items():
+        if cls not in harness.STORY_MERGE_CLASSES:
+            clustering.link_stories(conn, s["id"], sid, cls, "merge")
     if target is None:
         return True, None, None
     # Keep the bigger story (older on ties) so its id / chat / votes survive.
@@ -134,6 +162,8 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
                 story.update_story(conn, keep, force_full=True)
             except Exception:  # noqa: BLE001 - merged anyway; next article updates the summary
                 log.exception("prompt2 after merge failed for story %s", keep)
+            index.remove(drop)
+            index.set(keep, conn.execute("SELECT headline FROM Story WHERE id = ?", (keep,)).fetchone()[0])
             secs = time.perf_counter() - t0
             for aid in moved:
                 conn.execute("UPDATE Article SET t_merge_s = ? WHERE id = ?", (secs, aid))

@@ -148,7 +148,8 @@ def _articles_by_story(conn: sqlite3.Connection, story_ids: list[int],
     return out
 
 
-def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]:
+def _story_payload(item: dict[str, Any], articles: list[dict],
+                   related: list[dict] | None = None) -> dict[str, Any]:
     s = item["story"]
     return {
         "id": s["id"],
@@ -167,6 +168,7 @@ def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]
         "read_at": item.get("read_at"),
         "read_summary": item.get("read_summary"),
         "articles": articles,
+        "related": related or [],
     }
 
 
@@ -185,7 +187,8 @@ def _load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = N
     relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality, personal)
     item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
             "display": display, **scoring.read_states(conn, user_id).get(story_id, {"read": None})}
-    return _story_payload(item, _articles_by_story(conn, [story_id], exclude)[story_id])
+    return _story_payload(item, _articles_by_story(conn, [story_id], exclude)[story_id],
+                          clustering.related_stories(conn, [story_id])[story_id])
 
 
 _ADMIN_PREFIXES = ("/feeds", "/api/feeds", "/api/refresh", "/api/reports", "/api/admin", "/admin")
@@ -390,6 +393,7 @@ def create_app() -> FastAPI:
                 hidden, ranked = len(ranked) - len(visible), visible
             page = ranked[:limit]
             arts = _articles_by_story(conn, [i["story"]["id"] for i in page], scoring.excluded_feeds(profile))
+            related = clustering.related_stories(conn, [i["story"]["id"] for i in page])
             pending = pipeline.pending_count(conn)
             last_article = conn.execute("SELECT MAX(created_at) FROM Article").fetchone()[0]
         return {
@@ -399,7 +403,8 @@ def create_app() -> FastAPI:
             "last_article": last_article,
             "active_days": config.STORY_ACTIVE_DAYS,
             "view": "personal" if personal else "default",
-            "stories": [_private(_story_payload(i, arts[i["story"]["id"]]), uid is not None) for i in page],
+            "stories": [_private(_story_payload(i, arts[i["story"]["id"]], related[i["story"]["id"]]), uid is not None)
+                        for i in page],
         }
 
     @app.get("/api/stories/{story_id}")

@@ -203,6 +203,11 @@ story-card.open .details > div { padding-bottom: 6px; }
 .q-high { color: var(--accent-2) !important; }
 .q-mid  { color: var(--warn) !important; }
 .q-low  { color: var(--danger) !important; }
+.related { margin-top: 12px; font-size: 12px; }
+.related ul { margin: 4px 0 0; padding-left: 18px; }
+.related li { margin: 2px 0; }
+.related a { color: var(--text); font-size: 13px; text-decoration: none; }
+.related a:hover { color: var(--accent); }
 
 .card-foot {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

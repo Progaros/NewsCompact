@@ -108,7 +108,8 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
             if embedded:
                 t["embed"] += embedded[1]
 
-            story_id, created, revived = clustering.decide_story(conn, vec, art, anchors)
+            verdicts: dict[int, str] = {}
+            story_id, created, revived = clustering.decide_story(conn, vec, art, anchors, verdicts)
             conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (story_id, art["id"]))
             t0 = stage("cluster", t0)
 
@@ -130,6 +131,10 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
                     article_id=art["id"], force_full=revived,
                 )
             stage("story", t0)
+
+            for other, cls in verdicts.items():
+                if cls == "SAME_TOPIC_DISTINCT_EVENT":
+                    clustering.link_stories(conn, story_id, other, cls, "article")
 
             wall = time.perf_counter() - wall0
             conn.execute(

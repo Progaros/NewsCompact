@@ -124,6 +124,8 @@ class StoryCard extends HTMLElement {
     const newCount = updated ? articles.filter((a) => (a.created_at || "") > (d.read_at || "")).length : 0;
     const readSummary = updated && d.read_summary && d.read_summary !== d.summary
       ? `<details class="read-summary"><summary>Summary when you read it</summary><p>${esc(d.read_summary)}</p></details>` : "";
+    const related = (d.related || []).map((r) =>
+      `<li><a href="/s/${Number(r.id)}" target="_blank" rel="noopener">${esc(r.headline)}</a></li>`).join("");
     const readTitle = { read: "Read — click to mark as unread", updated: "Updated since you read it — click to mark as read again" }[d.read]
       || "Mark as read";
     const open = openIds.has(d.id);
@@ -158,6 +160,7 @@ class StoryCard extends HTMLElement {
             <span class="rel-break">rel ${rel.base ?? "–"} · q ${rel.quality ?? "–"} · cred ${rel.credibility ?? "–"} · impact ${rel.user_impact ?? "–"} · interest ${rel.user_interest_points ?? "–"} · dist ${rel.distance_points ?? "–"}</span>
           </span>
         </div>
+        ${related ? `<div class="related"><span class="muted">Related stories</span><ul>${related}</ul></div>` : ""}
       </div></div>
       <div class="card-foot">
         <button type="button" class="src-toggle" aria-expanded="${srcOpen}" title="Show all source articles">

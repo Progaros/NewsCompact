@@ -35,6 +35,19 @@ def test_stories_and_articles(client, story):
     assert client.get("/api/stories?limit=0").status_code == 422
 
 
+def test_related_stories_are_listed(client, story):
+    from app import clustering
+
+    with db.get_conn() as conn:
+        other = conn.execute("INSERT INTO Story (headline) VALUES ('Flood hits next town')").lastrowid
+        clustering.link_stories(conn, story, other, "SAME_TOPIC_DISTINCT_EVENT", "article")
+        hidden = conn.execute("INSERT INTO Story (headline) VALUES ('Unrelated')").lastrowid
+        clustering.link_stories(conn, story, hidden, "UNRELATED", "merge")
+    expected = [{"id": other, "headline": "Flood hits next town"}]
+    assert client.get("/api/stories").json()["stories"][0]["related"] == expected
+    assert client.get(f"/api/stories/{story}").json()["related"] == expected
+
+
 def test_security_headers_and_origin_check(client):
     r = client.get("/")
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]

@@ -39,6 +39,9 @@ def test_verifier_rejection_creates_new_story(feed_id, llm):
     pipeline.process_pending()
     assert _story_of(first) != _story_of(second)
     assert llm.calls.count("verify") == 1  # the revival tier does not re-ask about fresh stories
+    with db.get_conn() as conn:
+        link = conn.execute("SELECT a, b, relation, source FROM StoryLink").fetchone()
+    assert tuple(link) == (_story_of(first), _story_of(second), "SAME_TOPIC_DISTINCT_EVENT", "article")
 
 
 def test_stale_story_is_revived(feed_id, llm):

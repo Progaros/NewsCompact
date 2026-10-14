@@ -12,6 +12,7 @@ harness verifier decides; only EXACT_MATCH / CONTINUING_DEVELOPMENT attach.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import math
 import sqlite3
@@ -158,6 +159,55 @@ def nearest_stories(conn: sqlite3.Connection, vec: Vector, anchors: AnchorCache,
 
 
 # --- decision --------------------------------------------------------------
+RELATED_CLASSES = ("SAME_TOPIC_DISTINCT_EVENT", "CONTINUING_DEVELOPMENT")
+
+
+def link_stories(conn: sqlite3.Connection, x: int, y: int, relation: str, source: str,
+                 checked_at: str | None = None) -> None:
+    """Remember a verifier verdict between two stories (StoryLink; latest verdict wins)."""
+    if x == y:
+        return
+    a, b = sorted((x, y))
+    conn.execute(
+        "INSERT INTO StoryLink (a, b, relation, source, checked_at) VALUES (?, ?, ?, ?, COALESCE(?, datetime('now'))) "
+        "ON CONFLICT (a, b) DO UPDATE SET relation = excluded.relation, source = excluded.source, "
+        "checked_at = excluded.checked_at",
+        (a, b, relation, source, checked_at),
+    )
+
+
+def merge_settled(conn: sqlite3.Connection, x: int, y: int) -> bool:
+    """True if a story-vs-story check of x and y happened after both last changed."""
+    a, b = sorted((x, y))
+    return conn.execute(
+        "SELECT 1 FROM StoryLink l JOIN Story sa ON sa.id = l.a JOIN Story sb ON sb.id = l.b "
+        "WHERE l.a = ? AND l.b = ? AND l.source = 'merge' "
+        "AND sa.updated_at < l.checked_at AND sb.updated_at < l.checked_at", (a, b),
+    ).fetchone() is not None
+
+
+def related_stories(conn: sqlite3.Connection, story_ids: list[int], limit: int = 5) -> dict[int, list[dict]]:
+    """``{story_id: [{id, headline}]}``: linked same-topic stories, most recent news first."""
+    out: dict[int, list[dict]] = {sid: [] for sid in story_ids}
+    if not story_ids:
+        return out
+    ids, rels = json.dumps(story_ids), json.dumps(RELATED_CLASSES)
+    rows = conn.execute(
+        "SELECT l.a AS sid, s.id, s.headline, s.news_at FROM StoryLink l JOIN Story s ON s.id = l.b "
+        "WHERE l.a IN (SELECT value FROM json_each(?)) AND l.relation IN (SELECT value FROM json_each(?)) "
+        "AND s.headline IS NOT NULL "
+        "UNION ALL "
+        "SELECT l.b, s.id, s.headline, s.news_at FROM StoryLink l JOIN Story s ON s.id = l.a "
+        "WHERE l.b IN (SELECT value FROM json_each(?)) AND l.relation IN (SELECT value FROM json_each(?)) "
+        "AND s.headline IS NOT NULL ORDER BY 4 DESC",
+        (ids, rels, ids, rels),
+    )
+    for r in rows:
+        if len(out[r[0]]) < limit:
+            out[r[0]].append({"id": r[1], "headline": r[2]})
+    return out
+
+
 def _best_clearing(cands: list[tuple[int, float]], threshold: float) -> tuple[int | None, float]:
     best = (None, -1.0)
     for sid, sim in cands:
@@ -169,8 +219,12 @@ def _best_clearing(cands: list[tuple[int, float]], threshold: float) -> tuple[in
 def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[int, float]],
            threshold: float, log_ref: Any = None,
            accept: frozenset[str] = harness.MERGE_CLASSES,
-           priority: frozenset[int] = frozenset()) -> tuple[int | None, float]:
-    """LLM-verify the best few candidates (``priority`` ids first); a verifier failure rejects them all."""
+           priority: frozenset[int] = frozenset(),
+           verdicts: dict[int, str] | None = None) -> tuple[int | None, float]:
+    """LLM-verify the best few candidates (``priority`` ids first); a verifier failure rejects them all.
+
+    ``verdicts`` (if given) receives ``{story_id: class}`` for every candidate the verifier judged.
+    """
     rows = []
     ranked = sorted(cands, key=lambda c: (c[0] in priority, c[1]), reverse=True)
     for sid, sim in ranked:
@@ -188,6 +242,8 @@ def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[in
     except Exception:  # noqa: BLE001
         log.exception("event verification failed for %s", log_ref)
         return None, -1.0
+    if verdicts is not None:
+        verdicts.update({c["id"]: decisions[c["id"]] for c in rows if c["id"] in decisions})
     for c in rows:
         cls = decisions.get(c["id"], "UNRELATED")
         log.info("verify %s story=%s sim=%.3f class=%s", log_ref, c["id"], c["sim"], cls)
@@ -196,33 +252,35 @@ def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[in
     return None, -1.0
 
 
-def _pick(conn, article, cands, threshold_two_stage, threshold_cosine):
+def _pick(conn, article, cands, threshold_two_stage, threshold_cosine, verdicts=None):
     if config.CLUSTER_MODE == "two_stage" and article is not None:
         text = article.get("content_raw") or article.get("title") or ""
         return verify(conn, article.get("title") or "", text, cands, threshold_two_stage,
-                      f"article={article.get('id')}")
+                      f"article={article.get('id')}", verdicts=verdicts)
     return _best_clearing(cands, threshold_cosine)
 
 
 def decide_story(conn: sqlite3.Connection, vec: Vector,
                  article: dict[str, Any] | None = None,
-                 anchors: AnchorCache | None = None) -> tuple[int, bool, bool]:
+                 anchors: AnchorCache | None = None,
+                 verdicts: dict[int, str] | None = None) -> tuple[int, bool, bool]:
     """Return ``(story_id, created, revived)``; creates a placeholder story when nothing matches.
 
-    Without ``article`` (maintenance scripts) the cosine path is used.
+    Without ``article`` (maintenance scripts) the cosine path is used. ``verdicts`` collects
+    the verifier's classes per candidate story (see ``verify``).
     """
     if anchors is None:
         anchors = AnchorCache()
     anchors.conn = conn
     cutoff = window_cutoff()
     sid, _ = _pick(conn, article, nearest_stories(conn, vec, anchors, since=cutoff),
-                   config.CLUSTER_VERIFY_RETRIEVE_THRESHOLD, config.CLUSTER_SIM_THRESHOLD)
+                   config.CLUSTER_VERIFY_RETRIEVE_THRESHOLD, config.CLUSTER_SIM_THRESHOLD, verdicts)
     if sid is not None:
         return sid, False, False
 
     # Fresh stories were already judged in tier 1; re-asking only repeats the verdict.
     sid, sim = _pick(conn, article, nearest_stories(conn, vec, anchors, before=cutoff),
-                     config.CLUSTER_REVIVE_SIM_THRESHOLD, config.CLUSTER_REVIVE_SIM_THRESHOLD)
+                     config.CLUSTER_REVIVE_SIM_THRESHOLD, config.CLUSTER_REVIVE_SIM_THRESHOLD, verdicts)
     if sid is not None:
         log.info("reviving story %d (anchor sim=%.3f)", sid, sim)
         return sid, False, True

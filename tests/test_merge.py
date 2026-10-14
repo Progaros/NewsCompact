@@ -50,6 +50,48 @@ def test_continuation_does_not_merge_stories(feed_id, llm):
     assert result["verified"] >= 1 and result["merged"] == 0
 
 
+def test_merge_verdicts_are_remembered_until_a_story_changes(feed_id, llm):
+    from app import clustering
+
+    _make_two_stories(feed_id, llm)
+    llm.verdict = "SAME_TOPIC_DISTINCT_EVENT"
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM StoryLink")
+        conn.execute("UPDATE Story SET updated_at = datetime('now', '-1 minutes')")
+    assert merge.run()["verified"] >= 1
+    with db.get_conn() as conn:
+        links = conn.execute("SELECT a, b, relation, source FROM StoryLink").fetchall()
+        assert links and all(tuple(r)[2:] == ("SAME_TOPIC_DISTINCT_EVENT", "merge") for r in links)
+        a, b = links[0]["a"], links[0]["b"]
+        assert b in [r["id"] for r in clustering.related_stories(conn, [a])[a]]
+        conn.execute("UPDATE Story SET merge_checked_at = NULL")
+    llm.calls.clear()
+    assert merge.run()["verified"] == 0 and "verify" not in llm.calls  # same inputs, same verdict
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Story SET merge_checked_at = NULL, updated_at = datetime('now', '+1 minutes') "
+                     "WHERE id = ?", (a,))
+    assert merge.run()["verified"] >= 1  # a changed story is judged again
+
+
+def test_merged_story_inherits_links_and_index_follows(feed_id, llm):
+    from app import clustering, config
+
+    _make_two_stories(feed_id, llm)
+    with db.get_conn() as conn:
+        ids = [r[0] for r in conn.execute("SELECT id FROM Story ORDER BY id")]
+        other = conn.execute("INSERT INTO Story (headline, updated_at) VALUES ('Other quake', datetime('now'))").lastrowid
+        clustering.link_stories(conn, ids[-1], other, "SAME_TOPIC_DISTINCT_EVENT", "article")
+        merge._absorb(conn, ids[0], ids[-1])
+        assert [r["id"] for r in clustering.related_stories(conn, [ids[0]])[ids[0]]] == [other]
+
+        idx = merge._TermIndex(conn, "2000-01-01")
+    idx.set(1001, "Zorblax Quixotic Merger announced")
+    idx.set(1002, "Zorblax Quixotic Merger collapses")
+    assert config.MERGE_LEXICAL_MIN_TERMS <= 3 and 1002 in idx.candidates(1001, None)
+    idx.remove(1002)
+    assert idx.candidates(1001, None) == set()
+
+
 def test_shared_headline_terms_find_duplicates_embeddings_miss(feed_id, llm, monkeypatch):
     from app import config
 
