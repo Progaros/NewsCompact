@@ -103,12 +103,24 @@ def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
     return None
 
 
+def excluded_feeds(profile: dict[str, Any]) -> set[int]:
+    """Feed ids the user hid from their personal feed (preferences.excluded_feeds)."""
+    out = set()
+    for v in profile["preferences"].get("excluded_feeds") or []:
+        try:
+            out.add(int(v))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
-                 story_id: int | None = None) -> dict[int, dict[str, Any]]:
+                 story_id: int | None = None, exclude: set[int] = frozenset()) -> dict[int, dict[str, Any]]:
     """``{story_id: {feeds, trust, quality}}`` per story; ``trust`` = ``feed_trust()``.
 
     ``trust`` sums the best feed trust of each distinct outlet; ``quality`` is the
     trust-weighted median article quality (plain median if all trust is 0, None without scores).
+    Articles of ``exclude`` feeds don't count (a story with only those is left out).
     """
     sql = ("SELECT a.story_id, a.feed_id, a.quality, f.site_url, f.xml_url "
            "FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
@@ -117,6 +129,8 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
     outlets: dict[int, dict[str, float]] = {}
     quals: dict[int, list[tuple[float, float]]] = {}
     for r in rows:
+        if r["feed_id"] in exclude:
+            continue
         sid, w = r["story_id"], trust.get(r["feed_id"], config.SOURCE_TRUST_DEFAULT)
         feeds.setdefault(sid, set()).add(r["feed_id"])
         key = outlet_key(r["site_url"], r["xml_url"]) or f"feed:{r['feed_id']}"
@@ -241,7 +255,7 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     ``personal=False`` ranks the default view (DEFAULT_PROFILE, no distance).
     """
     profile = (profile or get_user_profile(conn)) if personal else DEFAULT_PROFILE
-    stats = source_stats(conn, feed_trust(conn, profile))
+    stats = source_stats(conn, feed_trust(conn, profile), exclude=excluded_feeds(profile))
     reads = read_states(conn)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     sql = ("SELECT * FROM Story WHERE headline IS NOT NULL AND COALESCE(news_at, updated_at) "

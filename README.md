@@ -133,7 +133,8 @@ flowchart LR
 - **⚙ Preferences** — interest regions / locations (raise "impact"), minimum
   story quality, source trust per feed category (expand a category to set single
   sources; a category with individually set sources is faded and moving its
-  slider asks before resetting them), scheduled ntfy reports (news
+  slider asks before resetting them; ⊘ hides a source from the personal
+  "For you" feed — its articles neither count nor show there), scheduled ntfy reports (news
   brief or pipeline report; time, weekdays, "send now") and the tag
   weights (edit, add, remove or reset).
 
@@ -149,7 +150,7 @@ flowchart LR
 | `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
 | `GET /api/heads-up` | AI brief over the top 5 stories (default ranking) |
 | `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |
-| `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
+| `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`, `excluded_feeds`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
 | `GET /api/reports/{brief\|pipeline}` · `POST /api/reports/{kind}/send` | Preview a report · push it to ntfy now |
 | `GET/POST /api/feeds` · `PATCH/DELETE /api/feeds/{id}` | Feed management |
 | `POST /api/feeds/category` | Enable/disable a whole category |

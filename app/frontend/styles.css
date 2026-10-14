@@ -421,6 +421,12 @@ body.unsigned-in #feeds-link { display: none; }
 .trust-row.feed.custom { color: var(--text); }
 .trust-row.feed.custom output { color: var(--accent); }
 .trust-row.feed.custom [data-reset] { visibility: visible; }
+.trust-row.feed .exclude-btn { color: var(--muted); font-size: 13px; padding: 0 6px 0 0; }
+.trust-row.feed .exclude-btn:hover { color: var(--danger); text-decoration: none; }
+.trust-row.feed.excluded .trust-name { text-decoration: line-through; opacity: .6; }
+.trust-row.feed.excluded .exclude-btn { color: var(--danger); }
+.trust-row.feed.excluded input, .trust-row.feed.excluded output { opacity: .3; }
+.hidden-count { color: var(--danger); font-size: 11px; }
 
 .report-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;

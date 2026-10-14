@@ -97,6 +97,28 @@ def test_single_source_trust_overrides_its_category(client, story, feed_id):
     assert client.put("/api/profile", json={"feed_weights": {}}).json()["feed_trust"][0]["custom"] is False
 
 
+def test_excluded_sources_leave_the_personal_feed_only(client, story, feed_id, monkeypatch):
+    other = None
+    with db.get_conn() as conn:
+        other = conn.execute("INSERT INTO Feed (title, xml_url, category) VALUES ('Other', 'https://o.example/rss', 'News')"
+                             ).lastrowid
+    aid = add_article(other, "Flood hits town again")
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (story, aid))
+    assert client.get("/api/stories").json()["stories"][0]["source_count"] == 2
+
+    client.put("/api/profile", json={"preferences": {"excluded_feeds": [other, other]}})
+    assert client.get("/api/profile").json()["preferences"]["excluded_feeds"] == [other]
+    mine = client.get("/api/stories").json()["stories"][0]
+    assert mine["source_count"] == 1 and [a["feed"] for a in mine["articles"]] == ["Feed"]
+    assert client.get(f"/api/stories/{story}").json()["source_count"] == 1
+    assert client.get("/api/stories", params={"view": "default"}).json()["stories"][0]["source_count"] == 2
+
+    client.put("/api/profile", json={"preferences": {"excluded_feeds": [other, feed_id]}})
+    assert client.get("/api/stories").json()["count"] == 0  # every source hidden
+    assert client.get("/api/stories", params={"view": "default"}).json()["count"] == 1
+
+
 def test_chat_streams_and_persists(client, story, llm):
     import json
 

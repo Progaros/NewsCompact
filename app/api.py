@@ -41,6 +41,7 @@ class Preferences(BaseModel):
     locations: list[Annotated[str, Field(max_length=80)]] | None = Field(None, max_length=50)
     min_quality: float | None = Field(None, ge=0, le=10)
     ntfy_reports: list[ReportSchedule] | None = Field(None, max_length=20)
+    excluded_feeds: list[int] | None = Field(None, max_length=2000)
 
 
 class ProfileUpdate(BaseModel):
@@ -96,19 +97,21 @@ def _require_http_url(url: str) -> str:
     return url
 
 
-def _articles_by_story(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[dict]]:
+def _articles_by_story(conn: sqlite3.Connection, story_ids: list[int],
+                       exclude: set[int] = frozenset()) -> dict[int, list[dict]]:
     out: dict[int, list[dict]] = {sid: [] for sid in story_ids}
     if not story_ids:
         return out
     marks = ",".join("?" * len(story_ids))
     rows = conn.execute(
-        "SELECT a.id, a.story_id, a.title, a.url, a.author, a.published_date, a.created_at, a.hero_image_url, "
-        "f.title AS feed FROM Article a JOIN Feed f ON f.id = a.feed_id "
+        "SELECT a.id, a.story_id, a.feed_id, a.title, a.url, a.author, a.published_date, a.created_at, "
+        "a.hero_image_url, f.title AS feed FROM Article a JOIN Feed f ON f.id = a.feed_id "
         f"WHERE a.story_id IN ({marks}) ORDER BY a.published_date DESC",
         story_ids,
     )
     for r in rows:
-        out[r["story_id"]].append({k: r[k] for k in r.keys() if k != "story_id"})
+        if r["feed_id"] not in exclude:
+            out[r["story_id"]].append({k: r[k] for k in r.keys() if k not in ("story_id", "feed_id")})
     return out
 
 
@@ -139,13 +142,14 @@ def _load_story(conn: sqlite3.Connection, story_id: int, personal: bool = True) 
     if s is None:
         raise HTTPException(404, "story not found")
     profile = scoring.get_user_profile(conn) if personal else scoring.DEFAULT_PROFILE
-    st = scoring.source_stats(conn, scoring.feed_trust(conn, profile), story_id).get(
+    exclude = scoring.excluded_feeds(profile)
+    st = scoring.source_stats(conn, scoring.feed_trust(conn, profile), story_id, exclude).get(
         story_id, {"feeds": 0, "trust": 0.0, "quality": None})
     quality = st["quality"] if st["quality"] is not None else s["quality_score"]
     relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality, personal)
     item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
             "display": display, **scoring.read_states(conn).get(story_id, {"read": None})}
-    return _story_payload(item, _articles_by_story(conn, [story_id])[story_id])
+    return _story_payload(item, _articles_by_story(conn, [story_id], exclude)[story_id])
 
 
 def _is_public(request: Request) -> bool:
@@ -291,14 +295,15 @@ def create_app() -> FastAPI:
         personal = owner and view == "personal"
         keep_ids = {int(x) for x in keep.split(",") if x.strip().isdigit()}
         with db.get_conn() as conn:
-            ranked = scoring.ranked_stories(conn, archived=archived, query=q.strip(), tag=tag.strip(),
+            profile = scoring.get_user_profile(conn) if personal else scoring.DEFAULT_PROFILE
+            ranked = scoring.ranked_stories(conn, profile, archived=archived, query=q.strip(), tag=tag.strip(),
                                             personal=personal)
             hidden = 0
             if hide_read and owner and not archived:
                 visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
                 hidden, ranked = len(ranked) - len(visible), visible
             page = ranked[:limit]
-            arts = _articles_by_story(conn, [i["story"]["id"] for i in page])
+            arts = _articles_by_story(conn, [i["story"]["id"] for i in page], scoring.excluded_feeds(profile))
             pending = pipeline.pending_count(conn)
             last_article = conn.execute("SELECT MAX(created_at) FROM Article").fetchone()[0]
         return {
@@ -602,6 +607,8 @@ def create_app() -> FastAPI:
                 prefs[key] = [v.strip() for v in prefs[key] if v.strip()]
         for s in prefs.get("ntfy_reports", []):
             s["days"] = sorted(set(s["days"]))
+        if "excluded_feeds" in prefs:
+            prefs["excluded_feeds"] = sorted(set(prefs["excluded_feeds"]))
         scoring.update_profile(prefs, body.tag_weights, body.source_weights, body.feed_weights)
         return get_profile()
 
