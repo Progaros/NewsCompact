@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Users — AI News Aggregator</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand"><span class="dot"></span><h1>News</h1></a>
+    <nav class="nav">
+      <a href="/">Stories</a>
+      <a href="/list">Articles</a>
+      <a href="/feeds" id="feeds-link" class="admin-link">Feeds</a>
+      <a href="/admin" class="active admin-link">Users</a>
+    </nav>
+    <div class="controls">
+      <span id="user-status" class="status">loading…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="heads-up">
+      <div class="heads-up-label">Add user</div>
+      <form id="add-user" class="add-feed">
+        <input name="name" placeholder="User name (letters, digits, . _ -)" required maxlength="40"
+               pattern="[A-Za-z0-9][A-Za-z0-9._\-]{1,39}" autocomplete="off" />
+        <input name="password" type="password" placeholder="Initial password (min. 8)" required minlength="8"
+               autocomplete="new-password" />
+        <label class="check"><input name="is_admin" type="checkbox" /> admin</label>
+        <button class="btn" type="submit">Create</button>
+      </form>
+      <p class="hint">
+        Users share stories, summaries and classifications; preferences, votes, read state, chats and the
+        personal heads-up are their own. Admins manage feeds and users and get ntfy reports.
+        Users can change their password in ⚙ Preferences.
+      </p>
+    </section>
+
+    <section class="table-wrap" id="user-list" aria-label="Users">
+      <div class="empty">Loading users…</div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/admin.js"></script>
+</body>
+</html>

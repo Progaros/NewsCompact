@@ -26,7 +26,8 @@ Feeds are managed in the UI (`/feeds`, admins only). Set `NEWS_AUTH_PASSWORD` to
 login for everything except the read-only story views — put it (and any other
 `NEWS_*` settings) in a gitignored `.env`; `start.sh` sources it. The admin user
 `admin` (user 1, owner of all data from the single-user era) signs in with that
-password; further users are stored in `AppUser` with their own scrypt password hashes.
+password; admins create further users, promote/demote them, reset passwords and
+delete them on **Users** (`/admin`); everyone can change their own password in ⚙ Preferences.
 
 ## How it works
 
@@ -164,11 +165,13 @@ flowchart LR
 | `GET /api/health` | Counts, pending, dead letter, worker status |
 | `GET /api/events` | SSE stream |
 | `GET /api/auth/session` · `POST /api/auth/login` `{"username", "password"}` · `POST /api/auth/logout` | Session (`user`: id, name, is_admin; an empty user name logs in as user 1) |
+| `POST /api/auth/password` `{"current", "new"}` | Change your own password |
+| `GET/POST /api/admin/users` · `PATCH/DELETE /api/admin/users/{id}` | Admins: list / create `{"name", "password", "is_admin"}` / promote, demote, set password / delete users (user 1 stays admin; no self-demotion or self-deletion) |
 
 With auth enabled, only `/`, `/list`, `/static/*`, the auth endpoints and
 `GET` on stories (not chat), articles, heads-up, health and events are public;
-read state is stripped from those public responses. Feeds, refresh and ntfy
-reports are admin-only (403 for other users).
+read state is stripped from those public responses. Feeds, refresh, ntfy
+reports and user administration are admin-only (403 for other users).
 Without a password (open mode) everything else is limited to LAN clients, who act
 as user 1 unless they sign in as someone else
 (private/loopback addresses, judged by the address nginx appends to

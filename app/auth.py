@@ -89,6 +89,21 @@ def authenticate(name: str | None, password: str) -> dict[str, Any] | None:
     return row if row["id"] == OWNER_ID and check_password(password) else None
 
 
+def change_password(user_id: int, current: str, new: str) -> bool:
+    """Set a new password after checking the current one (open-mode owner without one: no check)."""
+    with db.get_conn() as conn:
+        row = _user_row(conn, user_id=user_id)
+        if row is None:
+            return False
+        if row["password_hash"]:
+            ok = verify_password(current, row["password_hash"])
+        else:
+            ok = check_password(current) if auth_enabled() else row["id"] == OWNER_ID
+        if ok:
+            conn.execute("UPDATE AppUser SET password_hash = ? WHERE id = ?", (hash_password(new), user_id))
+        return ok
+
+
 def _sweep_locked() -> None:
     """Drop expired sessions. Caller must hold `_lock`."""
     now = time.time()

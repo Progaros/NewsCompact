@@ -22,6 +22,8 @@ PRIVATE = [
     ("POST", "/api/refresh"),
     ("GET", "/api/feeds"), ("POST", "/api/feeds"), ("GET", "/api/feeds/preview?url=https://example.org"),
     ("POST", "/api/feeds/category"), ("PATCH", "/api/feeds/1"), ("DELETE", "/api/feeds/1"),
+    ("GET", "/api/admin/users"), ("POST", "/api/admin/users"), ("PATCH", "/api/admin/users/2"),
+    ("DELETE", "/api/admin/users/2"), ("POST", "/api/auth/password"),
 ]
 PUBLIC = ["/", "/list", "/api/stories", "/api/stories/1", "/api/articles", "/api/heads-up",
           "/api/health", "/api/auth/session", "/static/app.js"]
@@ -176,6 +178,38 @@ def test_users_have_separate_state_and_only_admins_manage(exposed):
     assert exposed.get(f"/api/stories/{sid}/chat").json()["messages"] == []
     assert exposed.get("/api/feeds").status_code == 200
     assert exposed.post("/api/auth/login", json={"username": "admin", "password": PASSWORD}).status_code == 200
+
+
+def test_admin_manages_users(exposed):
+    _login(exposed)
+    url = "/api/admin/users"
+    assert [u["name"] for u in exposed.get(url).json()["users"]] == ["admin"]
+    assert exposed.post(url, json={"name": "x", "password": "long-enough"}).status_code == 422  # name too short
+    assert exposed.post(url, json={"name": "bob", "password": "short"}).status_code == 422
+    assert exposed.post(url, json={"name": "<script>", "password": "long-enough"}).status_code == 422
+    users = exposed.post(url, json={"name": "bob", "password": "bob-pw-123"}).json()["users"]
+    bob = users[-1]
+    assert bob["name"] == "bob" and bob["is_admin"] == 0
+    assert exposed.post(url, json={"name": "BOB", "password": "bob-pw-123"}).status_code == 409
+    assert exposed.patch(f"{url}/1", json={"is_admin": False}).status_code == 409  # owner stays admin
+    assert exposed.delete(f"{url}/1").status_code == 409
+    assert exposed.patch(f"{url}/{bob['id']}", json={"is_admin": True}).json()["users"][-1]["is_admin"] == 1
+
+    with TestClient(api.create_app(), base_url=BASE, client=("203.0.113.8", 40000)) as other:
+        assert other.post("/api/auth/login", json={"username": "bob", "password": "bob-pw-123"}).status_code == 200
+        assert other.get(url).status_code == 200  # promoted: bob is an admin now
+        assert other.patch(f"{url}/{bob['id']}", json={"is_admin": False}).status_code == 409  # not yourself
+        assert other.post("/api/auth/password", json={"current": "wrong", "new": "bob-new-pw"}).status_code == 403
+        assert other.post("/api/auth/password", json={"current": "bob-pw-123", "new": "bob-new-pw"}).status_code == 200
+        exposed.patch(f"{url}/{bob['id']}", json={"is_admin": False, "password": "reset-by-admin"})
+        assert other.get("/api/profile").status_code == 401  # a reset ends the user's sessions
+        assert other.post("/api/auth/login", json={"username": "bob", "password": "reset-by-admin"}).status_code == 200
+        assert other.get(url).status_code == 403  # demoted
+        other.post("/api/feedback", json={"story_id": 1, "kind": "up"})
+        users = exposed.delete(f"{url}/{bob['id']}").json()["users"]
+        assert [u["name"] for u in users] == ["admin"]
+        assert other.get("/api/profile").status_code == 401
+    assert exposed.get("/admin").status_code == 200
 
 
 def test_password_hashes():

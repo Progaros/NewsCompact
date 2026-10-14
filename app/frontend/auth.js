@@ -121,6 +121,7 @@ const Auth = (() => {
         renderTrust(box, p.source_trust || {}, p.feed_trust || [], feedOverrides, excluded);
         if (ntfy) renderReports(box, reports, ntfy);
         renderWeights(box, weights);
+        renderPassword(box);
       })
       .catch(() => { box.textContent = "(profile unavailable)"; });
 
@@ -181,6 +182,32 @@ const Auth = (() => {
   }
 
   const DAY_NAMES = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+  // Own password (not part of the Save button: it takes effect at once).
+  function renderPassword(box) {
+    const sec = document.createElement("div");
+    sec.className = "user-section";
+    sec.innerHTML = `<div class="user-section-label">Password</div>
+      <div class="pw-row">
+        <input type="password" class="pw-current" placeholder="Current password" autocomplete="current-password" />
+        <input type="password" class="pw-new" placeholder="New password (min. 8)" minlength="8" autocomplete="new-password" />
+        <button type="button" class="btn">Change</button>
+      </div>`;
+    box.appendChild(sec);
+    sec.querySelector("button").onclick = async () => {
+      const cur = sec.querySelector(".pw-current");
+      const nw = sec.querySelector(".pw-new");
+      if (nw.value.length < 8) return toast("New password too short (min. 8).");
+      const res = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current: cur.value, new: nw.value }),
+      });
+      if (unauth(res)) return;
+      toast(res.ok ? "Password changed." : res.status === 429 ? "Too many attempts — wait a minute." : "Current password is wrong.");
+      if (res.ok) { cur.value = ""; nw.value = ""; }
+    };
+  }
   const REPORT_LABELS = { brief: "News brief", pipeline: "Pipeline report" };
 
   /* Category sliders with expandable per-source sliders. `overrides` ({feed id: trust})

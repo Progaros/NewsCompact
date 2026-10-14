@@ -86,6 +86,25 @@ class ChatSwitch(BaseModel):
     message_id: int
 
 
+_USER_NAME = r"^[A-Za-z0-9][A-Za-z0-9._-]{1,39}$"
+
+
+class UserCreate(BaseModel):
+    name: str = Field(pattern=_USER_NAME)
+    password: str = Field(min_length=8, max_length=1024)
+    is_admin: bool = False
+
+
+class UserUpdate(BaseModel):
+    is_admin: bool | None = None
+    password: str | None = Field(None, min_length=8, max_length=1024)
+
+
+class PasswordChange(BaseModel):
+    current: str = Field("", max_length=1024)
+    new: str = Field(min_length=8, max_length=1024)
+
+
 _CHAT_HISTORY_MAX = 20  # prior messages sent to the model
 _SSE_MAX_CLIENTS = 50  # /api/events is public; each stream holds a connection
 
@@ -289,6 +308,10 @@ def create_app() -> FastAPI:
     @app.get("/list")
     def list_page():
         return FileResponse(_FRONTEND / "list.html", headers=_NO_CACHE)
+
+    @app.get("/admin")
+    def admin_page():
+        return FileResponse(_FRONTEND / "admin.html", headers=_NO_CACHE)
 
     def _user(request: Request) -> dict[str, Any] | None:
         """Signed-in user (set by the auth middleware); None for anonymous visitors."""
@@ -592,6 +615,16 @@ def create_app() -> FastAPI:
         )
         return resp
 
+    @app.post("/api/auth/password")
+    def change_password(body: PasswordChange, request: Request):
+        ip = request.client.host if request.client else "unknown"
+        if auth.login_throttled(ip):
+            raise HTTPException(429, "too many failed attempts — try again shortly")
+        if not auth.change_password(_uid(request), body.current, body.new):
+            auth.record_failure(ip)
+            raise HTTPException(403, "current password is wrong")
+        return {"ok": True}
+
     @app.post("/api/auth/logout")
     def logout(request: Request):
         auth.destroy_session(request.cookies.get(config.AUTH_COOKIE))
@@ -686,6 +719,68 @@ def create_app() -> FastAPI:
     @app.post("/api/refresh")
     def refresh():
         return worker.refresh()
+
+    # --- user administration (admins only, see _ADMIN_PREFIXES) ---
+    def _users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        return [dict(r) for r in conn.execute(
+            "SELECT u.id, u.name, u.is_admin = 1 AS is_admin, u.created_at, "
+            "(SELECT count(*) FROM FeedbackLog f WHERE f.user_id = u.id) AS votes, "
+            "(SELECT count(*) FROM StoryRead r WHERE r.user_id = u.id) AS reads, "
+            "(SELECT count(*) FROM ChatSession c WHERE c.user_id = u.id) AS chats "
+            "FROM AppUser u ORDER BY u.id")]
+
+    def _admin_target(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row:
+        row = conn.execute("SELECT id, is_admin FROM AppUser WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "user not found")
+        return row
+
+    @app.get("/api/admin/users")
+    def list_users():
+        with db.get_conn() as conn:
+            return {"users": _users(conn)}
+
+    @app.post("/api/admin/users")
+    def create_user(body: UserCreate):
+        with db.get_conn() as conn:
+            try:
+                conn.execute("INSERT INTO AppUser (name, password_hash, is_admin) VALUES (?, ?, ?)",
+                             (body.name, auth.hash_password(body.password), int(body.is_admin)))
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, f"user name already taken: {body.name}") from None
+            return {"users": _users(conn)}
+
+    @app.patch("/api/admin/users/{user_id}")
+    def update_user(user_id: int, body: UserUpdate, request: Request):
+        with db.get_conn() as conn:
+            target = _admin_target(conn, user_id)
+            if body.is_admin is False and target["is_admin"]:
+                if user_id == auth.OWNER_ID:
+                    raise HTTPException(409, "the owner (user 1) stays an admin")
+                if user_id == _uid(request):
+                    raise HTTPException(409, "you can't remove your own admin rights")
+            if body.is_admin is not None:
+                conn.execute("UPDATE AppUser SET is_admin = ? WHERE id = ?", (int(body.is_admin), user_id))
+            if body.password is not None:
+                conn.execute("UPDATE AppUser SET password_hash = ? WHERE id = ?",
+                             (auth.hash_password(body.password), user_id))
+            users = _users(conn)
+        if body.password is not None and user_id != _uid(request):
+            auth.end_user_sessions(user_id)
+        return {"users": users}
+
+    @app.delete("/api/admin/users/{user_id}")
+    def delete_user(user_id: int, request: Request):
+        if user_id in (auth.OWNER_ID, _uid(request)):
+            raise HTTPException(409, "the owner and your own account can't be deleted")
+        with db.get_conn() as conn:
+            _admin_target(conn, user_id)
+            conn.execute("DELETE FROM FeedbackLog WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM UserProfile WHERE id = ?", (user_id,))
+            conn.execute("DELETE FROM AppUser WHERE id = ?", (user_id,))  # cascades to reads + chats
+            users = _users(conn)
+        auth.end_user_sessions(user_id)
+        return {"users": users}
 
     # --- feeds ---
     @app.get("/api/feeds")

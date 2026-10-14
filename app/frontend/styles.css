@@ -399,6 +399,11 @@ body.unsigned-in .interaction { display: none; }
 .pref-row input.tag-input { flex: 1; max-width: 240px; color: var(--text); }
 .pref-row input:focus { outline: none; border-color: var(--accent); }
 .add-weight { border-bottom: 1px dashed var(--border); margin-bottom: 4px; padding-bottom: 6px; }
+.pw-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.pw-row input { flex: 1; min-width: 140px; }
+.users .toggle { min-width: 72px; font-size: 12px; }
+.add-feed .check input { flex: none; min-width: 0; }
+.users .toggle[aria-pressed="true"] { border-color: var(--accent); }
 .user-profile .muted { color: var(--muted); font-size: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; margin-bottom: 12px; }
 .field .hint { margin: 0; }
