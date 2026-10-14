@@ -63,6 +63,14 @@ CREATE TABLE IF NOT EXISTS Story (
 
 CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);
 
+-- Ids of merged-away stories -> the story that absorbed them, so /s/<id> links survive merges.
+-- New stories never reuse an aliased id (clustering.decide_story).
+CREATE TABLE IF NOT EXISTS StoryAlias (
+    old_id   INTEGER PRIMARY KEY,
+    story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_storyalias_story ON StoryAlias(story_id);
+
 -- Accounts. Stories, summaries and classifications are shared; profile, votes, read
 -- state, chats and personal briefs are per user. User 1 (admin) owns the single-user era
 -- data and logs in with NEWS_AUTH_PASSWORD until it sets a password of its own.

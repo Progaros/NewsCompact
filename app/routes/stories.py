@@ -55,7 +55,7 @@ def get_story(story_id: int, request: Request, view: Literal["personal", "defaul
     user = current_user(request)
     uid = user["id"] if user else None
     with db.get_conn() as conn:
-        payload = stories.load_story(conn, story_id, uid, personal=view == "personal")
+        payload = stories.load_story(conn, stories.resolve_id(conn, story_id), uid, personal=view == "personal")
     if payload is None:
         raise HTTPException(404, "story not found")
     return private(payload, uid is not None)

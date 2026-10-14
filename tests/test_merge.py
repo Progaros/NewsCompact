@@ -26,6 +26,31 @@ def test_merge_pass_folds_verified_duplicates(feed_id, llm):
         assert conn.execute("SELECT count(*) FROM Article WHERE t_merge_s IS NOT NULL").fetchone()[0] >= 1
 
 
+def test_story_links_follow_merges_until_deletion(feed_id, llm, client):
+    from app import retention
+
+    _make_two_stories(feed_id, llm)
+    with db.get_conn() as conn:
+        ids = [r[0] for r in conn.execute("SELECT id FROM Story ORDER BY id")]
+        merge._absorb(conn, ids[0], ids[-1])
+    assert client.get(f"/api/stories/{ids[-1]}?view=default").json()["id"] == ids[0]
+
+    llm.verdict = "UNRELATED"
+    add_article(feed_id, "Volcano erupts")
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        newest = conn.execute("SELECT max(id) FROM Story").fetchone()[0]
+        assert newest > ids[-1]  # the merged-away id is not reused
+        merge._absorb(conn, newest, ids[0])
+    for sid in (ids[0], ids[-1]):
+        assert client.get(f"/api/stories/{sid}?view=default").json()["id"] == newest
+
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Story SET updated_at = datetime('now', '-400 days') WHERE id = ?", (newest,))
+    retention.run()
+    assert client.get(f"/api/stories/{ids[-1]}?view=default").status_code == 404
+
+
 def test_merge_reaches_stories_older_than_the_cluster_window(feed_id, llm):
     _make_two_stories(feed_id, llm)
     with db.get_conn() as conn:

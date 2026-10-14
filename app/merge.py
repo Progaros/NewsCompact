@@ -91,6 +91,8 @@ def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
         if other != keep and not conn.execute("SELECT 1 FROM StoryLink WHERE a = ? AND b = ?",
                                               sorted((keep, other))).fetchone():
             clustering.link_stories(conn, keep, other, relation, source, at)
+    conn.execute("UPDATE StoryAlias SET story_id = ? WHERE story_id = ?", (keep, drop))
+    conn.execute("INSERT OR REPLACE INTO StoryAlias (old_id, story_id) VALUES (?, ?)", (drop, keep))
     conn.execute("DELETE FROM Story WHERE id = ?", (drop,))
     return moved
 

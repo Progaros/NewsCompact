@@ -293,8 +293,10 @@ def decide_story(conn: sqlite3.Connection, vec: Vector,
         log.info("reviving story %d (anchor sim=%.3f)", sid, sim)
         return sid, False, True
 
+    # Explicit id: SQLite would otherwise reuse a merged-away (aliased) max id.
     cur = conn.execute(
-        "INSERT INTO Story (headline, summary, tags, metrics, quality_score) "
-        "VALUES (NULL, NULL, '[]', '{}', 5.0)"
+        "INSERT INTO Story (id, headline, summary, tags, metrics, quality_score) "
+        "VALUES (MAX((SELECT COALESCE(MAX(id), 0) FROM Story), "
+        "(SELECT COALESCE(MAX(old_id), 0) FROM StoryAlias)) + 1, NULL, NULL, '[]', '{}', 5.0)"
     )
     return cur.lastrowid, True, False

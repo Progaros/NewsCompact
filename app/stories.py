@@ -71,6 +71,12 @@ def load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = No
                          clustering.related_stories(conn, [story_id], exclude=exclude)[story_id])
 
 
+def resolve_id(conn: sqlite3.Connection, story_id: int) -> int:
+    """The story that absorbed ``story_id`` in a merge, else ``story_id`` itself."""
+    row = conn.execute("SELECT story_id FROM StoryAlias WHERE old_id = ?", (story_id,)).fetchone()
+    return row[0] if row else story_id
+
+
 def exists(conn: sqlite3.Connection, story_id: int) -> bool:
     return conn.execute("SELECT 1 FROM Story WHERE id = ?", (story_id,)).fetchone() is not None
 
