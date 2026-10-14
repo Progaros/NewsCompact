@@ -45,12 +45,14 @@ _MIGRATIONS = (
     ("ChatMessage", "parent_id", "INTEGER"),
     ("ChatSession", "leaf_id", "INTEGER"),
     ("UserProfile", "feed_weights", "TEXT DEFAULT '{}'"),
+    ("FeedbackLog", "user_id", "INTEGER NOT NULL DEFAULT 1"),
 )
 # Indexes on migrated columns (schema.sql runs before the columns exist on old DBs).
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_article_url_key ON Article(url_key)",
     "CREATE INDEX IF NOT EXISTS idx_article_title_key ON Article(title_key)",
     "CREATE INDEX IF NOT EXISTS idx_article_duplicate ON Article(duplicate_of)",
+    "CREATE INDEX IF NOT EXISTS idx_feedback_user ON FeedbackLog(user_id)",
 )
 
 VECTOR_TABLE = "Article_Vectors"
@@ -140,9 +142,37 @@ def _news_at(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE Story SET news_at = updated_at WHERE news_at IS NULL")
 
 
-# (user_version, migration) — each runs once, inside a transaction.
+def _per_user(conn: sqlite3.Connection) -> None:
+    """v6: read state and chats become per user; the single-user data belongs to user 1."""
+    if "user_id" not in {r[1] for r in conn.execute("PRAGMA table_info(FeedbackLog)")}:  # v3 rebuilt it
+        conn.execute("ALTER TABLE FeedbackLog ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_user ON FeedbackLog(user_id)")
+    if "user_id" not in {r[1] for r in conn.execute("PRAGMA table_info(StoryRead)")}:
+        conn.execute(
+            "CREATE TABLE StoryRead_new (user_id INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE, "
+            "story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE, "
+            "read_at TEXT NOT NULL DEFAULT (datetime('now')), summary TEXT, PRIMARY KEY (user_id, story_id))")
+        conn.execute("INSERT INTO StoryRead_new (user_id, story_id, read_at, summary) "
+                     "SELECT 1, story_id, read_at, summary FROM StoryRead")
+        conn.execute("DROP TABLE StoryRead")
+        conn.execute("ALTER TABLE StoryRead_new RENAME TO StoryRead")
+    if "user_id" not in {r[1] for r in conn.execute("PRAGMA table_info(ChatSession)")}:
+        conn.execute(
+            "CREATE TABLE ChatSession_new (id INTEGER PRIMARY KEY, "
+            "user_id INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE, "
+            "story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE, leaf_id INTEGER, "
+            "created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), "
+            "UNIQUE (user_id, story_id))")
+        conn.execute("INSERT INTO ChatSession_new (id, user_id, story_id, leaf_id, created_at, updated_at) "
+                     "SELECT id, 1, story_id, leaf_id, created_at, updated_at FROM ChatSession")
+        conn.execute("DROP TABLE ChatSession")
+        conn.execute("ALTER TABLE ChatSession_new RENAME TO ChatSession")
+
+
+# (user_version, migration) — each runs once, inside a transaction (foreign keys off,
+# so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
-                    (5, _news_at))
+                    (5, _news_at), (6, _per_user))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -161,6 +191,7 @@ def init_db() -> None:
         for ddl in _INDEXES:
             conn.execute(ddl)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.execute("PRAGMA foreign_keys=OFF")
         for target, migrate in _DATA_MIGRATIONS:
             if version < target:
                 conn.execute("BEGIN")
@@ -171,6 +202,7 @@ def init_db() -> None:
                 except Exception:
                     conn.execute("ROLLBACK")
                     raise
+        conn.execute("PRAGMA foreign_keys=ON")
         for row in conn.execute(
             "SELECT id, content_raw FROM Article WHERE content_class IS NULL"
         ).fetchall():

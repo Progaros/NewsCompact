@@ -34,6 +34,9 @@ def _legacy_db(path):
         INSERT INTO ChatSession (id, story_id) VALUES (1, 5);
         INSERT INTO ChatMessage (id, session_id, role, content) VALUES
             (1, 1, 'user', 'q1'), (2, 1, 'assistant', 'a1'), (3, 1, 'user', 'q2');
+        CREATE TABLE StoryRead (story_id INTEGER PRIMARY KEY REFERENCES Story(id) ON DELETE CASCADE,
+                                read_at TEXT NOT NULL DEFAULT (datetime('now')), summary TEXT);
+        INSERT INTO StoryRead (story_id, summary) VALUES (5, 'old summary');
     """)
     conn.execute(f"CREATE VIRTUAL TABLE Experiment_Embeddings USING vec0(article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])")
     conn.execute(f"CREATE VIRTUAL TABLE Article_Embeddings USING vec0(article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])")
@@ -53,7 +56,13 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert tuple(conn.execute("SELECT user_id, story_id FROM ChatSession").fetchone()) == (1, 5)
+        assert tuple(conn.execute("SELECT user_id, story_id, summary FROM StoryRead").fetchone()) == (
+            1, 5, "old summary")
+        assert conn.execute("SELECT user_id FROM FeedbackLog").fetchone()[0] == 1
+        assert tuple(conn.execute("SELECT name, is_admin FROM AppUser WHERE id = 1").fetchone()) == ("admin", 1)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT news_at IS updated_at FROM Story WHERE id = 5").fetchone()[0] == 1
         assert [tuple(r) for r in conn.execute("SELECT id, parent_id FROM ChatMessage ORDER BY id")] == [
             (1, None), (2, 1), (3, 2)]

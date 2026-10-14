@@ -4,7 +4,7 @@
 const Auth = (() => {
   const TOAST_MS = 8000; // toasts auto-dismiss after this (spec: 5–10 s)
 
-  const state = { authenticated: false, authEnabled: false };
+  const state = { authenticated: false, authEnabled: false, user: null };
   const listeners = [];
   let toastTimer = null;
 
@@ -15,6 +15,7 @@ const Auth = (() => {
         const d = await res.json();
         state.authenticated = !!d.authenticated;
         state.authEnabled = !!d.auth_enabled;
+        state.user = d.user || null;
       }
     } catch {
       // network hiccup at boot — stay unsigned in, no UI harm
@@ -34,9 +35,10 @@ const Auth = (() => {
   }
 
   /* body class makes the page read-only for a not-signed-in viewer:
-   * hides 👍/👎 (`.interaction`) and the Feeds subpage link. */
+   * hides 👍/👎 (`.interaction`); `.is-admin` shows the management links (Feeds, Users). */
   function applyDom() {
     document.body.classList.toggle("unsigned-in", state.authEnabled && !state.authenticated);
+    document.body.classList.toggle("is-admin", !!(state.authenticated && state.user?.is_admin));
     renderHeader();
   }
 
@@ -52,7 +54,8 @@ const Auth = (() => {
       controls.appendChild(el);
     }
     if (!state.authEnabled || state.authenticated) {
-      el.innerHTML = `<span aria-hidden="true">\u2699</span><span class="btn-label"> Preferences</span>`;
+      const name = state.user?.name || "Preferences";
+      el.innerHTML = `<span aria-hidden="true">\u2699</span><span class="btn-label"> ${esc(name)}</span>`;
       el.title = state.authEnabled ? "Preferences & sign out" : "Preferences";
       el.setAttribute("aria-label", "Preferences");
       el.onclick = () => showUserModal();
@@ -69,6 +72,7 @@ const Auth = (() => {
       await fetch("/api/auth/logout", { method: "POST" });
     } catch { /* ignore */ }
     state.authenticated = false;
+    state.user = null;
     applyDom();
     _notify();
   }
@@ -81,7 +85,7 @@ const Auth = (() => {
     overlay.id = "user-modal";
     overlay.innerHTML = `
       <form class="login-panel user-panel" id="prefs-form">
-        <h2>Preferences</h2>
+        <h2>Preferences${state.user ? ` <span class="muted">· ${esc(state.user.name)}</span>` : ""}</h2>
         <div id="user-profile" class="user-profile">Loading\u2026</div>
         <div class="login-row">
           ${state.authEnabled ? `<button type="button" class="btn" id="user-signout">Sign out</button>` : ""}
@@ -103,7 +107,7 @@ const Auth = (() => {
     let reports = [];
     let feedOverrides = {};
     let excluded = new Set();
-    let ntfy = { enabled: false, kinds: {} };
+    let ntfy = null;
     fetch("/api/profile")
       .then((res) => (unauth(res) ? null : res.json()))
       .then((p) => {
@@ -112,10 +116,10 @@ const Auth = (() => {
         reports = (p.ntfy_reports || []).map((r) => ({ ...r, days: [...(r.days || [])] }));
         feedOverrides = { ...(p.feed_weights || {}) };
         excluded = new Set(((p.preferences || {}).excluded_feeds || []).map(String));
-        ntfy = p.ntfy || ntfy;
+        ntfy = p.ntfy || null; // admins only
         box.innerHTML = renderProfileForm(p.preferences || {}, ntfy);
         renderTrust(box, p.source_trust || {}, p.feed_trust || [], feedOverrides, excluded);
-        renderReports(box, reports, ntfy);
+        if (ntfy) renderReports(box, reports, ntfy);
         renderWeights(box, weights);
       })
       .catch(() => { box.textContent = "(profile unavailable)"; });
@@ -134,7 +138,7 @@ const Auth = (() => {
             interest_regions: list("interest_regions"),
             locations: list("locations"),
             min_quality: isNaN(minQ) ? 0 : Math.min(10, Math.max(0, minQ)),
-            ntfy_reports: reports.filter((r) => r.time),
+            ntfy_reports: ntfy ? reports.filter((r) => r.time) : undefined,
             excluded_feeds: [...excluded].map(Number),
           },
           tag_weights: weights,
@@ -163,12 +167,12 @@ const Auth = (() => {
         <div class="user-section-label">Source trust</div>
         <p class="hint">How much a source counts as independent confirmation (credibility) and how much its articles weigh in story quality. 0 = ignore, 1 = full. Expand a category to set single sources; ⊘ hides a source from your “For you” feed.</p>
         <div id="trust"></div>
-      </div>
+      </div>${ntfy ? `
       <div class="user-section">
         <div class="user-section-label">Scheduled ntfy reports <button type="button" class="link" id="add-report">+ add</button></div>
         <p class="hint">${ntfy.enabled ? `Server time now ${esc(ntfy.server_time)}.` : "ntfy is not configured on the server (NEWS_HEADS_UP_NTFY_URL)."}</p>
         <div id="reports"></div>
-      </div>
+      </div>` : ""}
       <div class="user-section">
         <div class="user-section-label">Tag weights <button type="button" class="link" id="reset-weights">reset all</button></div>
         <p class="hint">Learned from 👍/👎; edit any value (−10 … 10) or add tags. Positive = more like this.</p>
@@ -364,8 +368,10 @@ const Auth = (() => {
     overlay.innerHTML = `
       <div class="login-panel">
         <h2>Sign in</h2>
-        <p class="hint">Enter the app password to get full access.</p>
+        <p class="hint">Sign in for your personal feed, chat and preferences.</p>
         <form id="login-form">
+          <input type="text" name="username" placeholder="User name" maxlength="80"
+                 autocomplete="username" autocapitalize="none" spellcheck="false" required />
           <input type="password" name="password" placeholder="Password"
                  autocomplete="current-password" required />
           <div class="login-row">
@@ -378,8 +384,9 @@ const Auth = (() => {
     document.body.appendChild(overlay);
     const form = overlay.querySelector("#login-form");
     const err = overlay.querySelector(".login-error");
-    const pwInput = form.querySelector("input");
-    pwInput.focus();
+    const nameInput = form.elements.username;
+    const pwInput = form.elements.password;
+    nameInput.focus();
     const close = () => overlay.remove();
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) close();
@@ -390,10 +397,11 @@ const Auth = (() => {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pwInput.value }),
+        body: JSON.stringify({ username: nameInput.value.trim(), password: pwInput.value }),
       });
       if (res.ok) {
         state.authenticated = true;
+        state.user = (await res.json()).user || state.user;
         close();
         applyDom();
         _notify();
@@ -401,7 +409,7 @@ const Auth = (() => {
         err.hidden = false;
         err.textContent = res.status === 429
           ? "Too many attempts — wait a minute."
-          : "Wrong password.";
+          : "Wrong user name or password.";
         pwInput.select();
       }
     });

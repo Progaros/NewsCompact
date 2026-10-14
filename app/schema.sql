@@ -63,7 +63,20 @@ CREATE TABLE IF NOT EXISTS Story (
 
 CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);
 
--- Single local user.
+-- Accounts. Stories, summaries and classifications are shared; profile, votes, read
+-- state, chats and personal briefs are per user. User 1 (admin) owns the single-user era
+-- data and logs in with NEWS_AUTH_PASSWORD until it sets a password of its own.
+CREATE TABLE IF NOT EXISTS AppUser (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT,                       -- scrypt (app/auth.py); NULL = NEWS_AUTH_PASSWORD (user 1 only)
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT    DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO AppUser (id, name, is_admin) VALUES (1, 'admin', 1);
+
+-- One row per user (id = AppUser.id), created on first use.
 CREATE TABLE IF NOT EXISTS UserProfile (
     id             INTEGER PRIMARY KEY,
     tag_weights    TEXT DEFAULT '{}',
@@ -79,6 +92,7 @@ VALUES (1, '{}', '{}', '{"min_quality": 0.0, "summary_length": "medium"}');
 -- Headline/tags are snapshotted: votes outlive the story (retention).
 CREATE TABLE IF NOT EXISTS FeedbackLog (
     id         INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL DEFAULT 1,
     story_id   INTEGER,
     headline   TEXT,
     tags       TEXT,
@@ -87,12 +101,14 @@ CREATE TABLE IF NOT EXISTS FeedbackLog (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id);
 
--- Stories marked read (single user). A story is unread again once
+-- Stories marked read, per user. A story is unread again once
 -- COALESCE(Story.material_at, Story.created_at) > read_at.
 CREATE TABLE IF NOT EXISTS StoryRead (
-    story_id INTEGER PRIMARY KEY REFERENCES Story(id) ON DELETE CASCADE,
+    user_id  INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE,
+    story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     read_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    summary  TEXT                     -- the summary as it was when marked read
+    summary  TEXT,                    -- the summary as it was when marked read
+    PRIMARY KEY (user_id, story_id)
 );
 
 -- URLs of deleted articles, so feeds that still list them don't re-ingest them.
@@ -101,14 +117,16 @@ CREATE TABLE IF NOT EXISTS ArticleTombstone (
     deleted_at TEXT DEFAULT (datetime('now'))
 );
 
--- Per-story chat: one session per story (single user). Messages form a tree: editing a
+-- Per-story chat: one session per user and story. Messages form a tree: editing a
 -- message adds a sibling (same parent_id); leaf_id is the end of the branch on screen.
 CREATE TABLE IF NOT EXISTS ChatSession (
     id         INTEGER PRIMARY KEY,
-    story_id   INTEGER NOT NULL UNIQUE REFERENCES Story(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE,
+    story_id   INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     leaf_id    INTEGER,
     created_at TEXT    DEFAULT (datetime('now')),
-    updated_at TEXT    DEFAULT (datetime('now'))
+    updated_at TEXT    DEFAULT (datetime('now')),
+    UNIQUE (user_id, story_id)
 );
 
 CREATE TABLE IF NOT EXISTS ChatMessage (

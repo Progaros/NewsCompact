@@ -2,7 +2,8 @@
 
 Local-first web app that ingests RSS feeds, clusters related articles into
 **stories** with a local Ollama LLM, summarizes them, scores their quality and
-ranks them for one user. Everything lives in one SQLite file (`news.db`,
+ranks them for several users (shared AI summaries and classifications;
+per-user preferences, votes, read state, chats and briefs). Everything lives in one SQLite file (`news.db`,
 including the sqlite-vec embedding table) plus HTTP calls to Ollama.
 
 ## Quickstart
@@ -21,9 +22,11 @@ scripts/shutdown.sh [secs]     # graceful stop, SIGKILL after timeout (default 2
 uv run pytest                  # tests (fake LLM, temp DB)
 ```
 
-Feeds are managed in the UI (`/feeds`). Set `NEWS_AUTH_PASSWORD` to require a
+Feeds are managed in the UI (`/feeds`, admins only). Set `NEWS_AUTH_PASSWORD` to require a
 login for everything except the read-only story views — put it (and any other
-`NEWS_*` settings) in a gitignored `.env`; `start.sh` sources it.
+`NEWS_*` settings) in a gitignored `.env`; `start.sh` sources it. The admin user
+`admin` (user 1, owner of all data from the single-user era) signs in with that
+password; further users are stored in `AppUser` with their own scrypt password hashes.
 
 ## How it works
 
@@ -160,12 +163,14 @@ flowchart LR
 | `POST /api/refresh` | Ingest now and drain the pipeline queue (blocking) |
 | `GET /api/health` | Counts, pending, dead letter, worker status |
 | `GET /api/events` | SSE stream |
-| `GET /api/auth/session` · `POST /api/auth/login` · `POST /api/auth/logout` | Session |
+| `GET /api/auth/session` · `POST /api/auth/login` `{"username", "password"}` · `POST /api/auth/logout` | Session (`user`: id, name, is_admin; an empty user name logs in as user 1) |
 
 With auth enabled, only `/`, `/list`, `/static/*`, the auth endpoints and
 `GET` on stories (not chat), articles, heads-up, health and events are public;
-the owner's read state is stripped from those public responses.
-Without a password (open mode) everything else is limited to LAN clients
+read state is stripped from those public responses. Feeds, refresh and ntfy
+reports are admin-only (403 for other users).
+Without a password (open mode) everything else is limited to LAN clients, who act
+as user 1 unless they sign in as someone else
 (private/loopback addresses, judged by the address nginx appends to
 `X-Forwarded-For`).
 All writes are rejected when the browser's `Origin` is another site (CSRF), and
@@ -266,10 +271,11 @@ Environment variables; defaults in [app/config.py](app/config.py).
 - `Story` — headline, summary, tags, metrics (urgency, impact, status,
   location, language), `quality_score`, `created_at`, `updated_at`, `merge_checked_at`,
   `material_at` (last update significant enough to resurface a read story)
-- `StoryRead` — stories marked read (`read_at`, summary snapshot)
+- `StoryRead` — stories marked read per user (`read_at`, summary snapshot)
 - `Article_Vectors` — vec0 `FLOAT[1024]`, cosine, primary key `article_id`
-- `UserProfile` (tag weights, source trust, preferences incl. ntfy report schedules),
-  `FeedbackLog`, `ArticleTombstone`, `ChatSession`, `ChatMessage`
+- `AppUser` (name, scrypt password hash, `is_admin`); per user: `UserProfile` (id = user id;
+  tag weights, source trust, preferences incl. ntfy report schedules for admins),
+  `FeedbackLog`, `ChatSession` (+ `ChatMessage` tree); shared: `ArticleTombstone`
 
 Schema upgrades and data migrations (`PRAGMA user_version`) run automatically
 at startup (`app/db.py`).

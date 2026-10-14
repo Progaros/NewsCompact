@@ -72,6 +72,7 @@ class CategoryUpdate(BaseModel):
 
 
 class Login(BaseModel):
+    username: str = Field("", max_length=80)  # empty = the owner (user 1)
     password: str = Field(max_length=1024)
 
 
@@ -137,19 +138,30 @@ def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]
     }
 
 
-def _load_story(conn: sqlite3.Connection, story_id: int, personal: bool = True) -> dict[str, Any]:
+def _load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = None,
+                personal: bool = True) -> dict[str, Any]:
+    """One story scored for ``user_id`` (personal view) or the default view; read state of ``user_id``."""
     s = conn.execute("SELECT * FROM Story WHERE id = ?", (story_id,)).fetchone()
     if s is None:
         raise HTTPException(404, "story not found")
-    profile = scoring.get_user_profile(conn) if personal else scoring.DEFAULT_PROFILE
+    personal = personal and user_id is not None
+    profile = scoring.get_user_profile(conn, user_id) if personal else scoring.DEFAULT_PROFILE
     exclude = scoring.excluded_feeds(profile)
     st = scoring.source_stats(conn, scoring.feed_trust(conn, profile), story_id, exclude).get(
         story_id, {"feeds": 0, "trust": 0.0, "quality": None})
     quality = st["quality"] if st["quality"] is not None else s["quality_score"]
     relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality, personal)
     item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
-            "display": display, **scoring.read_states(conn).get(story_id, {"read": None})}
+            "display": display, **scoring.read_states(conn, user_id).get(story_id, {"read": None})}
     return _story_payload(item, _articles_by_story(conn, [story_id], exclude)[story_id])
+
+
+_ADMIN_PREFIXES = ("/feeds", "/api/feeds", "/api/refresh", "/api/reports", "/api/admin", "/admin")
+
+
+def _admin_only(path: str) -> bool:
+    """Shared-instance management: feeds, refresh, ntfy reports, user administration."""
+    return any(path == p or path.startswith(p + "/") for p in _ADMIN_PREFIXES)
 
 
 def _is_public(request: Request) -> bool:
@@ -230,16 +242,22 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
+        user = request.state.user = await asyncio.to_thread(
+            auth.current_user, request.cookies.get(config.AUTH_COOKIE))
         if not _is_public(request):
             if not auth.auth_enabled():
                 # Open mode is a LAN convenience; never hand management/chat to the internet.
                 if not _from_lan(request):
                     return JSONResponse(status_code=403, content={
                         "detail": "open mode is LAN-only — set NEWS_AUTH_PASSWORD for remote access"})
-            elif not auth.is_authenticated(request.cookies.get(config.AUTH_COOKIE)):
-                if request.url.path == "/feeds":
+            elif user is None:
+                if request.url.path in ("/feeds", "/admin"):
                     return RedirectResponse("/", status_code=303)
                 return JSONResponse(status_code=401, content={"detail": "unauthenticated"})
+            if _admin_only(request.url.path) and not (user and user["is_admin"]):
+                if request.url.path in ("/feeds", "/admin"):
+                    return RedirectResponse("/", status_code=303)
+                return JSONResponse(status_code=403, content={"detail": "admins only"})
         return await call_next(request)
 
     @app.middleware("http")
@@ -272,11 +290,19 @@ def create_app() -> FastAPI:
     def list_page():
         return FileResponse(_FRONTEND / "list.html", headers=_NO_CACHE)
 
-    def _is_owner(request: Request) -> bool:
-        return auth.is_authenticated(request.cookies.get(config.AUTH_COOKIE))
+    def _user(request: Request) -> dict[str, Any] | None:
+        """Signed-in user (set by the auth middleware); None for anonymous visitors."""
+        return getattr(request.state, "user", None)
+
+    def _uid(request: Request) -> int:
+        """Id of the signed-in user on routes the middleware already restricted to users."""
+        user = _user(request)
+        if user is None:
+            raise HTTPException(401, "unauthenticated")
+        return user["id"]
 
     def _private(payload: dict[str, Any], owner: bool) -> dict[str, Any]:
-        """The owner's read state is not part of the public read-only view."""
+        """A user's read state is not part of the public read-only view."""
         if not owner:
             payload.update(read=None, read_at=None, read_summary=None)
         return payload
@@ -291,15 +317,16 @@ def create_app() -> FastAPI:
 
         ``view=personal`` (signed-in only) ranks with the user's interests and settings.
         """
-        owner = _is_owner(request)
-        personal = owner and view == "personal"
+        user = _user(request)
+        uid = user["id"] if user else None
+        personal = uid is not None and view == "personal"
         keep_ids = {int(x) for x in keep.split(",") if x.strip().isdigit()}
         with db.get_conn() as conn:
-            profile = scoring.get_user_profile(conn) if personal else scoring.DEFAULT_PROFILE
+            profile = scoring.get_user_profile(conn, uid) if personal else scoring.DEFAULT_PROFILE
             ranked = scoring.ranked_stories(conn, profile, archived=archived, query=q.strip(), tag=tag.strip(),
-                                            personal=personal)
+                                            personal=personal, user_id=uid)
             hidden = 0
-            if hide_read and owner and not archived:
+            if hide_read and uid is not None and not archived:
                 visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
                 hidden, ranked = len(ranked) - len(visible), visible
             page = ranked[:limit]
@@ -313,38 +340,42 @@ def create_app() -> FastAPI:
             "last_article": last_article,
             "active_days": config.STORY_ACTIVE_DAYS,
             "view": "personal" if personal else "default",
-            "stories": [_private(_story_payload(i, arts[i["story"]["id"]]), owner) for i in page],
+            "stories": [_private(_story_payload(i, arts[i["story"]["id"]]), uid is not None) for i in page],
         }
 
     @app.get("/api/stories/{story_id}")
     def get_story(story_id: int, request: Request, view: Literal["personal", "default"] = "personal"):
-        owner = _is_owner(request)
+        user = _user(request)
+        uid = user["id"] if user else None
         with db.get_conn() as conn:
-            return _private(_load_story(conn, story_id, personal=owner and view == "personal"), owner)
+            return _private(_load_story(conn, story_id, uid, personal=view == "personal"), uid is not None)
 
     @app.post("/api/stories/{story_id}/read")
-    def mark_read(story_id: int):
+    def mark_read(story_id: int, request: Request):
+        uid = _uid(request)
         with db.get_conn() as conn:
             s = conn.execute("SELECT summary FROM Story WHERE id = ?", (story_id,)).fetchone()
             if s is None:
                 raise HTTPException(404, "story not found")
-            conn.execute("INSERT OR REPLACE INTO StoryRead (story_id, read_at, summary) "
-                         "VALUES (?, datetime('now'), ?)", (story_id, s["summary"]))
+            conn.execute("INSERT OR REPLACE INTO StoryRead (user_id, story_id, read_at, summary) "
+                         "VALUES (?, ?, datetime('now'), ?)", (uid, story_id, s["summary"]))
         return {"ok": True, "read": "read"}
 
     @app.delete("/api/stories/{story_id}/read")
-    def mark_unread(story_id: int):
+    def mark_unread(story_id: int, request: Request):
+        uid = _uid(request)
         with db.get_conn() as conn:
-            conn.execute("DELETE FROM StoryRead WHERE story_id = ?", (story_id,))
+            conn.execute("DELETE FROM StoryRead WHERE user_id = ? AND story_id = ?", (uid, story_id))
         return {"ok": True, "read": None}
 
     @app.get("/api/heads-up")
     def get_heads_up(request: Request, view: Literal["personal", "default"] = "default"):
         """Never waits for the LLM: ``generating`` = a newer brief is on its way (poll again)."""
-        key = heads_up.PERSONAL if view == "personal" and _is_owner(request) else heads_up.DEFAULT
+        user = _user(request)
+        key = heads_up.user_key(user["id"]) if view == "personal" and user else heads_up.DEFAULT
         st = heads_up.status(key)
         return {**st, "text": st["text"] or ("Generating the brief…" if st["generating"] else "No brief available yet."),
-                "view": key}
+                "view": "default" if key == heads_up.DEFAULT else "personal"}
 
     # --- articles (/list) ---
     @app.get("/api/articles")
@@ -406,8 +437,9 @@ def create_app() -> FastAPI:
         return {"count": total, "order": order, "worker": worker.status, "articles": articles}
 
     # --- chat ---
-    def _chat_session(conn: sqlite3.Connection, story_id: int) -> sqlite3.Row | None:
-        return conn.execute("SELECT id, leaf_id FROM ChatSession WHERE story_id = ?", (story_id,)).fetchone()
+    def _chat_session(conn: sqlite3.Connection, story_id: int, uid: int) -> sqlite3.Row | None:
+        return conn.execute("SELECT id, leaf_id FROM ChatSession WHERE story_id = ? AND user_id = ?",
+                            (story_id, uid)).fetchone()
 
     def _chat_branch(conn: sqlite3.Connection, session: sqlite3.Row | None) -> list[dict[str, Any]]:
         """Messages from the first one to the session's leaf, each with its versions (siblings)."""
@@ -431,25 +463,27 @@ def create_app() -> FastAPI:
                         "version": versions.index(m["id"]) + 1})
         return out
 
-    def _chat_payload(conn: sqlite3.Connection, story_id: int) -> dict[str, Any]:
+    def _chat_payload(conn: sqlite3.Connection, story_id: int, uid: int) -> dict[str, Any]:
         return {
             "story_id": story_id,
-            "messages": _chat_branch(conn, _chat_session(conn, story_id)),
+            "messages": _chat_branch(conn, _chat_session(conn, story_id, uid)),
             "search_turns_options": config.CHAT_SEARCH_TURNS,
         }
 
     @app.get("/api/stories/{story_id}/chat")
-    def get_chat(story_id: int):
+    def get_chat(story_id: int, request: Request):
+        uid = _uid(request)
         with db.get_conn() as conn:
             if conn.execute("SELECT 1 FROM Story WHERE id = ?", (story_id,)).fetchone() is None:
                 raise HTTPException(404, "story not found")
-            return _chat_payload(conn, story_id)
+            return _chat_payload(conn, story_id, uid)
 
     @app.post("/api/stories/{story_id}/chat/switch")
-    def switch_chat_version(story_id: int, body: ChatSwitch):
+    def switch_chat_version(story_id: int, body: ChatSwitch, request: Request):
         """Show another version of a message (and the latest replies that follow it)."""
+        uid = _uid(request)
         with db.get_conn() as conn:
-            session = _chat_session(conn, story_id)
+            session = _chat_session(conn, story_id, uid)
             if session is None or conn.execute("SELECT 1 FROM ChatMessage WHERE id = ? AND session_id = ?",
                                                (body.message_id, session["id"])).fetchone() is None:
                 raise HTTPException(404, "message not found")
@@ -458,17 +492,18 @@ def create_app() -> FastAPI:
                                          (leaf,)).fetchone()[0]) is not None:
                 leaf = child
             conn.execute("UPDATE ChatSession SET leaf_id = ? WHERE id = ?", (leaf, session["id"]))
-            return _chat_payload(conn, story_id)
+            return _chat_payload(conn, story_id, uid)
 
     @app.post("/api/stories/{story_id}/chat")
-    def post_chat(story_id: int, body: ChatSend):
+    def post_chat(story_id: int, body: ChatSend, request: Request):
+        uid = _uid(request)
         text = (body.message or "").strip()
         if not text:
             raise HTTPException(400, "message must not be empty")
         with db.get_conn() as conn:
-            story = _load_story(conn, story_id)
-            conn.execute("INSERT OR IGNORE INTO ChatSession (story_id) VALUES (?)", (story_id,))
-            session = _chat_session(conn, story_id)
+            story = _load_story(conn, story_id, uid)
+            conn.execute("INSERT OR IGNORE INTO ChatSession (user_id, story_id) VALUES (?, ?)", (uid, story_id))
+            session = _chat_session(conn, story_id, uid)
             session_id = session["id"]
             branch = _chat_branch(conn, session)
             if body.edit_of is not None:
@@ -478,11 +513,11 @@ def create_app() -> FastAPI:
                     raise HTTPException(404, "message to edit not found")
                 branch = branch[:idx]
             history = [{"role": m["role"], "content": m["content"]} for m in branch[-_CHAT_HISTORY_MAX:]]
-            user_id = conn.execute(
+            question_id = conn.execute(
                 "INSERT INTO ChatMessage (session_id, parent_id, role, content) VALUES (?, ?, 'user', ?)",
                 (session_id, branch[-1]["id"] if branch else None, text),
             ).lastrowid
-            conn.execute("UPDATE ChatSession SET leaf_id = ? WHERE id = ?", (user_id, session_id))
+            conn.execute("UPDATE ChatSession SET leaf_id = ? WHERE id = ?", (question_id, session_id))
 
         def ndjson(record: dict[str, Any]) -> str:
             return json.dumps(record, ensure_ascii=False) + "\n"
@@ -504,11 +539,11 @@ def create_app() -> FastAPI:
                         reply_id = conn.execute(
                             "INSERT INTO ChatMessage (session_id, parent_id, role, content, steps) "
                             "VALUES (?, ?, 'assistant', ?, ?)",
-                            (session_id, user_id, reply,
+                            (session_id, question_id, reply,
                              json.dumps(steps, ensure_ascii=False) if steps else None),
                         ).lastrowid
                         conn.execute("UPDATE ChatSession SET leaf_id = ?, updated_at = datetime('now') "
-                                     "WHERE id = ? AND leaf_id = ?", (reply_id, session_id, user_id))
+                                     "WHERE id = ? AND leaf_id = ?", (reply_id, session_id, question_id))
 
             try:
                 for kind, payload in chat.stream(story, history, text, body.search_turns, steps):
@@ -535,18 +570,20 @@ def create_app() -> FastAPI:
     @app.post("/api/auth/login")
     def login(body: Login, request: Request):
         resp = JSONResponse({"ok": True})
-        if not auth.auth_enabled():
-            return resp
+        if not auth.auth_enabled() and not body.username.strip():
+            return resp  # open mode: LAN visitors already act as user 1
         ip = request.client.host if request.client else "unknown"
         if auth.login_throttled(ip):
             raise HTTPException(429, "too many failed attempts — try again shortly")
-        if not auth.check_password(body.password):
+        user = auth.authenticate(body.username, body.password)
+        if user is None:
             auth.record_failure(ip)
-            raise HTTPException(401, "incorrect password")
+            raise HTTPException(401, "incorrect user name or password")
         auth.clear_failures(ip)
+        resp = JSONResponse({"ok": True, "user": auth.public_user(user)})
         resp.set_cookie(
             config.AUTH_COOKIE,
-            auth.create_session(),
+            auth.create_session(user["id"]),
             max_age=int(config.AUTH_SESSION_HOURS * 3600),
             httponly=True,
             samesite="lax",
@@ -564,56 +601,67 @@ def create_app() -> FastAPI:
 
     @app.get("/api/auth/session")
     def session(request: Request):
+        user = _user(request)
         return {
             "auth_enabled": auth.auth_enabled(),
-            "authenticated": auth.is_authenticated(request.cookies.get(config.AUTH_COOKIE)),
+            "authenticated": user is not None,
+            "user": user,
         }
 
     # --- feedback / profile ---
     @app.post("/api/feedback")
-    def post_feedback(body: Feedback):
+    def post_feedback(body: Feedback, request: Request):
         if body.kind not in ("up", "down"):
             raise HTTPException(400, "kind must be 'up' or 'down'")
-        profile = scoring.apply_feedback(body.story_id, body.kind)
+        profile = scoring.apply_feedback(body.story_id, body.kind, _uid(request))
         if profile is None:
             raise HTTPException(404, "story not found")
         return {"ok": True, "profile": profile}
 
     @app.get("/api/feedback")
-    def get_feedback(limit: int = Query(200, ge=1, le=5000)):
-        return {"ok": True, "log": scoring.feedback_log(limit)}
+    def get_feedback(request: Request, limit: int = Query(200, ge=1, le=5000)):
+        return {"ok": True, "log": scoring.feedback_log(limit, _uid(request))}
 
     @app.get("/api/profile")
-    def get_profile():
+    def get_profile(request: Request):
+        user = _user(request)
+        uid = _uid(request)
         with db.get_conn() as conn:
-            profile = scoring.get_user_profile(conn)
+            profile = scoring.get_user_profile(conn, uid)
             trust = scoring.trust_weights(conn, profile)
             per_feed = scoring.feed_trust(conn, profile)
             feeds = conn.execute("SELECT id, title, COALESCE(category, '') AS category FROM Feed "
                                  "ORDER BY category, title COLLATE NOCASE").fetchall()
-        return {
+        out = {
             **profile,
+            "user": user,
             "source_trust": trust,
             "feed_trust": [{"id": f["id"], "title": f["title"], "category": f["category"],
                             "trust": per_feed[f["id"]], "custom": str(f["id"]) in profile["feed_weights"]}
                            for f in feeds],
-            "ntfy_reports": reports.schedules(profile),
-            "ntfy": {"enabled": bool(config.HEADS_UP_NTFY_URL), "kinds": reports.KINDS,
-                     "server_time": dt.datetime.now().strftime("%H:%M")},
         }
+        if user["is_admin"]:  # ntfy pushes go to the server's one topic
+            out["ntfy_reports"] = reports.schedules(profile)
+            out["ntfy"] = {"enabled": bool(config.HEADS_UP_NTFY_URL), "kinds": reports.KINDS,
+                           "server_time": dt.datetime.now().strftime("%H:%M")}
+        return out
 
     @app.put("/api/profile")
-    def put_profile(body: ProfileUpdate):
+    def put_profile(body: ProfileUpdate, request: Request):
+        user = _user(request)
+        uid = _uid(request)
         prefs = body.preferences.model_dump(exclude_none=True)
         for key in ("interest_regions", "locations"):
             if key in prefs:
                 prefs[key] = [v.strip() for v in prefs[key] if v.strip()]
+        if not user["is_admin"]:
+            prefs.pop("ntfy_reports", None)
         for s in prefs.get("ntfy_reports", []):
             s["days"] = sorted(set(s["days"]))
         if "excluded_feeds" in prefs:
             prefs["excluded_feeds"] = sorted(set(prefs["excluded_feeds"]))
-        scoring.update_profile(prefs, body.tag_weights, body.source_weights, body.feed_weights)
-        return get_profile()
+        scoring.update_profile(prefs, body.tag_weights, body.source_weights, body.feed_weights, user_id=uid)
+        return get_profile(request)
 
     # --- scheduled ntfy reports ---
     def _report_kind(kind: str) -> str:
@@ -622,14 +670,14 @@ def create_app() -> FastAPI:
         return kind
 
     @app.get("/api/reports/{kind}")
-    def preview_report(kind: str):
-        return {"text": reports.render(_report_kind(kind), fresh=False)}
+    def preview_report(kind: str, request: Request):
+        return {"text": reports.render(_report_kind(kind), fresh=False, user_id=_uid(request))}
 
     @app.post("/api/reports/{kind}/send")
-    def send_report(kind: str):
+    def send_report(kind: str, request: Request):
         if not config.HEADS_UP_NTFY_URL:
             raise HTTPException(409, "ntfy is not configured (NEWS_HEADS_UP_NTFY_URL)")
-        sent, text = reports.send(_report_kind(kind))
+        sent, text = reports.send(_report_kind(kind), _uid(request))
         if not sent:
             raise HTTPException(502, "no report text" if not text else "ntfy push failed")
         return {"ok": True, "text": text}

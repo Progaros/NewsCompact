@@ -1,7 +1,7 @@
 """Scheduled ntfy reports: the news brief and a daily pipeline report.
 
-Schedules are edited in ⚙ Preferences and stored in
-``UserProfile.preferences["ntfy_reports"]``::
+Schedules are edited in ⚙ Preferences by admins and stored in their
+``UserProfile.preferences["ntfy_reports"]`` (the brief is that admin's personal one)::
 
     [{"kind": "brief" | "pipeline", "time": "HH:MM", "days": [0..6], "enabled": bool}]
 
@@ -92,9 +92,10 @@ def pipeline_report(conn, hours: int = 24) -> str:
     return "\n".join(lines)
 
 
-def render(kind: str, fresh: bool = True) -> str | None:
+def render(kind: str, fresh: bool = True, user_id: int = 1) -> str | None:
     if kind == "brief":
-        return heads_up.brief(force=fresh, key=heads_up.PERSONAL)[0] or heads_up.last_brief(heads_up.PERSONAL)
+        key = heads_up.user_key(user_id)
+        return heads_up.brief(force=fresh, key=key)[0] or heads_up.last_brief(key)
     with db.get_conn() as conn:
         return pipeline_report(conn)
 
@@ -110,9 +111,9 @@ def _send_ntfy(text: str, title: str) -> bool:
         return False
 
 
-def send(kind: str) -> tuple[bool, str | None]:
+def send(kind: str, user_id: int = 1) -> tuple[bool, str | None]:
     """Render and push one report now; returns ``(sent, text)``."""
-    text = render(kind)
+    text = render(kind, user_id=user_id)
     if not text or not config.HEADS_UP_NTFY_URL:
         return False, text
     title = config.HEADS_UP_NTFY_TITLE if kind == "brief" else KINDS[kind]
@@ -142,14 +143,17 @@ def due(schedule: dict[str, Any], now: dt.datetime) -> bool:
 def tick(fired: dict[str, str], now: dt.datetime | None = None) -> None:
     now = now or dt.datetime.now()
     today = now.date().isoformat()
-    for s in schedules():
-        key = f"{s.get('kind')}@{s.get('time')}"
-        if not due(s, now) or fired.get(key) == today:
-            continue
-        fired[key] = today
-        sent, text = send(s["kind"])
-        log.info("scheduled %s report at %s: %s", s["kind"], s["time"],
-                 "sent" if sent else "skipped (no text)" if not text else "push failed")
+    with db.get_conn() as conn:
+        admins = [r[0] for r in conn.execute("SELECT id FROM AppUser WHERE is_admin = 1 ORDER BY id")]
+    for uid in admins:
+        for s in schedules(scoring.get_user_profile(user_id=uid)):
+            key = f"{uid}:{s.get('kind')}@{s.get('time')}"
+            if not due(s, now) or fired.get(key) == today:
+                continue
+            fired[key] = today
+            sent, text = send(s["kind"], uid)
+            log.info("scheduled %s report at %s (user %s): %s", s["kind"], s["time"], uid,
+                     "sent" if sent else "skipped (no text)" if not text else "push failed")
 
 
 def _loop() -> None:

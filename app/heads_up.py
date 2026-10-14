@@ -1,7 +1,7 @@
 """"Quick Heads Up" briefs, TTL-cached per view; scheduled pushes live in reports.py.
 
-One brief per view key: "default" (the public ranking) and "personal" (the
-signed-in user's ranking). /api/heads-up never waits for the LLM: a stale
+One brief per view key: "default" (the public ranking) and "user:<id>" (that
+user's personal ranking). /api/heads-up never waits for the LLM: a stale
 brief starts one background generation and the caller gets the previous text
 with ``generating=True``.
 """
@@ -18,7 +18,10 @@ from . import config, db, ollama, scoring
 log = logging.getLogger("news.heads-up")
 
 DEFAULT = "default"
-PERSONAL = "personal"
+
+
+def user_key(user_id: int) -> str:
+    return f"user:{int(user_id)}"
 
 _cache: dict[str, dict[str, Any]] = {}  # key -> {"text", "ts"}
 _cache_lock = threading.Lock()
@@ -86,8 +89,9 @@ def _background(key: str) -> None:
 
 
 def _generate(key: str, now: float) -> tuple[str | None, bool]:
+    user_id = int(key.removeprefix("user:")) if key != DEFAULT else None
     with db.get_conn() as conn:
-        top = scoring.ranked_stories(conn, personal=key != DEFAULT)[:5]
+        top = scoring.ranked_stories(conn, personal=user_id is not None, user_id=user_id)[:5]
     if not top:
         return None, False
     lines = []

@@ -48,7 +48,7 @@ body {
 }
 .nav a:hover { color: var(--text); background: var(--panel); }
 .nav a.active { color: var(--text); background: var(--panel-2); }
-body.unsigned-in .nav #feeds-link { display: none; }
+body:not(.is-admin) .nav .admin-link { display: none; }
 .dot {
   width: 10px; height: 10px; border-radius: 50%;
   background: var(--accent-2); box-shadow: 0 0 0 4px rgba(63,185,132,.2);
@@ -353,7 +353,7 @@ main:has(#article-list) table.feeds td:nth-child(2) { width: auto; }
 /* --- auth: read-only mode, login modal, toasts --------------------------- */
 /* Not signed in → page is read-only: no 👍/👎, no Feeds subpage link. */
 body.unsigned-in .interaction { display: none; }
-body.unsigned-in #feeds-link { display: none; }
+
 
 #login-modal, #user-modal {
   position: fixed; inset: 0; background: rgba(0, 0, 0, .55);

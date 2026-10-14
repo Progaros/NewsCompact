@@ -233,11 +233,13 @@ def news_time(story: sqlite3.Row) -> str | None:
     return story["news_at"] or story["updated_at"]
 
 
-def read_states(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
-    """``{story_id: {read: "read"|"updated", read_at, read_summary}}`` for stories marked read."""
+def read_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, dict[str, Any]]:
+    """``{story_id: {read: "read"|"updated", read_at, read_summary}}`` for the user's read stories."""
+    if user_id is None:
+        return {}
     rows = conn.execute(
         "SELECT r.story_id, r.read_at, r.summary, COALESCE(s.material_at, s.created_at) > r.read_at "
-        "FROM StoryRead r JOIN Story s ON s.id = r.story_id"
+        "FROM StoryRead r JOIN Story s ON s.id = r.story_id WHERE r.user_id = ?", (user_id,)
     )
     return {sid: {"read": "updated" if newer else "read", "read_at": at, "read_summary": summary}
             for sid, at, summary, newer in rows}
@@ -245,18 +247,22 @@ def read_states(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
 
 def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = None, *,
                    archived: bool = False, query: str = "", tag: str = "",
-                   personal: bool = True) -> list[dict[str, Any]]:
+                   personal: bool = True, user_id: int | None = 1) -> list[dict[str, Any]]:
     """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
     Active stories (news within STORY_ACTIVE_DAYS) are ranked by display
     score; ``archived`` returns the older ones, newest first.
     Honors ``preferences.min_quality`` and optional text / tag filters.
-    ``read`` is None, "read" or "updated" (significant update since it was read).
-    ``personal=False`` ranks the default view (DEFAULT_PROFILE, no distance).
+    ``read`` is None, "read" or "updated" (significant update since ``user_id`` read it).
+    ``personal=False`` ranks the default view (DEFAULT_PROFILE, no distance);
+    otherwise ``profile`` defaults to the profile of ``user_id``.
     """
-    profile = (profile or get_user_profile(conn)) if personal else DEFAULT_PROFILE
+    if not personal:
+        profile = DEFAULT_PROFILE
+    elif profile is None:
+        profile = get_user_profile(conn, user_id or 1)
     stats = source_stats(conn, feed_trust(conn, profile), exclude=excluded_feeds(profile))
-    reads = read_states(conn)
+    reads = read_states(conn, user_id)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     sql = ("SELECT * FROM Story WHERE headline IS NOT NULL AND COALESCE(news_at, updated_at) "
            + ("< ?" if archived else ">= ?"))
@@ -290,21 +296,21 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     return out
 
 
-# --- profile + feedback ----------------------------------------------------
-def get_user_profile(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+# --- profile + feedback (per user; user 1 = the owner from the single-user era) ---
+def get_user_profile(conn: sqlite3.Connection | None = None, user_id: int = 1) -> dict[str, Any]:
     if conn is None:
         with db.get_conn() as c:
-            return get_user_profile(c)
-    row = conn.execute("SELECT * FROM UserProfile WHERE id = 1").fetchone()
+            return get_user_profile(c, user_id)
+    row = conn.execute("SELECT * FROM UserProfile WHERE id = ?", (user_id,)).fetchone()
     if row is None:
         conn.execute(
-            "INSERT INTO UserProfile (id, tag_weights, source_weights, preferences) VALUES (1, '{}', '{}', ?)",
-            (json.dumps(_DEFAULT_PREFS),),
+            "INSERT OR IGNORE INTO UserProfile (id, tag_weights, source_weights, preferences) VALUES (?, '{}', '{}', ?)",
+            (user_id, json.dumps(_DEFAULT_PREFS)),
         )
-        return {"id": 1, "tag_weights": {}, "source_weights": {}, "feed_weights": {},
+        return {"id": user_id, "tag_weights": {}, "source_weights": {}, "feed_weights": {},
                 "preferences": dict(_DEFAULT_PREFS)}
     return {
-        "id": 1,
+        "id": user_id,
         "tag_weights": db.json_dict(row["tag_weights"]),
         "source_weights": db.json_dict(row["source_weights"]),
         "feed_weights": db.json_dict(row["feed_weights"]),
@@ -315,50 +321,51 @@ def get_user_profile(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
 def update_profile(preferences: dict[str, Any] | None = None,
                    tag_weights: dict[str, float] | None = None,
                    source_weights: dict[str, float] | None = None,
-                   feed_weights: dict[int, float] | None = None) -> dict[str, Any]:
+                   feed_weights: dict[int, float] | None = None, *, user_id: int = 1) -> dict[str, Any]:
     """Merge validated preferences; ``tag_weights`` / ``source_weights`` / ``feed_weights``
     (per-feed trust overrides, if given) replace the stored ones."""
     with db.get_conn() as conn:
-        profile = get_user_profile(conn)
+        profile = get_user_profile(conn, user_id)
         prefs = {**profile["preferences"], **(preferences or {})}
-        conn.execute("UPDATE UserProfile SET preferences = ? WHERE id = 1", (json.dumps(prefs),))
+        conn.execute("UPDATE UserProfile SET preferences = ? WHERE id = ?", (json.dumps(prefs), user_id))
         if source_weights is not None:
             clean_sw = {str(k): _clamp01(float(v)) for k, v in source_weights.items()}
-            conn.execute("UPDATE UserProfile SET source_weights = ? WHERE id = 1", (json.dumps(clean_sw),))
+            conn.execute("UPDATE UserProfile SET source_weights = ? WHERE id = ?", (json.dumps(clean_sw), user_id))
         if feed_weights is not None:
             known = {r[0] for r in conn.execute("SELECT id FROM Feed")}
             clean_fw = {str(k): _clamp01(float(v)) for k, v in feed_weights.items() if int(k) in known}
-            conn.execute("UPDATE UserProfile SET feed_weights = ? WHERE id = 1", (json.dumps(clean_fw),))
+            conn.execute("UPDATE UserProfile SET feed_weights = ? WHERE id = ?", (json.dumps(clean_fw), user_id))
         if tag_weights is not None:
             clean = {}
             for tag, w in tag_weights.items():
                 key = normalize_tags([tag])
                 if key:
                     clean[key[0]] = max(-10.0, min(10.0, float(w)))
-            conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = 1", (json.dumps(clean),))
-        return get_user_profile(conn)
+            conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = ?", (json.dumps(clean), user_id))
+        return get_user_profile(conn, user_id)
 
 
-def apply_feedback(story_id: int, kind: str) -> dict[str, Any] | None:
+def apply_feedback(story_id: int, kind: str, user_id: int = 1) -> dict[str, Any] | None:
     """Log the raw vote and nudge the story's tag weights by ±FEEDBACK_ALPHA·10 (clamped ±10)."""
     with db.get_conn() as conn:
         story = conn.execute("SELECT headline, tags FROM Story WHERE id = ?", (story_id,)).fetchone()
         if story is None:
             return None
-        conn.execute("INSERT INTO FeedbackLog (story_id, headline, tags, kind) VALUES (?, ?, ?, ?)",
-                     (story_id, story["headline"], story["tags"], kind))
-        profile = get_user_profile(conn)
+        conn.execute("INSERT INTO FeedbackLog (user_id, story_id, headline, tags, kind) VALUES (?, ?, ?, ?, ?)",
+                     (user_id, story_id, story["headline"], story["tags"], kind))
+        profile = get_user_profile(conn, user_id)
         weights = profile["tag_weights"]
         step = (1.0 if kind == "up" else -1.0) * config.FEEDBACK_ALPHA * 10
         for tag in story_tags(story):
             weights[tag] = max(-10.0, min(10.0, weights.get(tag, 0.0) + step))
-        conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = 1", (json.dumps(weights),))
+        conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = ?", (json.dumps(weights), user_id))
         return profile
 
 
-def feedback_log(limit: int = 200) -> list[dict[str, Any]]:
+def feedback_log(limit: int = 200, user_id: int = 1) -> list[dict[str, Any]]:
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT story_id, headline, tags, kind, created_at FROM FeedbackLog ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT story_id, headline, tags, kind, created_at FROM FeedbackLog WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT ?", (user_id, limit)
         )
         return [dict(r) for r in rows]

@@ -146,6 +146,45 @@ def test_input_bounds(exposed):
     assert exposed.get("/api/stories", params={"keep": "1," * 3000}).status_code == 422
 
 
+def test_users_have_separate_state_and_only_admins_manage(exposed):
+    from app import db
+
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO AppUser (name, password_hash) VALUES ('anna', ?)", (auth.hash_password("anna-pw-1234"),))
+    assert exposed.post("/api/auth/login", json={"username": "anna", "password": "wrong"}).status_code == 401
+    assert exposed.post("/api/auth/login", json={"username": "nobody", "password": "x"}).status_code == 401
+    r = exposed.post("/api/auth/login", json={"username": "ANNA", "password": "anna-pw-1234"})
+    assert r.status_code == 200 and r.json()["user"] == {"id": 2, "name": "anna", "is_admin": False}
+    assert exposed.get("/api/auth/session").json()["user"]["name"] == "anna"
+    sid = exposed.get("/api/stories").json()["stories"][0]["id"]
+    exposed.post(f"/api/stories/{sid}/read")
+    exposed.post("/api/feedback", json={"story_id": sid, "kind": "up"})
+    exposed.post(f"/api/stories/{sid}/chat", json={"message": "Anna asks"})
+    anna = exposed.get("/api/profile").json()
+    assert anna["tag_weights"] and "ntfy" not in anna and anna["user"]["is_admin"] is False
+    for method, path in [("GET", "/api/feeds"), ("POST", "/api/refresh"), ("GET", "/api/reports/brief"),
+                         ("DELETE", "/api/feeds/1")]:
+        assert exposed.request(method, path).status_code == 403, path
+    assert exposed.get("/feeds", follow_redirects=False).status_code == 303
+
+    exposed.post("/api/auth/logout")
+    _login(exposed)  # no user name = the owner, user 1 (admin)
+    me = exposed.get("/api/auth/session").json()["user"]
+    assert me == {"id": 1, "name": "admin", "is_admin": True}
+    assert exposed.get("/api/stories").json()["stories"][0]["read"] is None
+    assert exposed.get("/api/profile").json()["tag_weights"] == {}
+    assert exposed.get(f"/api/stories/{sid}/chat").json()["messages"] == []
+    assert exposed.get("/api/feeds").status_code == 200
+    assert exposed.post("/api/auth/login", json={"username": "admin", "password": PASSWORD}).status_code == 200
+
+
+def test_password_hashes():
+    h = auth.hash_password("s3cret")
+    assert h.startswith("scrypt$") and "s3cret" not in h and h != auth.hash_password("s3cret")
+    assert auth.verify_password("s3cret", h) and not auth.verify_password("nope", h)
+    assert not auth.verify_password("x", None) and not auth.verify_password("x", "garbage")
+
+
 def test_sse_connection_cap(exposed, monkeypatch):
     monkeypatch.setattr(bus, "subscriber_count", lambda: 10_000)
     assert exposed.get("/api/events").status_code == 503

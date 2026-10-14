@@ -9,7 +9,7 @@ from conftest import add_article
 
 def test_schedule_fires_on_selected_days_once(monkeypatch):
     sent = []
-    monkeypatch.setattr(reports, "send", lambda kind: (sent.append(kind), (True, "x"))[1])
+    monkeypatch.setattr(reports, "send", lambda kind, *_a: (sent.append(kind), (True, "x"))[1])
     scoring.update_profile({"ntfy_reports": [
         {"kind": "pipeline", "time": "07:00", "days": [0], "enabled": True},
         {"kind": "brief", "time": "07:00", "days": [0], "enabled": False},
