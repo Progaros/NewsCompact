@@ -134,15 +134,15 @@ def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]
     }
 
 
-def _load_story(conn: sqlite3.Connection, story_id: int) -> dict[str, Any]:
+def _load_story(conn: sqlite3.Connection, story_id: int, personal: bool = True) -> dict[str, Any]:
     s = conn.execute("SELECT * FROM Story WHERE id = ?", (story_id,)).fetchone()
     if s is None:
         raise HTTPException(404, "story not found")
-    profile = scoring.get_user_profile(conn)
+    profile = scoring.get_user_profile(conn) if personal else scoring.DEFAULT_PROFILE
     st = scoring.source_stats(conn, scoring.feed_trust(conn, profile), story_id).get(
         story_id, {"feeds": 0, "trust": 0.0, "quality": None})
     quality = st["quality"] if st["quality"] is not None else s["quality_score"]
-    relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality)
+    relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality, personal)
     item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
             "display": display, **scoring.read_states(conn).get(story_id, {"read": None})}
     return _story_payload(item, _articles_by_story(conn, [story_id])[story_id])
@@ -281,12 +281,18 @@ def create_app() -> FastAPI:
     @app.get("/api/stories")
     def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archived: bool = False,
                      q: str = Query("", max_length=100), tag: str = Query("", max_length=80),
-                     hide_read: bool = False, keep: str = Query("", max_length=4000)):
-        """``hide_read`` drops stories marked read (not those updated since); ``keep`` = ids exempt from it."""
+                     hide_read: bool = False, keep: str = Query("", max_length=4000),
+                     view: Literal["personal", "default"] = "personal"):
+        """``hide_read`` drops stories marked read (not those updated since); ``keep`` = ids exempt from it.
+
+        ``view=personal`` (signed-in only) ranks with the user's interests and settings.
+        """
         owner = _is_owner(request)
+        personal = owner and view == "personal"
         keep_ids = {int(x) for x in keep.split(",") if x.strip().isdigit()}
         with db.get_conn() as conn:
-            ranked = scoring.ranked_stories(conn, archived=archived, query=q.strip(), tag=tag.strip())
+            ranked = scoring.ranked_stories(conn, archived=archived, query=q.strip(), tag=tag.strip(),
+                                            personal=personal)
             hidden = 0
             if hide_read and owner and not archived:
                 visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
@@ -301,13 +307,15 @@ def create_app() -> FastAPI:
             "pending": pending,
             "last_article": last_article,
             "active_days": config.STORY_ACTIVE_DAYS,
+            "view": "personal" if personal else "default",
             "stories": [_private(_story_payload(i, arts[i["story"]["id"]]), owner) for i in page],
         }
 
     @app.get("/api/stories/{story_id}")
-    def get_story(story_id: int, request: Request):
+    def get_story(story_id: int, request: Request, view: Literal["personal", "default"] = "personal"):
+        owner = _is_owner(request)
         with db.get_conn() as conn:
-            return _private(_load_story(conn, story_id), _is_owner(request))
+            return _private(_load_story(conn, story_id, personal=owner and view == "personal"), owner)
 
     @app.post("/api/stories/{story_id}/read")
     def mark_read(story_id: int):

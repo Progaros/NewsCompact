@@ -29,6 +29,9 @@ from . import config, db
 from .tags import normalize_tags
 
 _DEFAULT_PREFS = {"min_quality": 0.0, "summary_length": "medium"}
+# The "default" view (everyone, signed out): no learned interests, preferences or trust overrides.
+DEFAULT_PROFILE: dict[str, Any] = {"id": None, "tag_weights": {}, "source_weights": {}, "feed_weights": {},
+                                   "preferences": {}}
 
 
 def _clamp01(x: float) -> float:
@@ -166,11 +169,13 @@ def distance_score(metrics: dict[str, Any]) -> float:
 
 
 def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
-                trust: float | None = None, quality: float | None = None) -> tuple[dict[str, float], float]:
+                trust: float | None = None, quality: float | None = None,
+                personal: bool = True) -> tuple[dict[str, float], float]:
     """Return ``(relevance breakdown, display score)`` for one story.
 
     ``trust`` = summed outlet trust and ``quality`` = trust-weighted article quality
     (see ``source_stats``); they default to ``source_count`` and the stored story quality.
+    ``personal=False`` (default view) leaves out the distance to the user's location.
     """
     tags = story_tags(story)
     metrics = db.json_dict(story["metrics"])
@@ -188,7 +193,7 @@ def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
     )
     interest = sum(profile["tag_weights"].get(t, 0.0) for t in tags)
     interest_pts = max(-config.INTEREST_CAP, min(config.INTEREST_CAP, interest * config.W3_INTEREST))
-    distance = distance_score(metrics)
+    distance = distance_score(metrics) if personal else 0.0
     try:
         urgency = float(metrics.get("urgency_level", 5))
     except (TypeError, ValueError):
@@ -225,15 +230,17 @@ def read_states(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
 
 
 def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = None, *,
-                   archived: bool = False, query: str = "", tag: str = "") -> list[dict[str, Any]]:
+                   archived: bool = False, query: str = "", tag: str = "",
+                   personal: bool = True) -> list[dict[str, Any]]:
     """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
     Active stories (news within STORY_ACTIVE_DAYS) are ranked by display
     score; ``archived`` returns the older ones, newest first.
     Honors ``preferences.min_quality`` and optional text / tag filters.
     ``read`` is None, "read" or "updated" (significant update since it was read).
+    ``personal=False`` ranks the default view (DEFAULT_PROFILE, no distance).
     """
-    profile = profile or get_user_profile(conn)
+    profile = (profile or get_user_profile(conn)) if personal else DEFAULT_PROFILE
     stats = source_stats(conn, feed_trust(conn, profile))
     reads = read_states(conn)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
@@ -259,7 +266,7 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
             continue
         if wanted_tag and wanted_tag not in story_tags(s):
             continue
-        relevance, display = score_story(s, st["feeds"], profile, st["trust"], quality)
+        relevance, display = score_story(s, st["feeds"], profile, st["trust"], quality, personal)
         out.append({"story": s, "source_count": st["feeds"], "quality": round(quality, 2),
                     "relevance": relevance, "display": display, **reads.get(s["id"], {"read": None})})
     if archived:

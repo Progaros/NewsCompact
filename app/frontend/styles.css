@@ -261,6 +261,7 @@ story-card.is-updated { border-color: rgba(79,155,255,.35); }
 .read-summary p { margin: 6px 0 0; padding-left: 10px; border-left: 2px solid var(--border); line-height: 1.55; }
 body.unsigned-in .read-btn { display: none; }
 body.unsigned-in #show-read { display: none; }
+body.unsigned-in #view-toggle { display: none; }
 body.unsigned-in .card-body { padding-right: 22px; }
 
 .toggle {

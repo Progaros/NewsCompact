@@ -8,6 +8,7 @@ const searchEl = document.getElementById("search");
 const chipsEl = document.getElementById("filter-chips");
 const scopeBtns = { active: document.getElementById("scope-active"), archive: document.getElementById("scope-archive") };
 const showReadBtn = document.getElementById("show-read");
+const viewBtns = { personal: document.getElementById("view-personal"), default: document.getElementById("view-default") };
 const refreshBtn = document.getElementById("refresh-btn");
 
 const PAGE = 50;
@@ -30,6 +31,7 @@ const state = {
   query: "",
   tag: "",
   showRead: localStorage.getItem("showRead") === "1",
+  view: localStorage.getItem("view") === "default" ? "default" : "personal",
 };
 
 const ICON_CHECK = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M7.5 12.5l3 3 6-6.5"/></svg>`;
@@ -222,6 +224,7 @@ function updateStatus() {
 
 function storiesUrl(limit) {
   const p = new URLSearchParams({ limit: String(limit) });
+  p.set("view", Auth.state.authenticated ? state.view : "default");
   if (state.scope === "archive") p.set("archived", "true");
   if (state.query) p.set("q", state.query);
   if (state.tag) p.set("tag", state.tag);
@@ -297,6 +300,16 @@ searchEl.addEventListener("input", () => {
 });
 scopeBtns.active.addEventListener("click", () => setScope("active"));
 scopeBtns.archive.addEventListener("click", () => setScope("archive"));
+function setView(view) {
+  state.view = view;
+  localStorage.setItem("view", view);
+  for (const [k, b] of Object.entries(viewBtns)) {
+    b.classList.toggle("active", k === view);
+    b.setAttribute("aria-pressed", k === view);
+  }
+}
+for (const [k, b] of Object.entries(viewBtns)) b.addEventListener("click", () => { setView(k); reload(); });
+setView(state.view);
 showReadBtn.setAttribute("aria-pressed", state.showRead);
 showReadBtn.addEventListener("click", () => {
   state.showRead = !state.showRead;

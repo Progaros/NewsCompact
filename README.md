@@ -89,7 +89,7 @@ flowchart LR
   ```
 
   credibility = summed trust of the distinct outlets (site host; several feeds
-  of one outlet count once; trust per feed category,
+  of one outlet count once; trust per feed category or single feed,
   0–1, e.g. Reddit 0.3; 1.0 → 0.25 … 5.0 → 1.0); quality is re-weighted with the
   same trust at ranking time; user_impact matches regions/locations as whole
   words in tags; interest = sum of
@@ -114,6 +114,9 @@ flowchart LR
   articles flagged and the old summary to compare, once Prompt 2 rates an update
   at least `NEWS_READ_RESURFACE_SIGNIFICANCE` (or urgency jumps / it turns
   Breaking / it is revived or merged). The Heads Up brief always uses the full feed.
+  Signed-in users switch between **For you** (ranked with their tag weights,
+  regions/locations, location distance, source trust and minimum quality) and
+  **Everyone** (the default ranking); signed-out visitors always get the default.
   👍/👎 train tag weights (editable / addable in ⚙ Preferences); **💬 Ask** opens a per-story
   chat whose answer streams in live (optionally after searchngx web-search
   turns; thinking, searches, page reads and tool errors are shown as small
@@ -128,23 +131,25 @@ flowchart LR
 - **Feeds (`/feeds`)** — add (title auto-fetched), rename, recategorize, delete,
   enable/disable per feed or category, 24 h / 7 d volume, filter, failing feeds.
 - **⚙ Preferences** — interest regions / locations (raise "impact"), minimum
-  story quality, source trust per feed category, scheduled ntfy reports (news
-  brief or pipeline report; time, weekdays, "send now") and the learned tag
-  weights (remove or reset).
+  story quality, source trust per feed category (expand a category to set single
+  sources; a category with individually set sources is faded and moving its
+  slider asks before resetting them), scheduled ntfy reports (news
+  brief or pipeline report; time, weekdays, "send now") and the tag
+  weights (edit, add, remove or reset).
 
 ## API
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/stories?limit=&archived=&q=&tag=` | Ranked (or archived) stories (+ total `count`, `pending`, `last_article`) |
+| `GET /api/stories?limit=&archived=&q=&tag=&view=` | Ranked (or archived) stories (+ total `count`, `pending`, `last_article`); `view=personal` (default, signed-in only) or `default` |
 | `GET /api/stories/{id}` | One story with its articles |
 | `POST` / `DELETE /api/stories/{id}/read` | Mark read / unread (`GET /api/stories?hide_read=true&keep=ids` hides read stories except `keep`; each story has `read`: null \| `read` \| `updated`) |
 | `GET/POST /api/stories/{id}/chat` | Chat history (shown branch, with message versions) / send `{"message", "search_turns", "edit_of"?}` → NDJSON stream (`step` = thinking/search/read/error step, `thinking`, `delta`, `done`/`error`); steps are stored with the reply; `edit_of` resends an edited user message as a new version |
 | `POST /api/stories/{id}/chat/switch` | Show another version `{"message_id"}` of a message (with its latest replies) |
 | `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
-| `GET /api/heads-up` | AI brief over the top 5 stories |
+| `GET /api/heads-up` | AI brief over the top 5 stories (default ranking) |
 | `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |
-| `GET/PUT /api/profile` | Profile (+ effective `source_trust`, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`) and replaces `tag_weights` / `source_weights` if given |
+| `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
 | `GET /api/reports/{brief\|pipeline}` · `POST /api/reports/{kind}/send` | Preview a report · push it to ntfy now |
 | `GET/POST /api/feeds` · `PATCH/DELETE /api/feeds/{id}` | Feed management |
 | `POST /api/feeds/category` | Enable/disable a whole category |

@@ -31,6 +31,10 @@
 
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search headlines, summaries, tags…" maxlength="100" />
+      <div class="segmented" id="view-toggle" role="group" aria-label="Ranking">
+        <button id="view-personal" type="button" title="Ranked with your interests, regions, location and source trust">For you</button>
+        <button id="view-default" type="button" title="The default ranking everyone sees">Everyone</button>
+      </div>
       <div class="segmented" role="group" aria-label="Story scope">
         <button id="scope-active" class="active" type="button">Active</button>
         <button id="scope-archive" type="button">Archive</button>

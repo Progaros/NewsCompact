@@ -119,6 +119,24 @@ def test_owner_read_state_is_not_public(exposed):
     assert exposed.get(f"/api/stories/{sid}").json()["read"] is None
 
 
+def test_personal_ranking_needs_a_session(exposed):
+    from app import scoring
+
+    scoring.update_profile({"locations": ["munich"]}, tag_weights={"ai": 10})
+    anon = exposed.get("/api/stories", params={"view": "personal"}).json()
+    assert anon["view"] == "default" and anon["stories"][0]["relevance"]["user_interest"] == 0
+    assert anon["stories"][0]["relevance"]["distance_points"] == 0
+    _login(exposed)
+    mine = exposed.get("/api/stories").json()
+    assert mine["view"] == "personal" and mine["stories"][0]["relevance"]["user_interest"] == 10
+    assert mine["stories"][0]["display_score"] > anon["stories"][0]["display_score"]
+    default = exposed.get("/api/stories", params={"view": "default"}).json()
+    assert default["view"] == "default" and default["stories"][0]["display_score"] == anon["stories"][0]["display_score"]
+    sid = mine["stories"][0]["id"]
+    assert exposed.get(f"/api/stories/{sid}", params={"view": "default"}).json()["relevance"]["user_interest"] == 0
+    assert exposed.get("/api/stories", params={"view": "bogus"}).status_code == 422
+
+
 def test_input_bounds(exposed):
     _login(exposed)
     assert exposed.post("/api/feeds", json={"title": "x" * 301, "xml_url": "https://a.example/rss"}).status_code == 422

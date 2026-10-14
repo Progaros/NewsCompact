@@ -41,7 +41,7 @@ def brief(force: bool = False) -> tuple[str | None, bool]:
 def _generate(now: float) -> tuple[str | None, bool]:
     global _last_failure
     with db.get_conn() as conn:
-        top = scoring.ranked_stories(conn)[:5]
+        top = scoring.ranked_stories(conn, personal=False)[:5]
     if not top:
         return None, False
     lines = []
