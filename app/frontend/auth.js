@@ -141,6 +141,7 @@ const Auth = (() => {
             min_quality: isNaN(minQ) ? 0 : Math.min(10, Math.max(0, minQ)),
             ntfy_reports: ntfy ? reports.filter((r) => r.time) : undefined,
             excluded_feeds: [...excluded].map(Number),
+            about: form.elements.about.value.trim(),
           },
           tag_weights: weights,
           source_weights: sourceWeights,
@@ -158,6 +159,8 @@ const Auth = (() => {
   function renderProfileForm(prefs, ntfy) {
     const join = (v) => (Array.isArray(v) ? v.join(", ") : "");
     return `
+      <label class="field">About you <span class="hint">a few words about yourself (job, interests, where you live) — used to make your heads-up and story chat more personal; never shared</span>
+        <textarea name="about" rows="3" maxlength="1000" placeholder="e.g. Software developer in Munich, follows AI, security and local politics">${esc(prefs.about || "")}</textarea></label>
       <label class="field">Interest regions <span class="hint">comma-separated; matching story tags raise "impact"</span>
         <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
       <label class="field">Locations <span class="hint">comma-separated, same effect</span>

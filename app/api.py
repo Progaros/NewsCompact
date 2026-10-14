@@ -42,6 +42,7 @@ class Preferences(BaseModel):
     min_quality: float | None = Field(None, ge=0, le=10)
     ntfy_reports: list[ReportSchedule] | None = Field(None, max_length=20)
     excluded_feeds: list[int] | None = Field(None, max_length=2000)
+    about: str | None = Field(None, max_length=1000)
 
 
 class ProfileUpdate(BaseModel):
@@ -525,6 +526,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "message must not be empty")
         with db.get_conn() as conn:
             story = _load_story(conn, story_id, uid)
+            about = scoring.about_user(scoring.get_user_profile(conn, uid))
             conn.execute("INSERT OR IGNORE INTO ChatSession (user_id, story_id) VALUES (?, ?)", (uid, story_id))
             session = _chat_session(conn, story_id, uid)
             session_id = session["id"]
@@ -569,7 +571,7 @@ def create_app() -> FastAPI:
                                      "WHERE id = ? AND leaf_id = ?", (reply_id, session_id, question_id))
 
             try:
-                for kind, payload in chat.stream(story, history, text, body.search_turns, steps):
+                for kind, payload in chat.stream(story, history, text, body.search_turns, steps, about=about):
                     if kind == "delta":
                         parts.append(payload)
                     yield ndjson({"type": kind, "step": payload} if kind == "step" else
@@ -693,7 +695,10 @@ def create_app() -> FastAPI:
             s["days"] = sorted(set(s["days"]))
         if "excluded_feeds" in prefs:
             prefs["excluded_feeds"] = sorted(set(prefs["excluded_feeds"]))
+        if "about" in prefs:
+            prefs["about"] = prefs["about"].strip()
         scoring.update_profile(prefs, body.tag_weights, body.source_weights, body.feed_weights, user_id=uid)
+        heads_up.invalidate(heads_up.user_key(uid))  # ranking or reader description may have changed
         return get_profile(request)
 
     # --- scheduled ntfy reports ---

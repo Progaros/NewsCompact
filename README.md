@@ -136,7 +136,8 @@ flowchart LR
   ingest and the last merge pass.
 - **Feeds (`/feeds`)** — add (title auto-fetched), rename, recategorize, delete,
   enable/disable per feed or category, 24 h / 7 d volume, filter, failing feeds.
-- **⚙ Preferences** — interest regions / locations (raise "impact"), minimum
+- **⚙ Preferences** — "About you" (a short self-description that tailors the
+  personal heads-up and the story chat; story summaries stay shared), interest regions / locations (raise "impact"), minimum
   story quality, source trust per feed category (expand a category to set single
   sources; a category with individually set sources is faded and moving its
   slider asks before resetting them; ⊘ hides a source from the personal
@@ -156,7 +157,7 @@ flowchart LR
 | `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
 | `GET /api/heads-up?view=` | AI brief over the top 5 stories of the view (`default`, or `personal` when signed in); never waits — a stale brief (> `NEWS_HEADS_UP_TTL_MINUTES`) is regenerated in the background and `generating: true` tells the client to poll |
 | `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |
-| `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`, `excluded_feeds`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
+| `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`, `excluded_feeds`, `about`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
 | `GET /api/reports/{brief\|pipeline}` · `POST /api/reports/{kind}/send` | Preview a report · push it to ntfy now |
 | `GET/POST /api/feeds` · `PATCH/DELETE /api/feeds/{id}` | Feed management |
 | `POST /api/feeds/category` | Enable/disable a whole category |

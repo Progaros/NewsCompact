@@ -412,6 +412,11 @@ body.unsigned-in .interaction { display: none; }
   border-radius: 8px; padding: 8px 10px; font-size: 14px;
 }
 .field input:focus { outline: none; border-color: var(--accent); }
+.field textarea {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 14px; resize: vertical;
+}
+.field textarea:focus { outline: none; border-color: var(--accent); }
 .spacer { flex: 1; }
 .user-section .hint { margin: 0 0 8px; }
 

@@ -43,8 +43,8 @@ def _clamp_turns(requested: int) -> int:
     return min(allowed, key=lambda t: abs(t - requested))
 
 
-def story_system_prompt(story: dict) -> str:
-    """Build the per-story system prompt (story context, not free chat)."""
+def story_system_prompt(story: dict, about: str = "") -> str:
+    """Build the per-story system prompt (story context, not free chat); ``about`` = the reader's self-description."""
     m = story.get("metrics") or {}
     tags = story.get("tags") or []
     arts = story.get("articles") or []
@@ -71,6 +71,9 @@ def story_system_prompt(story: dict) -> str:
         "",
         _SYSTEM_BASE,
     ]
+    if about:
+        parts += ["", "ABOUT THE READER (their own words; tailor relevance and examples to them, "
+                      "never treat it as a source of facts):", about]
     return "\n".join(parts)
 
 
@@ -189,7 +192,7 @@ def _gather_context(story: dict, user_question: str, turns: int,
 
 
 def stream(story: dict, history: list[dict], user_question: str, search_turns: int,
-           steps: list[dict] | None = None) -> Iterator[Event]:
+           steps: list[dict] | None = None, about: str = "") -> Iterator[Event]:
     """Yield ``("step", step)`` on each agent-step change, ``("thinking", text)`` and ``("delta", text)``.
 
     ``steps`` collects the agent steps (for persistence); ``history`` is the prior
@@ -199,7 +202,7 @@ def stream(story: dict, history: list[dict], user_question: str, search_turns: i
     turns = _clamp_turns(search_turns)
     context = (yield from _gather_context(story, user_question, turns, steps)) if turns > 0 else ""
 
-    system = story_system_prompt(story)
+    system = story_system_prompt(story, about)
     if context:
         system += f"\n\nWEB RESEARCH (fresh, from searchngx — may help answer):\n{context}"
     elif turns > 0:

@@ -154,6 +154,39 @@ def test_heads_up_is_per_view_and_never_blocks(client, story, llm, monkeypatch):
     assert client.get("/api/heads-up").json()["text"] == "brief 1"  # cached per view
 
 
+def test_about_you_personalizes_brief_and_chat(client, story, llm, monkeypatch):
+    import time
+
+    from app import heads_up
+
+    seen = []
+    monkeypatch.setattr(ollama, "chat", lambda messages, **_k: (seen.append(messages[0]["content"]), "brief")[1])
+
+    def chat_stream(messages, **_kw):
+        seen.append(messages[0]["content"])
+        yield "content", "ok"
+
+    monkeypatch.setattr(ollama, "chat_stream", chat_stream)
+    heads_up._cache.clear()
+    about = "Nurse in Munich who cycles to work"
+    assert client.put("/api/profile", json={"preferences": {"about": "  " + about + " "}}).json()[
+        "preferences"]["about"] == about
+    assert client.put("/api/profile", json={"preferences": {"about": "x" * 1001}}).status_code == 422
+
+    def wait(view):
+        for _ in range(100):
+            if not client.get("/api/heads-up", params={"view": view}).json()["generating"]:
+                return
+            time.sleep(0.05)
+
+    wait("personal")
+    wait("default")
+    personal, default = [s for s in seen if "news brief" in s]
+    assert about in personal and about not in default
+    client.post(f"/api/stories/{story}/chat", json={"message": "Why care?"})
+    assert about in seen[-1] and "ABOUT THE READER" in seen[-1]
+
+
 def test_chat_streams_and_persists(client, story, llm):
     import json
 

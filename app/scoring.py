@@ -103,6 +103,12 @@ def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
     return None
 
 
+def about_user(profile: dict[str, Any]) -> str:
+    """The user's self-description (preferences.about) for personal AI texts; "" if unset."""
+    about = profile["preferences"].get("about")
+    return about.strip()[:1000] if isinstance(about, str) else ""
+
+
 def excluded_feeds(profile: dict[str, Any]) -> set[int]:
     """Feed ids the user hid from their personal feed (preferences.excluded_feeds)."""
     out = set()

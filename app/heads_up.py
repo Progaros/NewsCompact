@@ -78,6 +78,13 @@ def status(key: str = DEFAULT) -> dict[str, Any]:
     }
 
 
+def invalidate(key: str) -> None:
+    """Drop a cached brief (its inputs changed); the next request regenerates it."""
+    with _cache_lock:
+        _cache.pop(key, None)
+        _last_failure.pop(key, None)
+
+
 def _background(key: str) -> None:
     try:
         with _gen_lock:
@@ -92,6 +99,7 @@ def _generate(key: str, now: float) -> tuple[str | None, bool]:
     user_id = int(key.removeprefix("user:")) if key != DEFAULT else None
     with db.get_conn() as conn:
         top = scoring.ranked_stories(conn, personal=user_id is not None, user_id=user_id)[:5]
+        about = scoring.about_user(scoring.get_user_profile(conn, user_id)) if user_id else ""
     if not top:
         return None, False
     lines = []
@@ -100,11 +108,15 @@ def _generate(key: str, now: float) -> tuple[str | None, bool]:
         m = db.json_dict(s["metrics"])
         lines.append(f"- {s['headline']} | urgency={m.get('urgency_level')} "
                      f"status={m.get('status')} | {s['summary']}")
+    system = "Write a concise 2-3 sentence news brief in plain text. Be factual, no preamble."
+    if about:
+        system += (" Write it for this reader, who describes themselves as follows (use it only to choose "
+                   "emphasis and say briefly why an item matters to them, never as a source of facts):\n"
+                   + about)
     try:
         text = ollama.chat(
             [
-                {"role": "system", "content": "Write a concise 2-3 sentence news brief "
-                                              "in plain text. Be factual, no preamble."},
+                {"role": "system", "content": system},
                 {"role": "user", "content": "Summarize these top stories for a reader:\n" + "\n".join(lines)},
             ],
             temperature=0.2,
