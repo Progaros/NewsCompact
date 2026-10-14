@@ -114,6 +114,16 @@ body.wide main { max-width: 1400px; }
 .refresh-btn:hover { border-color: var(--accent); }
 .refresh-btn.busy { opacity: .6; cursor: progress; }
 .heads-up p { margin: 0; color: var(--text); line-height: 1.65; white-space: pre-line; }
+#heads-up-text { transition: opacity .25s, transform .25s; }
+#heads-up-text.swap { opacity: 0; transform: translateY(4px); }
+.heads-up-state { color: var(--muted); font-weight: 600; letter-spacing: .04em; text-transform: none; }
+.heads-up.updating .heads-up-state::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin: 0 6px 0 2px; border-radius: 50%;
+  border: 1.5px solid var(--accent); border-right-color: transparent; vertical-align: -1px;
+  animation: spin .8s linear infinite;
+}
+.heads-up.updating #heads-up-text { opacity: .7; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .feed { display: flex; flex-direction: column; gap: 14px; }
 .feed-controls { display: flex; justify-content: center; padding: 16px 0 40px; }

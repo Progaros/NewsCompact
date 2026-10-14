@@ -94,7 +94,7 @@ def pipeline_report(conn, hours: int = 24) -> str:
 
 def render(kind: str, fresh: bool = True) -> str | None:
     if kind == "brief":
-        return heads_up.brief(force=fresh)[0] or heads_up.last_brief()
+        return heads_up.brief(force=fresh, key=heads_up.PERSONAL)[0] or heads_up.last_brief(heads_up.PERSONAL)
     with db.get_conn() as conn:
         return pipeline_report(conn)
 

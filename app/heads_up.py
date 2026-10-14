@@ -1,24 +1,41 @@
-""""Quick Heads Up" brief (TTL-cached); scheduled pushes live in reports.py."""
+""""Quick Heads Up" briefs, TTL-cached per view; scheduled pushes live in reports.py.
+
+One brief per view key: "default" (the public ranking) and "personal" (the
+signed-in user's ranking). /api/heads-up never waits for the LLM: a stale
+brief starts one background generation and the caller gets the previous text
+with ``generating=True``.
+"""
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import threading
 import time
+from typing import Any
 
 from . import config, db, ollama, scoring
 
 log = logging.getLogger("news.heads-up")
 
-_cache: dict[str, float | str] = {}
+DEFAULT = "default"
+PERSONAL = "personal"
+
+_cache: dict[str, dict[str, Any]] = {}  # key -> {"text", "ts"}
 _cache_lock = threading.Lock()
-# /api/heads-up is public: at most one generation at a time, and a pause after failures.
+# /api/heads-up is public: one generation at a time, one queued per key, a pause after failures.
 _gen_lock = threading.Lock()
+_pending: set[str] = set()
 _FAILURE_BACKOFF_SECONDS = 60
-_last_failure = 0.0
+_last_failure: dict[str, float] = {}
 
 
-def brief(force: bool = False) -> tuple[str | None, bool]:
-    """Return ``(text, cached)``. ``text`` is None when no brief can be produced.
+def _fresh(key: str, now: float) -> bool:
+    entry = _cache.get(key)
+    return entry is not None and now - entry["ts"] < config.HEADS_UP_TTL_MINUTES * 60
+
+
+def brief(force: bool = False, key: str = DEFAULT) -> tuple[str | None, bool]:
+    """Return ``(text, cached)``, generating synchronously when stale; ``text`` is None if none can be made.
 
     A stored brief younger than HEADS_UP_TTL_MINUTES is returned as-is unless
     ``force``. Failures are never cached. Non-forced callers never wait for or
@@ -26,22 +43,51 @@ def brief(force: bool = False) -> tuple[str | None, bool]:
     """
     now = time.time()
     with _cache_lock:
-        if not force and _cache and now - float(_cache["ts"]) < config.HEADS_UP_TTL_MINUTES * 60:
-            return str(_cache["text"]), True
-    if not force and now - _last_failure < _FAILURE_BACKOFF_SECONDS:
-        return last_brief(), True
+        if not force and _fresh(key, now):
+            return str(_cache[key]["text"]), True
+        if not force and now - _last_failure.get(key, 0.0) < _FAILURE_BACKOFF_SECONDS:
+            return _text(key), True
     if not _gen_lock.acquire(blocking=force):
-        return last_brief(), True
+        return last_brief(key), True
     try:
-        return _generate(now)
+        return _generate(key, now)
     finally:
         _gen_lock.release()
 
 
-def _generate(now: float) -> tuple[str | None, bool]:
-    global _last_failure
+def status(key: str = DEFAULT) -> dict[str, Any]:
+    """The view's current brief; a stale one starts a background refresh (never waits)."""
+    now = time.time()
+    with _cache_lock:
+        entry = _cache.get(key)
+        start = (not _fresh(key, now) and key not in _pending
+                 and now - _last_failure.get(key, 0.0) >= _FAILURE_BACKOFF_SECONDS)
+        if start:
+            _pending.add(key)
+        generating = key in _pending
+    if start:
+        threading.Thread(target=_background, args=(key,), name=f"heads-up-{key}", daemon=True).start()
+    return {
+        "text": entry["text"] if entry else None,
+        "generating": generating,
+        "generated_at": (dt.datetime.fromtimestamp(entry["ts"], dt.UTC).strftime("%Y-%m-%d %H:%M:%S")
+                         if entry else None),
+    }
+
+
+def _background(key: str) -> None:
+    try:
+        with _gen_lock:
+            if not _fresh(key, time.time()):
+                _generate(key, time.time())
+    finally:
+        with _cache_lock:
+            _pending.discard(key)
+
+
+def _generate(key: str, now: float) -> tuple[str | None, bool]:
     with db.get_conn() as conn:
-        top = scoring.ranked_stories(conn, personal=False)[:5]
+        top = scoring.ranked_stories(conn, personal=key != DEFAULT)[:5]
     if not top:
         return None, False
     lines = []
@@ -60,14 +106,20 @@ def _generate(now: float) -> tuple[str | None, bool]:
             temperature=0.2,
         ).strip()
     except Exception as e:  # noqa: BLE001
-        log.warning("heads-up generation failed: %s", e)
-        _last_failure = time.time()
+        log.warning("heads-up generation (%s) failed: %s", key, e)
+        with _cache_lock:
+            _last_failure[key] = time.time()
         return None, False
     with _cache_lock:
-        _cache.update(text=text, ts=now)
+        _cache[key] = {"text": text, "ts": now}
     return text, False
 
 
-def last_brief() -> str | None:
+def _text(key: str) -> str | None:
+    entry = _cache.get(key)
+    return str(entry["text"]) if entry else None
+
+
+def last_brief(key: str = DEFAULT) -> str | None:
     with _cache_lock:
-        return str(_cache["text"]) if _cache else None
+        return _text(key)

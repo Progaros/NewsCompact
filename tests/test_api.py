@@ -119,6 +119,41 @@ def test_excluded_sources_leave_the_personal_feed_only(client, story, feed_id, m
     assert client.get("/api/stories", params={"view": "default"}).json()["count"] == 1
 
 
+def test_heads_up_is_per_view_and_never_blocks(client, story, llm, monkeypatch):
+    import threading
+    import time
+
+    from app import heads_up
+
+    heads_up._cache.clear()
+    release, prompts = threading.Event(), []
+
+    def slow_chat(messages, **_kw):
+        prompts.append(messages[-1]["content"])
+        release.wait(5)
+        return f"brief {len(prompts)}"
+
+    monkeypatch.setattr(ollama, "chat", slow_chat)
+    first = client.get("/api/heads-up").json()  # returns at once, generation runs in the background
+    assert first["generating"] is True and first["view"] == "default" and first["generated_at"] is None
+    assert client.get("/api/heads-up").json()["generating"] is True  # no second generation queued
+    release.set()
+    for _ in range(100):
+        if not (d := client.get("/api/heads-up").json())["generating"]:
+            break
+        time.sleep(0.05)
+    assert d["text"] == "brief 1" and d["generated_at"]
+
+    personal = client.get("/api/heads-up", params={"view": "personal"}).json()
+    assert personal["view"] == "personal" and personal["generating"] is True and personal["text"] != "brief 1"
+    for _ in range(100):
+        if not (d := client.get("/api/heads-up", params={"view": "personal"}).json())["generating"]:
+            break
+        time.sleep(0.05)
+    assert d["text"] == "brief 2" and len(prompts) == 2
+    assert client.get("/api/heads-up").json()["text"] == "brief 1"  # cached per view
+
+
 def test_chat_streams_and_persists(client, story, llm):
     import json
 

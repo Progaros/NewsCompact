@@ -3,6 +3,8 @@
 const feedEl = document.getElementById("feed");
 const statusEl = document.getElementById("status");
 const headsEl = document.getElementById("heads-up-text");
+const headsStateEl = document.getElementById("heads-up-state");
+let headsTimer;
 const moreBtn = document.getElementById("load-more");
 const searchEl = document.getElementById("search");
 const chipsEl = document.getElementById("filter-chips");
@@ -308,7 +310,7 @@ function setView(view) {
     b.setAttribute("aria-pressed", k === view);
   }
 }
-for (const [k, b] of Object.entries(viewBtns)) b.addEventListener("click", () => { setView(k); reload(); });
+for (const [k, b] of Object.entries(viewBtns)) b.addEventListener("click", () => { setView(k); reload(); loadHeadsUp(); });
 setView(state.view);
 showReadBtn.setAttribute("aria-pressed", state.showRead);
 showReadBtn.addEventListener("click", () => {
@@ -320,12 +322,34 @@ showReadBtn.addEventListener("click", () => {
 moreBtn.addEventListener("click", () => loadMore());
 
 async function loadHeadsUp() {
+  clearTimeout(headsTimer);
+  const view = Auth.state.authenticated ? state.view : "default";
   try {
-    const res = await fetch("/api/heads-up");
-    headsEl.textContent = (await res.json()).text;
+    const d = await (await fetch(`/api/heads-up?view=${view}`)).json();
+    if ((Auth.state.authenticated ? state.view : "default") !== view) return; // toggled meanwhile
+    setHeads(d.text);
+    headsStateEl.textContent = d.generating ? "(updating…)" : "";
+    headsEl.closest(".heads-up").classList.toggle("updating", d.generating);
+    if (d.generating) headsTimer = setTimeout(loadHeadsUp, 3000);
   } catch {
     headsEl.textContent = "(heads-up unavailable)";
+    headsStateEl.textContent = "";
   }
+}
+
+// A new brief fades in instead of jumping.
+function setHeads(text) {
+  if (headsEl.textContent === text) return;
+  if (!headsEl.dataset.loaded) {
+    headsEl.dataset.loaded = "1";
+    headsEl.textContent = text;
+    return;
+  }
+  headsEl.classList.add("swap");
+  setTimeout(() => {
+    headsEl.textContent = text;
+    headsEl.classList.remove("swap");
+  }, 250);
 }
 
 // --- manual refresh once the content is stale ------------------------------
@@ -356,6 +380,6 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) chec
 (async function boot() {
   await Auth.init();
   await reload();
-  Auth.onChange(() => reload()); // sign-in/out or saved preferences
+  Auth.onChange(() => { reload(); loadHeadsUp(); }); // sign-in/out or saved preferences
   loadHeadsUp();
 })();

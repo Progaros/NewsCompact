@@ -339,9 +339,12 @@ def create_app() -> FastAPI:
         return {"ok": True, "read": None}
 
     @app.get("/api/heads-up")
-    def get_heads_up():
-        text, cached = heads_up.brief()
-        return {"text": text or heads_up.last_brief() or "No brief available yet.", "cached": cached}
+    def get_heads_up(request: Request, view: Literal["personal", "default"] = "default"):
+        """Never waits for the LLM: ``generating`` = a newer brief is on its way (poll again)."""
+        key = heads_up.PERSONAL if view == "personal" and _is_owner(request) else heads_up.DEFAULT
+        st = heads_up.status(key)
+        return {**st, "text": st["text"] or ("Generating the brief…" if st["generating"] else "No brief available yet."),
+                "view": key}
 
     # --- articles (/list) ---
     @app.get("/api/articles")

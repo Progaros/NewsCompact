@@ -117,6 +117,8 @@ flowchart LR
   Signed-in users switch between **For you** (ranked with their tag weights,
   regions/locations, location distance, source trust and minimum quality) and
   **Everyone** (the default ranking); signed-out visitors always get the default.
+  The Quick Heads Up is generated per view and shows "(updating…)" while a
+  newer brief is being written, then fades it in.
   👍/👎 train tag weights (editable / addable in ⚙ Preferences); **💬 Ask** opens a per-story
   chat whose answer streams in live (optionally after searchngx web-search
   turns; thinking, searches, page reads and tool errors are shown as small
@@ -148,7 +150,7 @@ flowchart LR
 | `GET/POST /api/stories/{id}/chat` | Chat history (shown branch, with message versions) / send `{"message", "search_turns", "edit_of"?}` → NDJSON stream (`step` = thinking/search/read/error step, `thinking`, `delta`, `done`/`error`); steps are stored with the reply; `edit_of` resends an edited user message as a new version |
 | `POST /api/stories/{id}/chat/switch` | Show another version `{"message_id"}` of a message (with its latest replies) |
 | `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
-| `GET /api/heads-up` | AI brief over the top 5 stories (default ranking) |
+| `GET /api/heads-up?view=` | AI brief over the top 5 stories of the view (`default`, or `personal` when signed in); never waits — a stale brief (> `NEWS_HEADS_UP_TTL_MINUTES`) is regenerated in the background and `generating: true` tells the client to poll |
 | `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |
 | `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`, `excluded_feeds`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
 | `GET /api/reports/{brief\|pipeline}` · `POST /api/reports/{kind}/send` | Preview a report · push it to ntfy now |
