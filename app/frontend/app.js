@@ -353,10 +353,10 @@ function setView(view) {
     b.setAttribute("aria-pressed", k === view);
   }
   showReadBtn.disabled = state.scope === "archive" || view === "default";
+  showReadBtn.setAttribute("aria-pressed", view === "default" || state.showRead);
 }
 for (const [k, b] of Object.entries(viewBtns)) b.addEventListener("click", () => { setView(k); reload(); loadHeadsUp(); });
 setView(state.view);
-showReadBtn.setAttribute("aria-pressed", state.showRead);
 showReadBtn.addEventListener("click", () => {
   state.showRead = !state.showRead;
   localStorage.setItem("showRead", state.showRead ? "1" : "0");

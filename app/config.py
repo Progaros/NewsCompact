@@ -97,7 +97,7 @@ BOILERPLATE_MIN_TITLES = _int("NEWS_BOILERPLATE_MIN_TITLES", 3)
 # Stories without an update for this many days are deleted with their articles;
 # unassigned articles (pending/skipped/disabled feeds) are deleted after the same age.
 # 0 disables retention.
-RETENTION_DAYS = _float("NEWS_RETENTION_DAYS", 7)
+RETENTION_DAYS = _float("NEWS_RETENTION_DAYS", 30)
 RETENTION_INTERVAL_HOURS = _float("NEWS_RETENTION_INTERVAL_HOURS", 1)
 
 # --- Clustering ------------------------------------------------------------
@@ -139,7 +139,7 @@ READ_RESURFACE_SIGNIFICANCE = _int("NEWS_READ_RESURFACE_SIGNIFICANCE", 2)
 # --- Scoring ---------------------------------------------------------------
 # Stories without an update for this many days drop out of the ranked feed into
 # the archive (until retention deletes them; a revived story comes back).
-STORY_ACTIVE_DAYS = _float("NEWS_STORY_ACTIVE_DAYS", 2)
+STORY_ACTIVE_DAYS = _float("NEWS_STORY_ACTIVE_DAYS", 7)
 # display = base + urgency*W1 + clamp(interest*W3, ±INTEREST_CAP) + distance*W_DISTANCE - decay
 W1_URGENCY = _float("NEWS_W1", 1.0)
 W3_INTEREST = _float("NEWS_W3", 1.5)

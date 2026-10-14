@@ -97,7 +97,7 @@ flowchart LR
    $$\text{display} = \text{relevance} + \text{urgency}\cdot W_1 + \text{clamp}(\text{interest}\cdot W_3, \pm 10) + \text{distance}\cdot W_{\text{dist}} - \text{decay}(\text{news\_at})$$
    - **Credibility**: summed trust of distinct outlets (`outlet_key` by hostname without `www.`/`feeds.`/`rss.` prefixes, merged via `NEWS_OUTLET_GROUPS`; multiple feeds from one publisher count once), using category/per-feed trust overrides. Cards show this outlet count as "N sources" (feed count in the tooltip).
    - **Personalization** (`view=personal`): whole-word region/location tag matches (`impact`), 👍/👎 tag weights (`interest`), home city/country/language (`distance`), excluded feeds (`⊘`), and hiding read stories. `view=default` (**Everyone**) uses `DEFAULT_PROFILE` with `distance = 0`, shows all stories (including read), and shares the same Quick Heads Up brief as signed-out visitors.
-5. **Retention** (`app/retention.py`, hourly): deletes stories/articles older than `NEWS_RETENTION_DAYS` (7), records URL tombstones (30 d) so feeds don't re-import them, keeps `FeedbackLog` snapshots, and runs `incremental_vacuum`.
+5. **Retention** (`app/retention.py`, hourly): deletes stories/articles older than `NEWS_RETENTION_DAYS` (30), records URL tombstones (30 d) so feeds don't re-import them, keeps `FeedbackLog` snapshots, and runs `incremental_vacuum`.
 
 ## Authentication, Access Control & Sharing
 
@@ -160,7 +160,7 @@ flowchart TD
 | `NEWS_MERGE_CANDIDATE_WINDOW_HOURS` | `96` | Age limit of embedding merge candidates (checked stories stay within the 48 h window) |
 | `NEWS_MERGE_LEXICAL_MIN_TERMS` / `NEWS_MERGE_LEXICAL_MAX_DF` | `3` / `5` | Shared rare headline terms for lexical merge candidates |
 | `NEWS_READ_RESURFACE_SIGNIFICANCE` / `NEWS_TITLE_QUALITY_MAX` | `2` / `6` | Update significance (0–3) to resurface read stories / cap for non-`ok` bodies |
-| `NEWS_STORY_ACTIVE_DAYS` / `NEWS_RETENTION_DAYS` / `NEWS_DEDUP_WINDOW_HOURS` | `2` / `7` / `72` | Active feed window / DB retention (0 = forever) / URL+title dedup window |
+| `NEWS_STORY_ACTIVE_DAYS` / `NEWS_RETENTION_DAYS` / `NEWS_DEDUP_WINDOW_HOURS` | `7` / `30` / `72` | Active feed window / DB retention (0 = forever) / URL+title dedup window |
 | `NEWS_BOILERPLATE_MIN_TITLES` | `3` | One feed's identical body under this many titles = extracted site chrome; re-extracted (else title-only) and re-processed |
 | `NEWS_SOURCE_TRUST` / `NEWS_SOURCE_TRUST_DEFAULT` | `Reddit=0.3,Hacker News=0.5,Reviews=0.5` / `1.0` | Default category trust weights |
 | `NEWS_OUTLET_GROUPS` | `deutschlandfunkkultur.de=deutschlandfunk.de,act.eff.org=eff.org,wid.cert-bund.de=bsi.bund.de` | Hosts of one organization counted as one outlet (credibility, source count) |
