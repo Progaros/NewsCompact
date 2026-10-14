@@ -89,9 +89,47 @@ def chat(messages: list[dict[str, Any]], *, temperature: float = 0.2,
     raise AssertionError("unreachable")
 
 
+class _ThinkSplitter:
+    """Routes inline ``<think>…</think>`` spans of a streamed answer to "thinking"."""
+
+    def __init__(self) -> None:
+        self.buf = ""
+        self.inside = False
+
+    def _kind(self) -> str:
+        return "thinking" if self.inside else "content"
+
+    def feed(self, text: str) -> Iterator[tuple[str, str]]:
+        self.buf += text
+        while True:
+            tag = "</think>" if self.inside else "<think>"
+            i = self.buf.find(tag)
+            if i >= 0:
+                if i:
+                    yield self._kind(), self.buf[:i]
+                self.buf = self.buf[i + len(tag):]
+                self.inside = not self.inside
+                continue
+            # Hold back a tag that may be split across chunks.
+            keep = next((k for k in range(min(len(tag) - 1, len(self.buf)), 0, -1)
+                         if tag.startswith(self.buf[-k:])), 0)
+            out, self.buf = self.buf[:len(self.buf) - keep], self.buf[len(self.buf) - keep:]
+            if out:
+                yield self._kind(), out
+            return
+
+    def flush(self) -> Iterator[tuple[str, str]]:
+        if self.buf:
+            yield self._kind(), self.buf
+        self.buf = ""
+
+
 def chat_stream(messages: list[dict[str, Any]], *, temperature: float = 0.2,
-                max_tokens: int | None = None) -> Iterator[str]:
-    """Like :func:`chat`, but yields answer text chunks as the model produces them."""
+                max_tokens: int | None = None) -> Iterator[tuple[str, str]]:
+    """Like :func:`chat`, but yields ``("thinking" | "content", text)`` chunks as they arrive.
+
+    Thinking comes from ``delta.reasoning`` (Ollama's OpenAI layer) or inline ``<think>`` tags.
+    """
     payload: dict[str, Any] = {
         "model": config.CHAT_MODEL,
         "messages": messages,
@@ -100,6 +138,7 @@ def chat_stream(messages: list[dict[str, Any]], *, temperature: float = 0.2,
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    split = _ThinkSplitter()
     with _http().stream("POST", "/v1/chat/completions", json=payload) as r:
         r.raise_for_status()
         for line in r.iter_lines():
@@ -109,9 +148,14 @@ def chat_stream(messages: list[dict[str, Any]], *, temperature: float = 0.2,
             if data == "[DONE]":
                 break
             choices = json.loads(data).get("choices") or [{}]
-            text = (choices[0].get("delta") or {}).get("content")
+            delta = choices[0].get("delta") or {}
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+            if reasoning:
+                yield "thinking", reasoning
+            text = delta.get("content")
             if text:
-                yield text
+                yield from split.feed(text)
+    yield from split.flush()
 
 
 def extract_json(text: str) -> Any:

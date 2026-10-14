@@ -48,8 +48,11 @@ def _query(c: httpx.Client, query: str, selector: dict[str, str]) -> dict[str, A
     return r.json()
 
 
-def search(query: str, max_results: int | None = None) -> list[dict[str, str]]:
-    """Run a web search; return ``[{title, url, description}]`` (may be empty)."""
+def search(query: str, max_results: int | None = None, *, strict: bool = False) -> list[dict[str, str]]:
+    """Run a web search; return ``[{title, url, description}]`` (may be empty).
+
+    ``strict`` re-raises request failures instead of returning no results.
+    """
     max_results = max_results or config.SEARCHNGX_MAX_RESULTS
     selectors = [{"categories": config.SEARCHNGX_CATEGORIES}]
     if config.SEARCHNGX_FALLBACK_ENGINES:
@@ -78,6 +81,8 @@ def search(query: str, max_results: int | None = None) -> list[dict[str, str]]:
         return []
     except Exception as e:  # noqa: BLE001 — best-effort, degrade to no results
         log.warning("searchngx search failed for %r: %s", query, e)
+        if strict:
+            raise
         return []
 
 

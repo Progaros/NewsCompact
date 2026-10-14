@@ -13,7 +13,8 @@ The model calls use the same local CHAT_MODEL the pipeline already trusts.
 from __future__ import annotations
 
 import logging
-from typing import Generator, Iterator
+import time
+from typing import Any, Generator, Iterator
 
 from . import config, ollama, searchngx
 
@@ -84,7 +85,7 @@ def _story_brief(story: dict) -> str:
 
 
 def _next_query(story: dict, user_question: str, context_so_far: str) -> str | None:
-    """Ask the model for the next search query. Returns None when done."""
+    """Ask the model for the next search query. Returns None when done; raises on failure."""
     messages = [
         {"role": "system", "content": _QUERY_SYSTEM},
         {
@@ -104,58 +105,99 @@ def _next_query(story: dict, user_question: str, context_so_far: str) -> str | N
         },
         "required": ["query", "done"],
     }
-    try:
-        res = ollama.structured(
-            schema, messages, temperature=0.0, num_predict=200, prose_fallback=True
-        )
-    except Exception as e:  # noqa: BLE001 — a failed query ends the search loop
-        log.debug("chat search query call failed: %s", e)
-        return None
+    res = ollama.structured(schema, messages, temperature=0.0, num_predict=200, prose_fallback=True)
     if not isinstance(res, dict) or res.get("done"):
         return None
     q = (res.get("query") or "").strip()
     return q or None
 
 
-def _gather_context(story: dict, user_question: str,
-                    turns: int) -> Generator[tuple[str, str], None, str]:
-    """Run up to ``turns`` search+scrape turns, yielding status lines; returns the context."""
+def error_text(e: BaseException) -> str:
+    """Short, user-facing description of a failed step."""
+    msg = str(e).strip().splitlines()[0][:200] if str(e).strip() else ""
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
+def add_step(steps: list[dict], kind: str, title: str, status: str = "running",
+             detail: str = "") -> dict:
+    """Append an agent step (kind: search | read | thinking | error; status: running | ok | warn | error)."""
+    step = {"id": len(steps), "kind": kind, "title": title, "status": status, "detail": detail}
+    steps.append(step)
+    return step
+
+
+Event = tuple[str, Any]
+
+
+def _gather_context(story: dict, user_question: str, turns: int,
+                    steps: list[dict]) -> Generator[Event, None, str]:
+    """Run up to ``turns`` search+scrape turns, yielding step events; returns the context."""
     context = ""
-    for _ in range(turns):
+    for turn in range(turns):
         if len(context) >= config.CHAT_CONTEXT_MAX:
             break
-        yield "status", "Planning web search…"
-        query = _next_query(story, user_question, context)
-        if not query:
+        step = add_step(steps, "search", "Planning web search…")
+        yield "step", step
+        try:
+            query = _next_query(story, user_question, context)
+        except Exception as e:  # noqa: BLE001 — a failed planning call ends the search loop
+            log.warning("chat search planning failed: %s", e)
+            step.update(status="error", title="Planning the web search failed", detail=error_text(e))
+            yield "step", step
             break
-        yield "status", f"Searching: {query}"
-        results = searchngx.search(query)
+        if not query:
+            step.update(status="ok", title="No web search needed" if turn == 0 else "Enough context gathered")
+            yield "step", step
+            break
+        log.info("chat web search: %r", query)
+        step.update(title=f"Web search: {query}")
+        yield "step", step
+        try:
+            results = searchngx.search(query, strict=True)
+        except Exception as e:  # noqa: BLE001
+            step.update(status="error", title=f"Web search failed: {query}", detail=error_text(e))
+            yield "step", step
+            break
         if not results:
-            yield "status", "Web search returned no results"
+            step.update(status="warn", title=f"Web search: {query} · no results")
+            yield "step", step
+            break
+        step.update(status="ok", title=f"Web search: {query} · {len(results)} results",
+                    detail="\n".join(f"{r.get('title') or r['url']} — {r['url']}" for r in results))
+        yield "step", step
         added = False
         for res in results:
             if len(context) >= config.CHAT_CONTEXT_MAX:
                 break
-            yield "status", f"Reading {res.get('title') or res['url']}"
-            text = searchngx.scrape(res["url"]) or res.get("description", "")
+            name = res.get("title") or res["url"]
+            read = add_step(steps, "read", f"Reading {name}", detail=res["url"])
+            yield "step", read
+            text = searchngx.scrape(res["url"])
+            if text:
+                read.update(status="ok", title=f"Read {name}", detail=f"{res['url']}\n{len(text):,} characters")
+            else:
+                text = res.get("description", "")
+                read.update(status="warn", title=f"Could not read {name}",
+                            detail=f"{res['url']}\nPage could not be fetched — used the search snippet.")
+            yield "step", read
             text = text[: config.CHAT_CONTEXT_PER_SOURCE]
-            block = f"\n[{res.get('title') or res['url']}] ({res['url']})\n{text}"
-            context += block
+            context += f"\n[{name}] ({res['url']})\n{text}"
             added = True
         if not added:
             break
     return context
 
 
-def stream(story: dict, history: list[dict], user_question: str,
-           search_turns: int) -> Iterator[tuple[str, str]]:
-    """Yield ``("status", text)`` while researching, then ``("delta", text)`` answer chunks.
+def stream(story: dict, history: list[dict], user_question: str, search_turns: int,
+           steps: list[dict] | None = None) -> Iterator[Event]:
+    """Yield ``("step", step)`` on each agent-step change, ``("thinking", text)`` and ``("delta", text)``.
 
-    ``history`` is the prior messages WITHOUT the new user message;
-    ``search_turns`` is clamped to the configured options.
+    ``steps`` collects the agent steps (for persistence); ``history`` is the prior
+    messages WITHOUT the new user message; ``search_turns`` is clamped to the configured options.
     """
+    steps = [] if steps is None else steps
     turns = _clamp_turns(search_turns)
-    context = (yield from _gather_context(story, user_question, turns)) if turns > 0 else ""
+    context = (yield from _gather_context(story, user_question, turns, steps)) if turns > 0 else ""
 
     system = story_system_prompt(story)
     if context:
@@ -169,12 +211,37 @@ def stream(story: dict, history: list[dict], user_question: str,
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for h in history:
         role = h.get("role")
-        if role in ("user", "assistant"):
-            messages.append({"role": role, "content": h.get("content", "")})
+        if role in ("user", "assistant") and h.get("content"):
+            messages.append({"role": role, "content": h["content"]})
     messages.append({"role": "user", "content": user_question})
 
-    yield "status", "Writing answer…"
-    for chunk in ollama.chat_stream(
+    thinking: dict | None = None
+    started = time.monotonic()
+    answered = False
+
+    def finish_thinking() -> dict:
+        assert thinking is not None
+        thinking.update(status="ok", title=f"Thought for {max(1, round(time.monotonic() - started))}s")
+        return thinking
+
+    for kind, chunk in ollama.chat_stream(
         messages, temperature=config.CHAT_TEMPERATURE, max_tokens=config.CHAT_MAX_TOKENS
     ):
-        yield "delta", chunk
+        if kind == "thinking":
+            if thinking is None:
+                thinking = add_step(steps, "thinking", "Thinking…")
+                started = time.monotonic()
+                yield "step", thinking
+            thinking["detail"] += chunk
+            yield "thinking", chunk
+            continue
+        if thinking is not None and thinking["status"] == "running":
+            yield "step", finish_thinking()
+        if chunk.strip() or answered:
+            answered = True
+            yield "delta", chunk
+    if thinking is not None and thinking["status"] == "running":
+        yield "step", finish_thinking()
+    if not answered:
+        yield "step", add_step(steps, "error", "The model returned no answer", status="error",
+                               detail="It may have used up its token budget while thinking.")

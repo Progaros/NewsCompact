@@ -40,6 +40,7 @@ _MIGRATIONS = (
     ("Story", "material_at", "TEXT"),
     ("Feed", "enabled", "INTEGER NOT NULL DEFAULT 1"),
     ("Feed", "last_error", "TEXT"),
+    ("ChatMessage", "steps", "TEXT"),
 )
 # Indexes on migrated columns (schema.sql runs before the columns exist on old DBs).
 _INDEXES = (

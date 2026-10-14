@@ -57,16 +57,46 @@ const Chat = (() => {
     return html;
   }
 
-  function msgEl(role, text, thinking = false) {
+  const STEP_ICONS = { thinking: "\u{1F4AD}", search: "\u{1F50D}", read: "\u{1F4C4}", error: "\u26A0" };
+
+  // Agent steps are collapsed one-liners; text goes in via textContent (model/web content).
+  function upsertStep(container, step) {
+    let el = container.querySelector(`[data-step="${Number(step.id)}"]`);
+    if (!el) {
+      el = document.createElement("details");
+      el.dataset.step = Number(step.id);
+      el.innerHTML = `<summary><span class="step-ic"></span><span class="step-title"></span></summary><div class="step-detail"></div>`;
+      container.appendChild(el);
+    }
+    el.className = `chat-step k-${step.kind} s-${step.status}`;
+    el.querySelector(".step-ic").textContent = STEP_ICONS[step.kind] || "\u2022";
+    el.querySelector(".step-title").textContent = step.title;
+    if (step.detail != null) el.querySelector(".step-detail").textContent = step.detail;
+    el.classList.toggle("no-detail", !el.querySelector(".step-detail").textContent);
+  }
+
+  function appendThinking(container, text) {
+    const el = container.querySelector(".chat-step.k-thinking.s-running");
+    if (!el) return;
+    const detail = el.querySelector(".step-detail");
+    detail.append(text);
+    el.classList.remove("no-detail");
+    if (el.open) detail.scrollTop = detail.scrollHeight;
+  }
+
+  function msgEl(role, text, steps = [], pending = false) {
     const div = document.createElement("div");
     div.className = `chat-msg ${role}`;
     const who = role === "user" ? "You" : "AI";
-    if (thinking) {
-      div.innerHTML = `<span class="chat-who">${who}</span><span class="chat-thinking">Thinking\u2026</span>`;
+    if (role === "user") {
+      div.innerHTML = `<span class="chat-who">${who}</span><span class="chat-body">${esc(text)}</span>`;
       return div;
     }
-    const body = role === "assistant" ? mdToHtml(text) : esc(text);
-    div.innerHTML = `<span class="chat-who">${who}</span><span class="chat-body">${body}</span>`;
+    div.innerHTML = `<span class="chat-who">${who}</span><div class="chat-steps"></div><span class="chat-body"></span>`;
+    const box = div.querySelector(".chat-steps");
+    for (const s of steps || []) upsertStep(box, s);
+    div.querySelector(".chat-body").innerHTML = pending
+      ? `<span class="chat-thinking">Working\u2026</span>` : mdToHtml(text);
     return div;
   }
 
@@ -143,7 +173,7 @@ const Chat = (() => {
         if (!d.messages.length) {
           box.innerHTML = `<div class="chat-empty">Ask a question about this story.</div>`;
         } else {
-          for (const m of d.messages) box.appendChild(msgEl(m.role, m.content));
+          for (const m of d.messages) box.appendChild(msgEl(m.role, m.content, m.steps));
         }
         box.scrollTop = box.scrollHeight;
         input.focus();
@@ -163,16 +193,20 @@ const Chat = (() => {
     box.querySelector(".chat-empty")?.remove();
     box.appendChild(msgEl("user", text));
     input.value = "";
-    const reply = msgEl("assistant", "", true);
+    const reply = msgEl("assistant", "", [], true);
     box.appendChild(reply);
     box.scrollTop = box.scrollHeight;
     busy = true;
 
+    const stepsBox = reply.querySelector(".chat-steps");
+    const bodyEl = reply.querySelector(".chat-body");
     let answer = "";
     let rendered = 0;
-    const setStatus = (s) => { reply.querySelector(".chat-thinking").textContent = s; };
+    let failed = "";
+    const setStatus = (s) => { const t = bodyEl.querySelector(".chat-thinking"); if (t) t.textContent = s; };
     const render = () => {
-      reply.innerHTML = `<span class="chat-who">AI</span><span class="chat-body">${mdToHtml(answer)}</span>`;
+      bodyEl.innerHTML = mdToHtml(answer)
+        + (failed ? `<p class="chat-error">${esc(failed)}</p>` : "");
       rendered = answer.length;
       const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
       if (nearBottom) box.scrollTop = box.scrollHeight;
@@ -198,16 +232,19 @@ const Chat = (() => {
           buf = buf.slice(nl + 1);
           if (!line) continue;
           const ev = JSON.parse(line);
-          if (ev.type === "status" && !answer) setStatus(ev.text);
+          if (ev.type === "step") {
+            upsertStep(stepsBox, ev.step);
+            if (!answer) setStatus(ev.step.status === "running" ? ev.step.title : "Working\u2026");
+          } else if (ev.type === "thinking") appendThinking(stepsBox, ev.text);
           else if (ev.type === "delta") answer += ev.text;
-          else if (ev.type === "error") throw new Error(ev.text);
+          else if (ev.type === "error") failed = ev.text;
         }
         if (answer.length > rendered) render();
       }
-      if (!answer) throw new Error("empty reply");
+      if (!answer && !failed) failed = "No answer.";
       render();
     } catch (err) {
-      answer += `${answer ? "\n\n" : ""}(error: ${err.message || err})`;
+      failed = `Error: ${err.message || err}`;
       render();
     } finally {
       busy = false;

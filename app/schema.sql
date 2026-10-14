@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS ChatMessage (
     session_id INTEGER NOT NULL REFERENCES ChatSession(id) ON DELETE CASCADE,
     role       TEXT    NOT NULL,   -- user | assistant
     content    TEXT    NOT NULL,
+    steps      TEXT,           -- assistant: JSON list of agent steps (thinking, searches, reads, errors)
     created_at TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_chat_message_session ON ChatMessage(session_id);

@@ -128,7 +128,7 @@ flowchart LR
 | `GET /api/stories?limit=&archived=&q=&tag=` | Ranked (or archived) stories (+ total `count`, `pending`, `last_article`) |
 | `GET /api/stories/{id}` | One story with its articles |
 | `POST` / `DELETE /api/stories/{id}/read` | Mark read / unread (`GET /api/stories?hide_read=true&keep=ids` hides read stories except `keep`; each story has `read`: null \| `read` \| `updated`) |
-| `GET/POST /api/stories/{id}/chat` | Chat history / send `{"message", "search_turns"}` → NDJSON stream (`status`, `delta`, `done`/`error`) |
+| `GET/POST /api/stories/{id}/chat` | Chat history / send `{"message", "search_turns"}` → NDJSON stream (`step` = thinking/search/read/error step, `thinking`, `delta`, `done`/`error`); steps are stored with the reply |
 | `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
 | `GET /api/heads-up` | AI brief over the top 5 stories |
 | `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |

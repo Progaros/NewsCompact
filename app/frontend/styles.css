@@ -496,6 +496,30 @@ body.unsigned-in #feeds-link { display: none; }
 .chat-body pre { background: var(--panel-2); border-radius: 6px; padding: 8px; overflow-x: auto; }
 .chat-body a { color: var(--accent); }
 .chat-thinking { color: var(--muted); font-size: 13px; font-style: italic; }
+.chat-error { color: var(--danger); font-size: 13px; }
+.chat-steps { display: flex; flex-direction: column; gap: 1px; max-width: 100%; }
+.chat-steps:empty { display: none; }
+.chat-step { font-size: 11px; color: var(--muted); max-width: 100%; }
+.chat-step summary {
+  cursor: pointer; list-style: none; display: flex; gap: 5px; align-items: baseline;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .8;
+}
+.chat-step summary::-webkit-details-marker { display: none; }
+.chat-step summary::after { content: "\25B8"; font-size: 9px; }
+.chat-step[open] summary::after { content: "\25BE"; }
+.chat-step summary:hover { opacity: 1; color: var(--text); }
+.chat-step.no-detail summary { cursor: default; }
+.chat-step.no-detail summary::after { content: none; }
+.chat-step .step-title { overflow: hidden; text-overflow: ellipsis; }
+.chat-step.s-running .step-title { animation: step-pulse 1.2s ease-in-out infinite; }
+.chat-step.s-warn { color: var(--warn); }
+.chat-step.s-error { color: var(--danger); }
+.chat-step .step-detail {
+  margin: 2px 0 4px 18px; padding: 6px 8px; border-left: 2px solid var(--border);
+  white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto;
+  font-size: 12px; color: var(--muted);
+}
+@keyframes step-pulse { 50% { opacity: .45; } }
 .chat-input-row {
   display: flex; gap: 8px; align-items: flex-end;
   padding: 10px 12px; border-top: 1px solid var(--border);

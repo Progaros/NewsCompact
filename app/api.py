@@ -390,13 +390,13 @@ def create_app() -> FastAPI:
             if conn.execute("SELECT 1 FROM Story WHERE id = ?", (story_id,)).fetchone() is None:
                 raise HTTPException(404, "story not found")
             rows = conn.execute(
-                "SELECT m.role, m.content FROM ChatMessage m JOIN ChatSession s ON s.id = m.session_id "
+                "SELECT m.role, m.content, m.steps FROM ChatMessage m JOIN ChatSession s ON s.id = m.session_id "
                 "WHERE s.story_id = ? ORDER BY m.id",
                 (story_id,),
             ).fetchall()
         return {
             "story_id": story_id,
-            "messages": [dict(r) for r in rows],
+            "messages": [{**dict(r), "steps": db.json_list(r["steps"])} for r in rows],
             "search_turns_options": config.CHAT_SEARCH_TURNS,
         }
 
@@ -425,28 +425,44 @@ def create_app() -> FastAPI:
             return json.dumps(record, ensure_ascii=False) + "\n"
 
         def events():
-            """NDJSON: status lines while researching, deltas while answering, then done/error."""
+            """NDJSON: agent steps, thinking and answer deltas, then done/error."""
             parts: list[str] = []
-            try:
-                for kind, chunk in chat.stream(story, history, text, body.search_turns):
-                    if kind == "delta":
-                        parts.append(chunk)
-                    yield ndjson({"type": kind, "text": chunk})
-                yield ndjson({"type": "done"})
-            except Exception as e:  # noqa: BLE001
-                logging.getLogger("news.chat").exception("chat failed for story %s", story_id)
-                yield ndjson({"type": "error", "text": f"chat failed: {type(e).__name__}"})
-            finally:
-                # Also runs when the client disconnects mid-answer: keep what was generated.
+            steps: list[dict] = []
+            saved = False
+
+            def save() -> None:
+                nonlocal saved
+                if saved:
+                    return
+                saved = True
                 reply = "".join(parts).strip()
-                if reply:
+                if reply or steps:
                     with db.get_conn() as conn:
                         conn.execute(
-                            "INSERT INTO ChatMessage (session_id, role, content) VALUES (?, 'assistant', ?)",
-                            (session_id, reply),
+                            "INSERT INTO ChatMessage (session_id, role, content, steps) "
+                            "VALUES (?, 'assistant', ?, ?)",
+                            (session_id, reply, json.dumps(steps, ensure_ascii=False) if steps else None),
                         )
                         conn.execute("UPDATE ChatSession SET updated_at = datetime('now') WHERE id = ?",
                                      (session_id,))
+
+            try:
+                for kind, payload in chat.stream(story, history, text, body.search_turns, steps):
+                    if kind == "delta":
+                        parts.append(payload)
+                    yield ndjson({"type": kind, "step": payload} if kind == "step" else
+                                 {"type": kind, "text": payload})
+                save()
+                yield ndjson({"type": "done"})
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger("news.chat").exception("chat failed for story %s", story_id)
+                step = chat.add_step(steps, "error", "Answer failed", status="error", detail=chat.error_text(e))
+                save()
+                yield ndjson({"type": "step", "step": step})
+                yield ndjson({"type": "error", "text": f"chat failed: {type(e).__name__}"})
+            finally:
+                # Also runs when the client disconnects mid-answer: keep what was generated.
+                save()
 
         return StreamingResponse(events(), media_type="application/x-ndjson",
                                  headers={**_NO_CACHE, "X-Accel-Buffering": "no"})

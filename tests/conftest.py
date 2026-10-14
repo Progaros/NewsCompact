@@ -53,6 +53,9 @@ class FakeLLM:
         if self.fail:
             raise RuntimeError("ollama down")
         props = schema["properties"]
+        if "query" in props:
+            self.calls.append("query")
+            return {"query": "flood news", "done": False}
         if "breaking" in props:
             self.calls.append("harness")
             return {"quality": 7, "breaking": False}
@@ -79,7 +82,7 @@ class FakeLLM:
 
     def chat_stream(self, messages, **_kw):
         self.calls.append("chat")
-        yield from ("Short ", "answer.")
+        yield from (("thinking", "Hmm. "), ("content", "Short "), ("content", "answer."))
 
 
 @pytest.fixture

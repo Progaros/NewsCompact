@@ -1,7 +1,8 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, auth, config, db, pipeline, worker
+from app import api, auth, config, db, ollama, pipeline, worker
 
 from conftest import add_article
 
@@ -89,9 +90,48 @@ def test_chat_streams_and_persists(client, story, llm):
     r = client.post(f"/api/stories/{story}/chat", json={"message": "What happened?"})
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson")
     events = [json.loads(line) for line in r.text.splitlines() if line]
-    assert [e["type"] for e in events] == ["status", "delta", "delta", "done"]
+    assert [e["type"] for e in events] == ["step", "thinking", "step", "delta", "delta", "done"]
+    assert events[2]["step"]["kind"] == "thinking" and events[2]["step"]["status"] == "ok"
     history = client.get(f"/api/stories/{story}/chat").json()["messages"]
     assert [m["content"] for m in history] == ["What happened?", "Short answer."]
+    assert history[1]["steps"][0]["detail"] == "Hmm. "
+
+
+def test_chat_reports_failed_tools(client, story, llm, monkeypatch):
+    import json
+
+    from app import searchngx
+
+    def boom(*_a, **_k):
+        raise httpx.ConnectError("search host down")
+
+    monkeypatch.setattr(searchngx, "search", boom)
+    r = client.post(f"/api/stories/{story}/chat", json={"message": "Latest?", "search_turns": 1})
+    steps = [json.loads(line)["step"] for line in r.text.splitlines() if '"step"' in line]
+    assert steps[-3]["kind"] == "search" and steps[-3]["status"] == "error"
+    assert "search host down" in steps[-3]["detail"]
+    saved = client.get(f"/api/stories/{story}/chat").json()["messages"][1]["steps"]
+    assert [s["kind"] for s in saved] == ["search", "thinking"]
+
+    def dead_llm(*_a, **_k):
+        raise httpx.ConnectError("ollama down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ollama, "chat_stream", dead_llm)
+    r = client.post(f"/api/stories/{story}/chat", json={"message": "Again?"})
+    events = [json.loads(line) for line in r.text.splitlines() if line]
+    assert events[-1]["type"] == "error" and events[-2]["step"]["title"] == "Answer failed"
+    assert client.get(f"/api/stories/{story}/chat").json()["messages"][-1]["steps"][0]["kind"] == "error"
+
+
+def test_think_tags_are_split_from_the_answer():
+    split = ollama._ThinkSplitter()
+    out = []
+    for chunk in ("<thi", "nk>plan", "ning</th", "ink>\n\nAnswer <b>", "!"):
+        out += split.feed(chunk)
+    out += split.flush()
+    kinds = {k: "".join(t for kk, t in out if kk == k) for k in ("thinking", "content")}
+    assert kinds == {"thinking": "planning", "content": "\n\nAnswer <b>!"}
 
 
 def test_open_mode_is_lan_only(client, monkeypatch):
