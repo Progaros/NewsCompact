@@ -165,6 +165,7 @@ class StoryCard extends HTMLElement {
           <span class="src-names">${feedPreview}</span>
           <span class="chev" aria-hidden="true"></span>
         </button>
+        <button type="button" class="icon-btn share-btn" title="Copy a public link to this story" aria-label="Share">🔗</button>
         <div class="interaction">
           <button type="button" class="icon-btn fb" data-kind="up" title="More like this" aria-label="More like this">👍</button>
           <button type="button" class="icon-btn fb" data-kind="down" title="Less like this" aria-label="Less like this">👎</button>
@@ -185,6 +186,7 @@ class StoryCard extends HTMLElement {
     this.querySelectorAll(".tag").forEach((b) => b.addEventListener("click", () => setTag(b.dataset.tag)));
     this.querySelectorAll(".fb[data-kind]").forEach((b) => b.addEventListener("click", () => this._feedback(b.dataset.kind)));
     this.querySelector(".chat-btn").addEventListener("click", () => Chat.open(d.id));
+    this.querySelector(".share-btn").addEventListener("click", () => copyLink(`/s/${d.id}`));
     this.querySelector(".read-btn").addEventListener("click", () => this._toggleRead());
   }
 }
@@ -374,6 +376,17 @@ async function refreshAll() {
 }
 
 refreshBtn.addEventListener("click", refreshAll);
+document.getElementById("share-brief").addEventListener("click", async () => {
+  const view = Auth.state.authenticated ? state.view : "default";
+  const res = await fetch("/api/share", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "brief", view }),
+  });
+  if (Auth.unauth(res)) return;
+  if (!res.ok) return Auth.toast("No brief to share yet.");
+  copyLink((await res.json()).url);
+});
 setInterval(checkStale, 30000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkStale(); });
 

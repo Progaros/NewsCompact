@@ -117,6 +117,16 @@ CREATE TABLE IF NOT EXISTS ArticleTombstone (
     deleted_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Shared snapshots (/p/<token>): short tokens for default-view content, long unguessable
+-- ones for personal content (personal brief, chat answers).
+CREATE TABLE IF NOT EXISTS ShareLink (
+    token      TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,   -- brief | chat
+    payload    TEXT    NOT NULL,   -- JSON snapshot
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+
 -- Per-story chat: one session per user and story. Messages form a tree: editing a
 -- message adds a sibling (same parent_id); leaf_id is the end of the branch on screen.
 CREATE TABLE IF NOT EXISTS ChatSession (

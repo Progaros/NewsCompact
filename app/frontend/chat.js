@@ -186,9 +186,28 @@ const Chat = (() => {
     for (const m of messages) {
       const el = msgEl(m.role, m.content, m.steps);
       if (m.role === "user") addMsgTools(el, m);
+      else if (m.content) addAnswerTools(el, m);
       box.appendChild(el);
     }
     box.scrollTop = box.scrollHeight;
+  }
+
+  function addAnswerTools(el, m) {
+    const tools = document.createElement("div");
+    tools.className = "chat-msg-tools";
+    tools.innerHTML = `<button type="button" title="Copy a private link to this answer">\u{1F517}</button>`;
+    const storyId = currentStory;
+    tools.querySelector("button").onclick = async () => {
+      const res = await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "chat", story_id: storyId, message_id: m.id }),
+      });
+      if (Auth.unauth(res)) return;
+      if (!res.ok) return Auth.toast("Sharing failed.");
+      copyLink((await res.json()).url);
+    };
+    el.appendChild(tools);
   }
 
   function addMsgTools(el, m) {
@@ -333,5 +352,5 @@ const Chat = (() => {
     if (finished) refreshMessages(storyId);
   }
 
-  return { open, close };
+  return { open, close, mdToHtml };
 })();

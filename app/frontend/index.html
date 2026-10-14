@@ -25,7 +25,10 @@
     <section class="heads-up" aria-label="Quick heads up">
       <div class="heads-up-head">
         <div class="heads-up-label">Quick Heads Up <span id="heads-up-state" class="heads-up-state"></span></div>
-        <button id="refresh-btn" class="refresh-btn" type="button" hidden title="Reload stories and the brief">↻ Refresh</button>
+        <div class="heads-up-actions">
+          <button id="refresh-btn" class="refresh-btn" type="button" hidden title="Reload stories and the brief">↻ Refresh</button>
+          <button id="share-brief" class="refresh-btn signed-only" type="button" title="Copy a link to this brief (personal briefs get a long private link)">🔗</button>
+        </div>
       </div>
       <p id="heads-up-text">Loading brief…</p>
     </section>

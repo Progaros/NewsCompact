@@ -23,7 +23,7 @@ PRIVATE = [
     ("GET", "/api/feeds"), ("POST", "/api/feeds"), ("GET", "/api/feeds/preview?url=https://example.org"),
     ("POST", "/api/feeds/category"), ("PATCH", "/api/feeds/1"), ("DELETE", "/api/feeds/1"),
     ("GET", "/api/admin/users"), ("POST", "/api/admin/users"), ("PATCH", "/api/admin/users/2"),
-    ("DELETE", "/api/admin/users/2"), ("POST", "/api/auth/password"),
+    ("DELETE", "/api/admin/users/2"), ("POST", "/api/auth/password"), ("POST", "/api/share"),
 ]
 PUBLIC = ["/", "/list", "/api/stories", "/api/stories/1", "/api/articles", "/api/heads-up",
           "/api/health", "/api/auth/session", "/static/app.js"]
@@ -210,6 +210,39 @@ def test_admin_manages_users(exposed):
         assert [u["name"] for u in users] == ["admin"]
         assert other.get("/api/profile").status_code == 401
     assert exposed.get("/admin").status_code == 200
+
+
+def test_share_links(exposed, monkeypatch):
+    from app import heads_up
+
+    import time
+
+    heads_up._cache.clear()
+    monkeypatch.setitem(heads_up._cache, "default", {"text": "Public brief", "ts": time.time()})
+    monkeypatch.setitem(heads_up._cache, "user:1", {"text": "Brief for admin", "ts": time.time()})
+    _login(exposed)
+    sid = exposed.get("/api/stories").json()["stories"][0]["id"]
+    assert exposed.get(f"/s/{sid}").status_code == 200
+
+    public = exposed.post("/api/share", json={"kind": "brief", "view": "default"}).json()["url"]
+    private = exposed.post("/api/share", json={"kind": "brief", "view": "personal"}).json()["url"]
+    assert public.startswith("/p/") and len(public) == 3 + 8 and len(private) == 3 + 32
+    exposed.post(f"/api/stories/{sid}/chat", json={"message": "What happened?"})
+    answer = exposed.get(f"/api/stories/{sid}/chat").json()["messages"][-1]
+    chat_url = exposed.post("/api/share", json={"kind": "chat", "story_id": sid, "message_id": answer["id"]}).json()["url"]
+    assert exposed.post("/api/share", json={"kind": "chat", "story_id": sid,
+                                            "message_id": answer["id"] - 1}).status_code == 404  # a question
+
+    exposed.post("/api/auth/logout")
+    assert exposed.get(public).status_code == 200
+    snap = exposed.get("/api/share/" + private[3:]).json()
+    assert snap["text"] == "Brief for admin" and snap["shared_by"] == "admin" and snap["view"] == "personal"
+    chat_snap = exposed.get("/api/share/" + chat_url[3:]).json()
+    assert chat_snap["question"] == "What happened?" and chat_snap["answer"] == "Short answer."
+    assert exposed.get("/api/share/doesnotexist").status_code == 404
+    assert exposed.get("/api/share/bad").status_code == 422
+    assert exposed.get("/p/../../etc").status_code in (401, 404)
+    assert exposed.get("/p/a%2F..%2F..%2Fetc").status_code in (404, 422)
 
 
 def test_password_hashes():

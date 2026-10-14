@@ -107,6 +107,19 @@ body.wide main { max-width: 1400px; }
   color: var(--accent); font-weight: 700; margin-bottom: 10px;
 }
 .heads-up-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.heads-up-actions { display: flex; gap: 6px; }
+body.unsigned-in .signed-only { display: none; }
+.share-btn { margin-left: auto; }
+.share-btn + .interaction { margin-left: 0; }
+.shared { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 22px 26px; }
+.shared .headline { margin: 6px 0 10px; }
+.shared .summary { line-height: 1.65; }
+.shared-kicker { font-size: 12px; color: var(--muted); }
+.shared-kicker a { color: var(--accent); }
+.shared-label { font-size: 12px; color: var(--accent-2); font-weight: 600; margin-top: 16px; }
+.shared-by { font-size: 12px; color: var(--muted); margin-top: 16px; }
+.shared-q { margin: 14px 0 8px; max-width: 100%; align-items: flex-start; }
+.shared .tag { cursor: default; }
 .refresh-btn {
   background: var(--accent-soft); color: var(--accent); border: 1px solid transparent;
   border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer;

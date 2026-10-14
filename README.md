@@ -123,6 +123,9 @@ flowchart LR
   **Everyone** (the default ranking); signed-out visitors always get the default.
   The Quick Heads Up is generated per view and shows "(updating…)" while a
   newer brief is being written, then fades it in.
+  🔗 copies share links: stories get a short public `/s/<id>`; the heads-up
+  (signed in) and chat answers are shared as snapshots `/p/<token>` — short for
+  the default brief, long and unguessable for personal content.
   👍/👎 train tag weights (editable / addable in ⚙ Preferences); **💬 Ask** opens a per-story
   chat whose answer streams in live (optionally after searchngx web-search
   turns; thinking, searches, page reads and tool errors are shown as small
@@ -167,6 +170,8 @@ flowchart LR
 | `GET /api/events` | SSE stream |
 | `GET /api/auth/session` · `POST /api/auth/login` `{"username", "password"}` · `POST /api/auth/logout` | Session (`user`: id, name, is_admin; an empty user name logs in as user 1) |
 | `POST /api/auth/password` `{"current", "new"}` | Change your own password |
+| `POST /api/share` `{"kind": "brief", "view"}` · `{"kind": "chat", "story_id", "message_id"}` | Snapshot a brief / chat answer → `{"url": "/p/<token>"}`; default-view briefs get an 8-char token, personal content a 32-char unguessable one |
+| `GET /api/share/{token}` · pages `/p/{token}`, `/s/{story id}` | Public share views (snapshot; a story in the default view) |
 | `GET/POST /api/admin/users` · `PATCH/DELETE /api/admin/users/{id}` | Admins: list / create `{"name", "password", "is_admin"}` / promote, demote, set password / delete users (user 1 stays admin; no self-demotion or self-deletion) |
 
 With auth enabled, only `/`, `/list`, `/static/*`, the auth endpoints and
@@ -279,7 +284,7 @@ Environment variables; defaults in [app/config.py](app/config.py).
 - `Article_Vectors` — vec0 `FLOAT[1024]`, cosine, primary key `article_id`
 - `AppUser` (name, scrypt password hash, `is_admin`); per user: `UserProfile` (id = user id;
   tag weights, source trust, preferences incl. ntfy report schedules for admins),
-  `FeedbackLog`, `ChatSession` (+ `ChatMessage` tree); shared: `ArticleTombstone`
+  `FeedbackLog`, `ChatSession` (+ `ChatMessage` tree), `ShareLink` snapshots; shared: `ArticleTombstone`
 
 Schema upgrades and data migrations (`PRAGMA user_version`) run automatically
 at startup (`app/db.py`).

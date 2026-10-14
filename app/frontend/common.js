@@ -19,6 +19,17 @@ function hostname(url) {
   }
 }
 
+// Copies an absolute link for `path`; the clipboard API needs HTTPS, so fall back to a prompt.
+async function copyLink(path) {
+  const url = new URL(path, location.origin).href;
+  try {
+    await navigator.clipboard.writeText(url);
+    if (typeof Auth !== "undefined") Auth.toast("Link copied.");
+  } catch {
+    prompt("Copy this link:", url);
+  }
+}
+
 // Server timestamps are naive UTC "YYYY-MM-DD HH:MM:SS".
 function parseUtc(s) {
   if (!s) return NaN;

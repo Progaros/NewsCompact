@@ -6,6 +6,7 @@ import datetime as dt
 import ipaddress
 import json
 import logging
+import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Path as FastPath
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -106,6 +108,16 @@ class PasswordChange(BaseModel):
     new: str = Field(min_length=8, max_length=1024)
 
 
+class ShareCreate(BaseModel):
+    kind: Literal["brief", "chat"]
+    view: Literal["personal", "default"] = "default"  # brief
+    story_id: int | None = None  # chat
+    message_id: int | None = None  # chat: the assistant answer
+
+
+_SHARE_TOKEN = r"^[A-Za-z0-9_-]{8,64}$"
+
+
 _CHAT_HISTORY_MAX = 20  # prior messages sent to the model
 _SSE_MAX_CLIENTS = 50  # /api/events is public; each stream holds a connection
 
@@ -192,6 +204,8 @@ def _is_public(request: Request) -> bool:
     if request.method != "GET":
         return False
     if path in ("/api/stories", "/api/articles", "/api/heads-up", "/api/health", "/api/events"):
+        return True
+    if path.startswith(("/s/", "/p/", "/api/share/")):
         return True
     return path.startswith("/api/stories/") and not path.endswith("/chat")
 
@@ -313,6 +327,14 @@ def create_app() -> FastAPI:
     @app.get("/admin")
     def admin_page():
         return FileResponse(_FRONTEND / "admin.html", headers=_NO_CACHE)
+
+    @app.get("/s/{story_id}")
+    def shared_story_page(story_id: int):
+        return FileResponse(_FRONTEND / "share.html", headers=_NO_CACHE)
+
+    @app.get("/p/{token}")
+    def shared_snapshot_page(token: str = FastPath(pattern=_SHARE_TOKEN)):
+        return FileResponse(_FRONTEND / "share.html", headers=_NO_CACHE)
 
     def _user(request: Request) -> dict[str, Any] | None:
         """Signed-in user (set by the auth middleware); None for anonymous visitors."""
@@ -724,6 +746,46 @@ def create_app() -> FastAPI:
     @app.post("/api/refresh")
     def refresh():
         return worker.refresh()
+
+    # --- share links ---
+    @app.post("/api/share")
+    def create_share(body: ShareCreate, request: Request):
+        """Snapshot a brief or chat answer; personal content gets a long, unguessable token."""
+        uid = _uid(request)
+        if body.kind == "brief":
+            personal = body.view == "personal"
+            st = heads_up.status(heads_up.user_key(uid) if personal else heads_up.DEFAULT)
+            if not st["text"]:
+                raise HTTPException(409, "no brief yet")
+            payload = {"text": st["text"], "view": body.view, "generated_at": st["generated_at"]}
+        else:
+            personal = True
+            with db.get_conn() as conn:
+                row = conn.execute(
+                    "SELECT a.content, q.content AS question, s.headline, s.id AS story_id FROM ChatMessage a "
+                    "JOIN ChatSession c ON c.id = a.session_id JOIN Story s ON s.id = c.story_id "
+                    "LEFT JOIN ChatMessage q ON q.id = a.parent_id "
+                    "WHERE a.id = ? AND a.role = 'assistant' AND c.user_id = ? AND c.story_id = ?",
+                    (body.message_id, uid, body.story_id)).fetchone()
+            if row is None or not row["content"]:
+                raise HTTPException(404, "answer not found")
+            payload = {"story_id": row["story_id"], "headline": row["headline"],
+                       "question": row["question"] or "", "answer": row["content"]}
+        token = secrets.token_urlsafe(24 if personal else 6)
+        with db.get_conn() as conn:
+            conn.execute("INSERT INTO ShareLink (token, user_id, kind, payload) VALUES (?, ?, ?, ?)",
+                         (token, uid, body.kind, json.dumps(payload, ensure_ascii=False)))
+        return {"url": f"/p/{token}"}
+
+    @app.get("/api/share/{token}")
+    def get_share(token: str = FastPath(pattern=_SHARE_TOKEN)):
+        with db.get_conn() as conn:
+            row = conn.execute("SELECT s.kind, s.payload, s.created_at, u.name FROM ShareLink s "
+                               "JOIN AppUser u ON u.id = s.user_id WHERE s.token = ?", (token,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "link not found")
+        return {"kind": row["kind"], "shared_by": row["name"], "created_at": row["created_at"],
+                **db.json_dict(row["payload"])}
 
     # --- user administration (admins only, see _ADMIN_PREFIXES) ---
     def _users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
