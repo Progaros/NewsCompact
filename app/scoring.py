@@ -121,16 +121,23 @@ def excluded_feeds(profile: dict[str, Any]) -> set[int]:
 
 
 def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
-                 story_id: int | None = None, exclude: set[int] = frozenset()) -> dict[int, dict[str, Any]]:
-    """``{story_id: {feeds, trust, quality}}`` per story; ``trust`` = ``feed_trust()``.
+                 story_id: int | None = None, exclude: set[int] = frozenset(),
+                 story_ids: list[int] | None = None) -> dict[int, dict[str, Any]]:
+    """``{story_id: {feeds, trust, quality}}`` per story (``story_id`` / ``story_ids`` limit it; default all).
 
-    ``trust`` sums the best feed trust of each distinct outlet; ``quality`` is the
-    trust-weighted median article quality (plain median if all trust is 0, None without scores).
-    Articles of ``exclude`` feeds don't count (a story with only those is left out).
+    ``trust`` = ``feed_trust()``; the result's ``trust`` sums the best feed trust of each distinct
+    outlet; ``quality`` is the trust-weighted median article quality (plain median if all trust
+    is 0, None without scores). Articles of ``exclude`` feeds don't count (a story with only those
+    is left out).
     """
     sql = ("SELECT a.story_id, a.feed_id, a.quality, f.site_url, f.xml_url "
            "FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
-    rows = conn.execute(sql + " AND a.story_id = ?", (story_id,)) if story_id is not None else conn.execute(sql)
+    if story_id is not None:
+        rows = conn.execute(sql + " AND a.story_id = ?", (story_id,))
+    elif story_ids is not None:
+        rows = conn.execute(sql + " AND a.story_id IN (SELECT value FROM json_each(?))", (json.dumps(story_ids),))
+    else:
+        rows = conn.execute(sql)
     feeds: dict[int, set[int]] = {}
     outlets: dict[int, dict[str, float]] = {}
     quals: dict[int, list[tuple[float, float]]] = {}
@@ -267,11 +274,10 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
         profile = DEFAULT_PROFILE
     elif profile is None:
         profile = get_user_profile(conn, user_id or 1)
-    stats = source_stats(conn, feed_trust(conn, profile), exclude=excluded_feeds(profile))
     reads = read_states(conn, user_id)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-    sql = ("SELECT * FROM Story WHERE headline IS NOT NULL AND COALESCE(news_at, updated_at) "
-           + ("< ?" if archived else ">= ?"))
+    # news_at is always set once a story has a headline (Prompt 2 / migration v5 / init_db backfill).
+    sql = "SELECT * FROM Story WHERE headline IS NOT NULL AND news_at " + ("< ?" if archived else ">= ?")
     params: list[Any] = [cutoff]
     if query:
         sql += " AND (headline LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
@@ -282,8 +288,11 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     except (TypeError, ValueError):
         min_quality = 0.0
     wanted_tag = normalize_tags([tag])[0] if tag and normalize_tags([tag]) else ""
+    stories = conn.execute(sql, params).fetchall()
+    stats = source_stats(conn, feed_trust(conn, profile), exclude=excluded_feeds(profile),
+                         story_ids=[s["id"] for s in stories])
     out = []
-    for s in conn.execute(sql, params):
+    for s in stories:
         st = stats.get(s["id"])
         if st is None:
             continue

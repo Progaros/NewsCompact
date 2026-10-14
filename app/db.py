@@ -53,6 +53,14 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_article_title_key ON Article(title_key)",
     "CREATE INDEX IF NOT EXISTS idx_article_duplicate ON Article(duplicate_of)",
     "CREATE INDEX IF NOT EXISTS idx_feedback_user ON FeedbackLog(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_story_news ON Story(news_at)",
+    # Ranking filters on news_at alone: any story that has a headline must have one.
+    "CREATE TRIGGER IF NOT EXISTS story_news_at_insert AFTER INSERT ON Story "
+    "WHEN NEW.news_at IS NULL AND NEW.headline IS NOT NULL BEGIN "
+    "UPDATE Story SET news_at = COALESCE(NEW.updated_at, datetime('now')) WHERE id = NEW.id; END",
+    "CREATE TRIGGER IF NOT EXISTS story_news_at_update AFTER UPDATE OF headline ON Story "
+    "WHEN NEW.news_at IS NULL AND NEW.headline IS NOT NULL BEGIN "
+    "UPDATE Story SET news_at = COALESCE(NEW.updated_at, datetime('now')) WHERE id = NEW.id; END",
 )
 
 VECTOR_TABLE = "Article_Vectors"
@@ -203,6 +211,8 @@ def init_db() -> None:
                     conn.execute("ROLLBACK")
                     raise
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("UPDATE Story SET news_at = COALESCE(updated_at, created_at) "
+                     "WHERE news_at IS NULL AND headline IS NOT NULL")
         for row in conn.execute(
             "SELECT id, content_raw FROM Article WHERE content_class IS NULL"
         ).fetchall():
