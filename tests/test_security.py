@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, auth, bus, config, heads_up, ingest, pipeline, worker
+from app import api, auth, bus, config, db, heads_up, ingest, pipeline, worker
 
 from conftest import add_article
 
@@ -35,7 +35,6 @@ def exposed(monkeypatch, llm, feed_id):
     monkeypatch.setattr(config, "AUTH_PASSWORD", PASSWORD)
     monkeypatch.setattr(config, "PUBLIC_BASE", BASE)
     monkeypatch.setattr(worker, "start", lambda: None)
-    auth._sessions.clear()
     auth._failures.clear()
     add_article(feed_id, "Flood hits town")
     pipeline.process_pending()
@@ -79,6 +78,19 @@ def test_login_cookie_flags_session_and_logout(exposed):
     assert exposed.get("/api/profile").status_code == 401
     exposed.cookies.set(config.AUTH_COOKIE, "forged-token")
     assert exposed.get("/api/profile").status_code == 401
+
+
+def test_sessions_survive_restarts_but_not_password_changes(exposed, monkeypatch):
+    _login(exposed)
+    token = exposed.cookies.get(config.AUTH_COOKIE)
+    with db.get_conn() as conn:
+        stored = [r[0] for r in conn.execute("SELECT token_hash FROM AuthSession")]
+    assert stored and token not in stored  # only a hash is kept
+    with TestClient(api.create_app(), base_url=BASE, client=("203.0.113.7", 40000)) as restarted:
+        restarted.cookies.set(config.AUTH_COOKIE, token)
+        assert restarted.get("/api/profile").status_code == 200
+        monkeypatch.setattr(config, "AUTH_PASSWORD", "a different env password")
+        assert restarted.get("/api/profile").status_code == 401  # env password changed
 
 
 def test_login_bruteforce_is_throttled_even_for_the_right_password(exposed):
@@ -374,7 +386,8 @@ def test_web_exposed_hardening_edges(exposed, monkeypatch):
     # 5. Session table is bounded under login flood
     monkeypatch.setattr(auth, "_MAX_SESSIONS", 5)
     tokens = [auth.create_session(1) for _ in range(8)]
-    assert len(auth._sessions) == 5
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT count(*) FROM AuthSession").fetchone()[0] == 5
     assert not auth.is_authenticated(tokens[0]) and auth.is_authenticated(tokens[-1])
 
     # 6. Changing own password revokes other active sessions of the same user

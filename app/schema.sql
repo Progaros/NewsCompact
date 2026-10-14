@@ -76,6 +76,18 @@ CREATE TABLE IF NOT EXISTS AppUser (
 
 INSERT OR IGNORE INTO AppUser (id, name, is_admin) VALUES (1, 'admin', 1);
 
+-- Login sessions (app/auth.py). Only the SHA-256 of the cookie token is stored, so a copy
+-- of the database can't be replayed as a login. env_stamp ties sessions opened with
+-- NEWS_AUTH_PASSWORD (owner without own password) to it: changing that password ends them.
+CREATE TABLE IF NOT EXISTS AuthSession (
+    token_hash TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    expires_at REAL    NOT NULL,   -- epoch seconds
+    env_stamp  TEXT,
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_authsession_user ON AuthSession(user_id);
+
 -- One row per user (id = AppUser.id), created on first use.
 CREATE TABLE IF NOT EXISTS UserProfile (
     id             INTEGER PRIMARY KEY,

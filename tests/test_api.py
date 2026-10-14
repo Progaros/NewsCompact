@@ -309,5 +309,4 @@ def test_auth_allowlist(client, story, monkeypatch):
     assert client.post("/api/auth/login", json={"password": "nope"}).status_code == 401
     assert client.post("/api/auth/login", json={"password": "secret"}).status_code == 200
     assert get("/api/feeds") == 200
-    auth._sessions.clear()
     auth._failures.clear()

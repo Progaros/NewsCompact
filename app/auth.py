@@ -1,8 +1,10 @@
-"""Login: user name + password → cookie session (in-memory), for several users.
+"""Login: user name + password → cookie session, for several users.
 
 Design decisions (see findings.md, "Authentication & API security"):
-- Sessions live in a module-level dict (token → user id, expiry) — a server
-  restart means re-login, which is exactly the blast radius we want.
+- Sessions live in the AuthSession table keyed by the SHA-256 of the cookie token
+  (the token itself is never stored), so they survive restarts. Expiry is fixed
+  (AUTH_SESSION_HOURS); the table is capped at _MAX_SESSIONS (oldest dropped).
+  Owner sessions opened with NEWS_AUTH_PASSWORD end when that password changes.
 - Passwords are stored as salted scrypt hashes (AppUser.password_hash). User 1
   (the admin from the single-user era) logs in with NEWS_AUTH_PASSWORD until
   it gets a password of its own.
@@ -49,9 +51,6 @@ def verify_password(password: str, stored: str | None) -> bool:
 
 
 # --- sessions --------------------------------------------------------------
-
-_sessions: dict[str, tuple[int, float]] = {}  # token -> (user id, expires epoch seconds)
-_lock = threading.Lock()
 
 
 def auth_enabled() -> bool:
@@ -104,34 +103,46 @@ def change_password(user_id: int, current: str, new: str) -> bool:
         return ok
 
 
-def _sweep_locked() -> None:
-    """Drop expired sessions. Caller must hold `_lock`."""
-    now = time.time()
-    for tok in [t for t, (_uid, exp) in _sessions.items() if exp <= now]:
-        del _sessions[tok]
-
-
 _MAX_SESSIONS = 500
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _env_stamp() -> str:
+    return hashlib.sha256(("env:" + config.AUTH_PASSWORD).encode("utf-8")).hexdigest()[:16]
 
 
 def create_session(user_id: int = OWNER_ID) -> str:
     token = secrets.token_urlsafe(32)  # 256-bit
-    with _lock:
-        _sweep_locked()
-        if len(_sessions) >= _MAX_SESSIONS:
-            oldest = min(_sessions, key=lambda t: _sessions[t][1])
-            del _sessions[oldest]
-        _sessions[token] = (user_id, time.time() + config.AUTH_SESSION_HOURS * 3600)
+    now = time.time()
+    with db.get_conn() as conn:
+        row = _user_row(conn, user_id=user_id)
+        stamp = _env_stamp() if row is not None and not row["password_hash"] else None
+        conn.execute("DELETE FROM AuthSession WHERE expires_at <= ?", (now,))
+        excess = conn.execute("SELECT count(*) FROM AuthSession").fetchone()[0] - _MAX_SESSIONS + 1
+        if excess > 0:
+            conn.execute("DELETE FROM AuthSession WHERE token_hash IN "
+                         "(SELECT token_hash FROM AuthSession ORDER BY expires_at LIMIT ?)", (excess,))
+        conn.execute("INSERT INTO AuthSession (token_hash, user_id, expires_at, env_stamp) VALUES (?, ?, ?, ?)",
+                     (_token_hash(token), user_id, now + config.AUTH_SESSION_HOURS * 3600, stamp))
     return token
 
 
 def session_user_id(token: str | None) -> int | None:
     if not token:
         return None
-    with _lock:
-        _sweep_locked()
-        entry = _sessions.get(token)
-    return entry[0] if entry and entry[1] > time.time() else None
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT s.user_id, s.env_stamp, u.password_hash FROM AuthSession s JOIN AppUser u ON u.id = s.user_id "
+            "WHERE s.token_hash = ? AND s.expires_at > ?", (_token_hash(token), time.time()),
+        ).fetchone()
+    if row is None:
+        return None
+    if not row["password_hash"] and row["env_stamp"] != _env_stamp():
+        return None  # opened with a NEWS_AUTH_PASSWORD that has changed since
+    return row["user_id"]
 
 
 def current_user(token: str | None) -> dict[str, Any] | None:
@@ -153,14 +164,14 @@ def is_authenticated(token: str | None) -> bool:
 
 def destroy_session(token: str | None) -> None:
     if token:
-        with _lock:
-            _sessions.pop(token, None)
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM AuthSession WHERE token_hash = ?", (_token_hash(token),))
 
 
 def end_user_sessions(user_id: int, *, keep: str | None = None) -> None:
-    with _lock:
-        for tok in [t for t, (uid, _exp) in _sessions.items() if uid == user_id and t != keep]:
-            del _sessions[tok]
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM AuthSession WHERE user_id = ? AND token_hash != ?",
+                     (user_id, _token_hash(keep) if keep else ""))
 
 
 # --- login throttle (per client IP, sliding window) -------------------------
