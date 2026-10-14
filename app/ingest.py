@@ -117,6 +117,8 @@ def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -
     r = http().get(url, headers=headers)
     if r.status_code != 304:
         r.raise_for_status()
+        if len(r.content) > _MAX_PAGE_BYTES:
+            raise ValueError("feed response exceeds size limit")
     return r
 
 
@@ -217,7 +219,8 @@ def ingest_feed(feed: dict[str, Any]) -> int:
     too_old = _retention_cutoff()
     with db.get_conn() as conn:
         if r.status_code != 304:
-            entries = feedparser.parse(r.content).entries[: config.MAX_ITEMS_PER_FEED]
+            parsed = feedparser.parse(r.content, resolve_relative_uris=False, sanitize_html=False)
+            entries = parsed.entries[: config.MAX_ITEMS_PER_FEED]
             for entry in entries:
                 link = (entry.get("link") or "").strip() or None
                 title = (entry.get("title") or "").strip()

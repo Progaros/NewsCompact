@@ -207,7 +207,7 @@ def _is_public(request: Request) -> bool:
         return True
     if path.startswith(("/s/", "/p/", "/api/share/")):
         return True
-    return path.startswith("/api/stories/") and not path.endswith("/chat")
+    return path.startswith("/api/stories/") and "/chat" not in path
 
 
 _SECURITY_HEADERS = {
@@ -224,14 +224,10 @@ _SECURITY_HEADERS = {
 
 
 def _from_lan(request: Request) -> bool:
-    """Client and every proxy-reported hop are private/loopback addresses.
-
-    The last X-Forwarded-For entry is what nginx itself appended, so a client
-    can't spoof its way in by sending a private address.
-    """
+    """Client and every proxy-reported hop are private/loopback addresses."""
     hops = [request.client.host if request.client else ""]
-    fwd = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
-    hops += fwd[-1:] + [request.headers.get("x-real-ip", "").strip()]
+    hops += [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    hops += [request.headers.get("x-real-ip", "").strip()]
     for hop in filter(None, hops):
         try:
             ip = ipaddress.ip_address(hop)
@@ -242,13 +238,30 @@ def _from_lan(request: Request) -> bool:
     return True
 
 
+def _client_ip(request: Request) -> str:
+    """Right-most X-Forwarded-For hop when connected via a local/private proxy, else peer IP."""
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+        trusted_proxy = peer_ip.is_private or peer_ip.is_loopback
+    except ValueError:
+        trusted_proxy = False
+    if trusted_proxy:
+        fwd = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+        if fwd:
+            return fwd[-1]
+        real = request.headers.get("x-real-ip", "").strip()
+        if real:
+            return real
+    return peer
+
+
 def _same_origin(request: Request) -> bool:
     """Browsers send Origin on cross-site writes; non-browser clients usually send none."""
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         return True
     allowed = {request.headers.get("host", ""), urlsplit(config.PUBLIC_BASE).netloc}
-    allowed.update(h.strip() for h in request.headers.get("x-forwarded-host", "").split(",") if h.strip())
     return urlsplit(origin).netloc in allowed
 
 
@@ -434,8 +447,9 @@ def create_app() -> FastAPI:
             where.append(f"({pipeline.STATUS_SQL}) = ?")
             params.append(status)
         if q.strip():
-            where.append("(a.title LIKE ? OR f.title LIKE ?)")
-            params += [f"%{q.strip()}%"] * 2
+            like = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(a.title LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
+            params += [like, like]
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         base = f"FROM Article a JOIN Feed f ON f.id = a.feed_id {where_sql}"
         with db.get_conn() as conn:
@@ -619,7 +633,7 @@ def create_app() -> FastAPI:
         resp = JSONResponse({"ok": True})
         if not auth.auth_enabled() and not body.username.strip():
             return resp  # open mode: LAN visitors already act as user 1
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
         if auth.login_throttled(ip):
             raise HTTPException(429, "too many failed attempts — try again shortly")
         user = auth.authenticate(body.username, body.password)
@@ -641,12 +655,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/auth/password")
     def change_password(body: PasswordChange, request: Request):
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
         if auth.login_throttled(ip):
             raise HTTPException(429, "too many failed attempts — try again shortly")
-        if not auth.change_password(_uid(request), body.current, body.new):
+        uid = _uid(request)
+        if not auth.change_password(uid, body.current, body.new):
             auth.record_failure(ip)
             raise HTTPException(403, "current password is wrong")
+        auth.end_user_sessions(uid, keep=request.cookies.get(config.AUTH_COOKIE))
         return {"ok": True}
 
     @app.post("/api/auth/logout")
@@ -902,7 +918,7 @@ def create_app() -> FastAPI:
             r = ingest.fetch(url)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(422, f"fetch failed: {e}") from e
-        parsed = feedparser.parse(r.content)
+        parsed = feedparser.parse(r.content, resolve_relative_uris=False, sanitize_html=False)
         title = (parsed.feed.get("title") or "").strip()
         if not title and parsed.entries:
             title = (parsed.entries[0].get("title") or "").strip()

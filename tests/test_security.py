@@ -299,3 +299,51 @@ def test_public_heads_up_never_runs_parallel_generations(monkeypatch, feed_id, l
     release.set()
     first.join()
     assert len(calls) == 1 and heads_up.brief() == ("brief", True)
+
+
+def test_web_exposed_hardening_edges(exposed, monkeypatch):
+    # 1. Trailing-slash or sub-path on /chat must never bypass _is_public
+    assert exposed.get("/api/stories/1/chat/").status_code == 401
+    assert exposed.get("/api/stories/1/chat/anything").status_code == 401
+    assert exposed.get("/admin", follow_redirects=False).status_code == 303
+
+    # 2. Spoofed X-Forwarded-Host from an untrusted internet client cannot bypass CSRF Origin check
+    _login(exposed)
+    spoof_csrf = {"Origin": "https://evil.example", "X-Forwarded-Host": "evil.example"}
+    assert exposed.post("/api/stories/1/read", headers=spoof_csrf).status_code == 403
+    assert exposed.put("/api/profile", headers=spoof_csrf, json={}).status_code == 403
+    exposed.post("/api/auth/logout")
+
+    # 3. Behind local nginx (127.0.0.1), login throttle is per right-most X-Forwarded-For IP, not shared
+    with TestClient(api.create_app(), base_url=BASE, client=("127.0.0.1", 40000)) as proxied:
+        for _ in range(5):
+            assert proxied.post("/api/auth/login", json={"password": "wrong"},
+                                headers={"X-Forwarded-For": "198.51.100.10"}).status_code == 401
+        assert proxied.post("/api/auth/login", json={"password": PASSWORD},
+                            headers={"X-Forwarded-For": "198.51.100.10"}).status_code == 429
+        # Spoofed left-most entry does not evade throttle on 198.51.100.10
+        assert proxied.post("/api/auth/login", json={"password": PASSWORD},
+                            headers={"X-Forwarded-For": "1.2.3.4, 198.51.100.10"}).status_code == 429
+        # A legitimate second user on a different IP is NOT locked out by the first IP
+        assert proxied.post("/api/auth/login", json={"password": PASSWORD},
+                            headers={"X-Forwarded-For": "198.51.100.99"}).status_code == 200
+
+    # 4. Article search escapes LIKE wildcards and SQL payloads safely
+    _login(exposed)
+    assert exposed.get("/api/articles", params={"q": "100%"}).json()["count"] == 0
+    assert exposed.get("/api/articles", params={"q": "_"}).json()["count"] == 0
+    assert exposed.get("/api/articles", params={"q": "' OR 1=1 --"}).json()["count"] == 0
+    assert exposed.get("/api/stories", params={"q": "' UNION SELECT * FROM AppUser --"}).json()["count"] == 0
+
+    # 5. Session table is bounded under login flood
+    monkeypatch.setattr(auth, "_MAX_SESSIONS", 5)
+    tokens = [auth.create_session(1) for _ in range(8)]
+    assert len(auth._sessions) == 5
+    assert not auth.is_authenticated(tokens[0]) and auth.is_authenticated(tokens[-1])
+
+    # 6. Changing own password revokes other active sessions of the same user
+    s1 = auth.create_session(1)
+    s2 = auth.create_session(1)
+    exposed.cookies.set(config.AUTH_COOKIE, s1)
+    assert exposed.post("/api/auth/password", json={"current": PASSWORD, "new": "new-owner-pw-123"}).status_code == 200
+    assert auth.is_authenticated(s1) and not auth.is_authenticated(s2)

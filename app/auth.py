@@ -111,10 +111,16 @@ def _sweep_locked() -> None:
         del _sessions[tok]
 
 
+_MAX_SESSIONS = 500
+
+
 def create_session(user_id: int = OWNER_ID) -> str:
     token = secrets.token_urlsafe(32)  # 256-bit
     with _lock:
         _sweep_locked()
+        if len(_sessions) >= _MAX_SESSIONS:
+            oldest = min(_sessions, key=lambda t: _sessions[t][1])
+            del _sessions[oldest]
         _sessions[token] = (user_id, time.time() + config.AUTH_SESSION_HOURS * 3600)
     return token
 
@@ -151,9 +157,9 @@ def destroy_session(token: str | None) -> None:
             _sessions.pop(token, None)
 
 
-def end_user_sessions(user_id: int) -> None:
+def end_user_sessions(user_id: int, *, keep: str | None = None) -> None:
     with _lock:
-        for tok in [t for t, (uid, _exp) in _sessions.items() if uid == user_id]:
+        for tok in [t for t, (uid, _exp) in _sessions.items() if uid == user_id and t != keep]:
             del _sessions[tok]
 
 
