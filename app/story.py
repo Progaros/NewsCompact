@@ -220,16 +220,24 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
     rated = system is not _SYSTEM_FULL
     prev_summary = (story["summary"] or "") if story is not None else ""
 
-    out = ollama.structured(
-        _RATED_SCHEMA if rated else _SCHEMA,
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.2,
-        prose_fallback=True,
-    )
-    if isinstance(out, list):  # prose fallback may wrap the object in an array
-        out = next((x for x in out if isinstance(x, dict)), None)
-    if not isinstance(out, dict):
-        raise ValueError(f"Prompt2 returned non-object JSON: {str(out)[:200]!r}")
+    # A malformed reply is retried once here instead of re-running the whole article later.
+    for attempt in range(2):
+        try:
+            out = ollama.structured(
+                _RATED_SCHEMA if rated else _SCHEMA,
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.2,
+                prose_fallback=True,
+            )
+            if isinstance(out, list):  # prose fallback may wrap the object in an array
+                out = next((x for x in out if isinstance(x, dict)), None)
+            if not isinstance(out, dict):
+                raise ValueError(f"Prompt2 returned non-object JSON: {str(out)[:200]!r}")
+            break
+        except ValueError as e:
+            if attempt:
+                raise
+            log.warning("Prompt2 reply unusable for story %s, retrying once: %s", story_id, e)
     _log_violations(story_id, out)
 
     metrics = sanitize_metrics(out.get("metrics"))

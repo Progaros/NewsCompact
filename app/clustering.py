@@ -50,13 +50,15 @@ def get_vector(conn: sqlite3.Connection, article_id: int) -> Vector | None:
     return db.unpack_floats(bytes(row[0])) if row else None
 
 
-def ensure_embedding(conn: sqlite3.Connection, article: dict[str, Any]) -> Vector:
-    """Return the stored vector, embedding + storing it once if missing."""
-    vec = get_vector(conn, article["id"])
+def ensure_embedding(conn: sqlite3.Connection, article: dict[str, Any], vec: Vector | None = None) -> Vector:
+    """Return the stored vector, storing ``vec`` (or embedding it) once if missing."""
+    stored = get_vector(conn, article["id"])
+    if stored is not None:
+        return stored
     if vec is None:
         vec = ollama.embed_one(embed_text_for(article))
-        conn.execute(f"INSERT INTO {_VT} (article_id, embedding) VALUES (?, ?)",
-                     (article["id"], db.pack_floats(vec)))
+    conn.execute(f"INSERT INTO {_VT} (article_id, embedding) VALUES (?, ?)",
+                 (article["id"], db.pack_floats(vec)))
     return vec
 
 
@@ -86,22 +88,32 @@ def knn(conn: sqlite3.Connection, vec: Vector, k: int) -> list[tuple[int, float]
 
 # --- candidate stories -----------------------------------------------------
 class AnchorCache:
-    """Normalized anchor vectors per story (non-broken members, else all members)."""
+    """Normalized anchor vectors per story (non-broken members, else all members).
 
-    def __init__(self, conn: sqlite3.Connection):
+    Membership is re-read on every call (one indexed query), only the per-article
+    vectors are cached, so one cache can serve a whole batch while stories change.
+    Set ``conn`` before use on a new connection.
+    """
+
+    def __init__(self, conn: sqlite3.Connection | None = None):
         self.conn = conn
-        self._cache: dict[int, list[Vector]] = {}
+        self._vecs: dict[int, Vector] = {}
 
     def __call__(self, story_id: int) -> list[Vector]:
-        if story_id not in self._cache:
-            rows = self.conn.execute(
-                "SELECT id, COALESCE(content_class, '') = 'broken' FROM Article WHERE story_id = ?",
-                (story_id,),
-            ).fetchall()
-            ids = [r[0] for r in rows if not r[1]] or [r[0] for r in rows]
-            vecs = (get_vector(self.conn, aid) for aid in ids)
-            self._cache[story_id] = [normalize(v) for v in vecs if v is not None]
-        return self._cache[story_id]
+        rows = self.conn.execute(
+            "SELECT id, COALESCE(content_class, '') = 'broken' FROM Article WHERE story_id = ?",
+            (story_id,),
+        ).fetchall()
+        ids = [r[0] for r in rows if not r[1]] or [r[0] for r in rows]
+        out = []
+        for aid in ids:
+            if aid not in self._vecs:
+                v = get_vector(self.conn, aid)
+                if v is None:
+                    continue
+                self._vecs[aid] = normalize(v)
+            out.append(self._vecs[aid])
+        return out
 
 
 def window_cutoff() -> str:
@@ -193,12 +205,15 @@ def _pick(conn, article, cands, threshold_two_stage, threshold_cosine):
 
 
 def decide_story(conn: sqlite3.Connection, vec: Vector,
-                 article: dict[str, Any] | None = None) -> tuple[int, bool, bool]:
+                 article: dict[str, Any] | None = None,
+                 anchors: AnchorCache | None = None) -> tuple[int, bool, bool]:
     """Return ``(story_id, created, revived)``; creates a placeholder story when nothing matches.
 
     Without ``article`` (maintenance scripts) the cosine path is used.
     """
-    anchors = AnchorCache(conn)
+    if anchors is None:
+        anchors = AnchorCache()
+    anchors.conn = conn
     cutoff = window_cutoff()
     sid, _ = _pick(conn, article, nearest_stories(conn, vec, anchors, since=cutoff),
                    config.CLUSTER_VERIFY_RETRIEVE_THRESHOLD, config.CLUSTER_SIM_THRESHOLD)

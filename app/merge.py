@@ -77,9 +77,9 @@ def _size(conn: sqlite3.Connection, story_id: int) -> int:
 
 
 def _check(conn: sqlite3.Connection, s: sqlite3.Row, since: str,
-           index: _TermIndex) -> tuple[bool, int | None, int | None]:
+           index: _TermIndex, anchors: clustering.AnchorCache) -> tuple[bool, int | None, int | None]:
     """Returns (verifier_called, keep, drop)."""
-    anchors = clustering.AnchorCache(conn)
+    anchors.conn = conn
     best: dict[int, float] = {}
     for vec in anchors(s["id"])[: config.MERGE_ANCHORS_PER_STORY]:
         for sid, sim in clustering.nearest_stories(conn, vec, anchors, since=since, exclude=s["id"]):
@@ -114,6 +114,7 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
             (since, config.MERGE_MAX_CHECKS_PER_RUN * 4),
         ).fetchall()
         index = _TermIndex(conn, since)
+    anchors = clustering.AnchorCache()
     for row in todo:
         if should_stop() or result["verified"] >= config.MERGE_MAX_CHECKS_PER_RUN:
             break
@@ -123,7 +124,7 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
             if s is None:  # absorbed earlier in this run
                 continue
             result["checked"] += 1
-            verified, keep, drop = _check(conn, s, since, index)
+            verified, keep, drop = _check(conn, s, since, index, anchors)
             result["verified"] += int(verified)
             conn.execute("UPDATE Story SET merge_checked_at = datetime('now') WHERE id = ?", (s["id"],))
             if keep is None:

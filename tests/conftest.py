@@ -40,6 +40,8 @@ class FakeLLM:
         self.urgency = 4
         self.fail = False
         self.down = False
+        self.malformed = 0  # next N Prompt 2 replies are unparseable
+        self.embed_batches: list[int] = []
 
     def available(self):
         return not self.down
@@ -48,6 +50,12 @@ class FakeLLM:
         if self.down:
             raise httpx.ConnectError("refused")
         return topic_vector(text)
+
+    def embed_texts(self, texts):
+        if self.down:
+            raise httpx.ConnectError("refused")
+        self.embed_batches.append(len(texts))
+        return [topic_vector(t) for t in texts]
 
     def structured(self, schema, messages, **_kw):
         if self.fail:
@@ -63,6 +71,9 @@ class FakeLLM:
             self.calls.append("verify")
             return {"classifications": [self.verdict] * 3}
         self.calls.append("story")
+        if self.malformed:
+            self.malformed -= 1
+            raise ValueError("could not parse JSON from model output: 'oops'")
         user = messages[-1]["content"]
         return {
             "new_facts": ["New detail"] * self.significance,
@@ -89,6 +100,7 @@ class FakeLLM:
 def llm(monkeypatch):
     fake = FakeLLM()
     monkeypatch.setattr(ollama, "embed_one", fake.embed_one)
+    monkeypatch.setattr(ollama, "embed_texts", fake.embed_texts)
     monkeypatch.setattr(ollama, "structured", fake.structured)
     monkeypatch.setattr(ollama, "chat", fake.chat)
     monkeypatch.setattr(ollama, "chat_stream", fake.chat_stream)

@@ -65,6 +65,9 @@ HARNESS_TIMEOUT = _float("NEWS_HARNESS_TIMEOUT", 120)
 # on its own thread and is woken as soon as a feed commits new articles.
 WORKER_INTERVAL_SECONDS = _int("NEWS_WORKER_INTERVAL", 300)
 PIPELINE_BATCH = _int("NEWS_PIPELINE_BATCH", 50)
+EMBED_BATCH = _int("NEWS_EMBED_BATCH", 16)  # texts per Ollama /api/embed call at batch start
+# Pending articles of categories with SOURCE_TRUST below this are processed after the rest.
+BACKLOG_LOW_TRUST_BELOW = _float("NEWS_BACKLOG_LOW_TRUST_BELOW", 0.5)
 # Articles failing this many pipeline runs are parked (dead letter).
 PIPELINE_MAX_FAILURES = _int("NEWS_PIPELINE_MAX_FAILURES", 3)
 

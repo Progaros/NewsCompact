@@ -95,6 +95,60 @@ def test_newest_articles_are_processed_first(feed_id, llm):
     assert new > old
 
 
+def test_low_trust_backlog_waits_for_the_rest(feed_id, llm, monkeypatch):
+    with db.get_conn() as conn:
+        reddit = conn.execute("INSERT INTO Feed (title, xml_url, category) "
+                              "VALUES ('r', 'https://r/rss', 'Reddit')").lastrowid
+    news = add_article(feed_id, "Alpha news", age="-2 hours")
+    post = add_article(reddit, "Beta post")
+    order = []
+    real = pipeline.process_article
+    monkeypatch.setattr(pipeline, "process_article", lambda art, *a, **k: order.append(art["id"]) or real(art, *a, **k))
+    assert pipeline.process_pending() == {"processed": 2, "failed": 0}
+    assert order == [news, post]
+
+
+def test_batch_embedding_is_used_and_falls_back(feed_id, llm, monkeypatch):
+    from app import clustering, ollama
+
+    ids = [add_article(feed_id, f"Topic {n} story") for n in "abc"]
+    assert pipeline.process_pending()["processed"] == 3
+    assert llm.embed_batches == [3]
+    with db.get_conn() as conn:
+        assert all(clustering.get_vector(conn, i) is not None for i in ids)
+        assert all(r[0] > 0 for r in conn.execute("SELECT t_embed_s FROM Article"))
+
+    def boom(_texts):
+        raise RuntimeError("embed count mismatch")
+    monkeypatch.setattr(ollama, "embed_texts", boom)
+    add_article(feed_id, "Topic d story")
+    assert pipeline.process_pending()["processed"] == 1  # one-by-one fallback
+
+
+def test_unparseable_prompt2_is_retried_once(feed_id, llm):
+    llm.malformed = 1
+    add_article(feed_id, "Flood hits town")
+    assert pipeline.process_pending() == {"processed": 1, "failed": 0}
+    assert llm.calls == ["harness", "story", "story"]
+    llm.malformed = 2
+    add_article(feed_id, "Volcano erupts", url="https://example.org/volcano")
+    assert pipeline.process_pending() == {"processed": 0, "failed": 1}
+
+
+def test_anchor_cache_follows_membership(feed_id, llm):
+    from app import clustering
+
+    llm.verdict = "UNRELATED"
+    a, b = add_article(feed_id, "Flood hits town"), add_article(feed_id, "Volcano erupts")
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        anchors = clustering.AnchorCache(conn)
+        sa, sb = _story_of(a), _story_of(b)
+        assert len(anchors(sa)) == 1
+        conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (sa, b))
+        assert len(anchors(sa)) == 2 and anchors(sb) == []
+
+
 def test_failure_counts_and_dead_letters(feed_id, llm):
     aid = add_article(feed_id, "Storm warning")
     llm.fail = True

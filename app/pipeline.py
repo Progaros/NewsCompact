@@ -6,6 +6,7 @@ bottleneck). Every successful run stores per-stage wall times plus
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
@@ -80,10 +81,13 @@ def _is_junk_join(conn: sqlite3.Connection, art: dict[str, Any], story_id: int) 
     return classes <= {"", "broken", "thin"}
 
 
-def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = None) -> str:
+def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = None, *,
+                    anchors: clustering.AnchorCache | None = None,
+                    embedded: tuple[list[float], float] | None = None) -> str:
     """Run the full pipeline for one article.
 
-    Returns "ok", "failed" (counted towards the dead letter) or "unavailable"
+    ``anchors`` may be shared across a batch; ``embedded`` = ``(vector, seconds)`` from a batch
+    embedding call. Returns "ok", "failed" (counted towards the dead letter) or "unavailable"
     (Ollama unreachable: rolled back without counting).
     """
     wall0, cpu0 = time.perf_counter(), time.process_time()
@@ -99,10 +103,12 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
     try:
         with db.get_conn() as conn:
             t0 = time.perf_counter()
-            vec = clustering.ensure_embedding(conn, art)
+            vec = clustering.ensure_embedding(conn, art, embedded[0] if embedded else None)
             t0 = stage("embed", t0)
+            if embedded:
+                t["embed"] += embedded[1]
 
-            story_id, created, revived = clustering.decide_story(conn, vec, art)
+            story_id, created, revived = clustering.decide_story(conn, vec, art, anchors)
             conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (story_id, art["id"]))
             t0 = stage("cluster", t0)
 
@@ -169,7 +175,8 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
 # --- batch -----------------------------------------------------------------
 def process_pending(*, emit: Callable[[dict], None] | None = None,
                     should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
-    """Drain the pending queue, newest first so a backlog never delays fresh news.
+    """Drain the pending queue, newest first so a backlog never delays fresh news
+    (low-trust categories wait for the rest; see ``_drain``).
 
     Each article is tried at most once per call.
     """
@@ -192,22 +199,54 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
     return result
 
 
+def _low_trust_categories() -> str:
+    return json.dumps([c for c, w in config.SOURCE_TRUST.items() if w < config.BACKLOG_LOW_TRUST_BELOW])
+
+
+def _embed_batch(batch: list[dict[str, Any]]) -> dict[int, tuple[list[float], float]]:
+    """``{article_id: (vector, seconds share)}`` for batch articles without a stored vector.
+
+    One Ollama call per chunk instead of one per article; vectors are only stored when
+    the article is processed, so pending ones never crowd the KNN results. On failure
+    the articles fall back to embedding one by one.
+    """
+    with db.get_conn() as conn:
+        todo = [a for a in batch if clustering.get_vector(conn, a["id"]) is None]
+    out: dict[int, tuple[list[float], float]] = {}
+    for i in range(0, len(todo), config.EMBED_BATCH):
+        chunk = todo[i : i + config.EMBED_BATCH]
+        t0 = time.perf_counter()
+        try:
+            vecs = ollama.embed_texts([clustering.embed_text_for(a) for a in chunk])
+        except Exception as e:  # noqa: BLE001 - per-article embedding still works (or reports unavailable)
+            log.warning("batch embedding failed (%s); embedding one by one", e)
+            return out
+        share = (time.perf_counter() - t0) / len(chunk)
+        out.update({a["id"]: (v, share) for a, v in zip(chunk, vecs)})
+    return out
+
+
 def _drain(result: dict[str, int], tried: set[int], emit: Callable[[dict], None] | None,
            should_stop: Callable[[], bool]) -> None:
+    # Newest first; low-trust categories (Reddit ...) only after the rest of a backlog. Nothing is skipped.
+    low = _low_trust_categories()
     while not should_stop():
         with db.get_conn() as conn:
             rows = conn.execute(
-                f"SELECT a.* FROM Article a WHERE {PENDING_WHERE} ORDER BY a.id DESC LIMIT ?",
-                (config.PIPELINE_MAX_FAILURES, config.PIPELINE_BATCH + len(tried)),
+                f"SELECT a.* FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE {PENDING_WHERE} "
+                "ORDER BY COALESCE(f.category, '') IN (SELECT value FROM json_each(?)), a.id DESC LIMIT ?",
+                (config.PIPELINE_MAX_FAILURES, low, config.PIPELINE_BATCH + len(tried)),
             ).fetchall()
         batch = [dict(r) for r in rows if r["id"] not in tried][: config.PIPELINE_BATCH]
         if not batch:
             return
+        embedded = _embed_batch(batch)
+        anchors = clustering.AnchorCache()
         for art in batch:
             if should_stop():
                 return
             tried.add(art["id"])
-            outcome = process_article(art, emit)
+            outcome = process_article(art, emit, anchors=anchors, embedded=embedded.get(art["id"]))
             if outcome == "unavailable":
                 return
             result["processed" if outcome == "ok" else "failed"] += 1
