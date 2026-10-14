@@ -16,9 +16,11 @@ import logging
 import re
 import socket
 import threading
+import urllib.request
 from typing import Any, Callable
 
 import feedparser
+import httpcore
 import httpx
 
 from . import config, content_quality, db, dedup
@@ -30,21 +32,29 @@ _client_lock = threading.Lock()
 
 
 def http() -> httpx.Client:
-    """Shared pooled client for feeds and article pages (thread-safe)."""
-    global _client
+    """Shared pooled client for feeds (thread-safe); article pages use ``page_http``."""
     with _client_lock:
-        if _client is None:
-            _client = httpx.Client(
-                timeout=config.FETCH_TIMEOUT,
-                follow_redirects=True,
-                headers={"User-Agent": config.USER_AGENT},
-                limits=httpx.Limits(max_connections=config.FETCH_CONCURRENCY * 2),
-            )
-        return _client
+        return _http_unlocked()
+
+
+def _http_unlocked() -> httpx.Client:
+    global _client
+    if _client is None:
+        _client = httpx.Client(
+            timeout=config.FETCH_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": config.USER_AGENT},
+            limits=httpx.Limits(max_connections=config.FETCH_CONCURRENCY * 2),
+        )
+    return _client
 
 
 def is_http_url(url: str | None) -> bool:
     return bool(url) and url.lower().startswith(("http://", "https://"))
+
+
+def _is_global(addr: str) -> bool:
+    return ipaddress.ip_address(addr.split("%")[0]).is_global
 
 
 def is_public_url(url: str) -> bool:
@@ -56,7 +66,64 @@ def is_public_url(url: str) -> bool:
         infos = socket.getaddrinfo(host, None)
     except (httpx.InvalidURL, OSError, UnicodeError):
         return False
-    return bool(infos) and all(ipaddress.ip_address(info[4][0].split("%")[0]).is_global for info in infos)
+    return bool(infos) and all(_is_global(info[4][0]) for info in infos)
+
+
+class _PublicOnlyBackend(httpcore.SyncBackend):
+    """Resolves the host itself, refuses non-global answers and connects to the vetted address.
+
+    Closes the DNS-rebinding gap between ``is_public_url`` and the connect (a second lookup
+    could return a LAN address). TLS still verifies the certificate against the hostname.
+    """
+
+    def connect_tcp(self, host: str, port: int, timeout: float | None = None,
+                    local_address: str | None = None, socket_options: Any = None) -> httpcore.NetworkStream:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as e:
+            raise httpcore.ConnectError(str(e)) from e
+        addrs = list(dict.fromkeys(info[4][0] for info in infos))
+        if not addrs or not all(_is_global(a) for a in addrs):
+            raise httpcore.ConnectError(f"{host} resolves to a non-public address")
+        error: Exception | None = None
+        for addr in addrs:
+            try:
+                return super().connect_tcp(addr, port, timeout, local_address, socket_options)
+            except httpcore.ConnectError as e:
+                error = e
+        raise error  # type: ignore[misc]
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        if not hasattr(self._pool, "_network_backend"):  # fail closed if httpx internals change
+            raise RuntimeError("httpx transport has no pluggable network backend")
+        self._pool._network_backend = _PublicOnlyBackend()
+
+
+_page_client: httpx.Client | None = None
+
+
+def page_http() -> httpx.Client:
+    """Client for untrusted article/search-result pages: connects only to vetted public addresses.
+
+    Behind an environment proxy the proxy connects (and resolves), so the shared client is
+    used and only the ``is_public_url`` pre-check applies.
+    """
+    global _page_client
+    with _client_lock:
+        if _page_client is None:
+            if urllib.request.getproxies():
+                _page_client = _http_unlocked()
+            else:
+                _page_client = httpx.Client(
+                    transport=_PinnedTransport(limits=httpx.Limits(max_connections=config.FETCH_CONCURRENCY * 2)),
+                    timeout=config.FETCH_TIMEOUT,
+                    headers={"User-Agent": config.USER_AGENT},
+                    trust_env=False,
+                )
+        return _page_client
 
 
 # Pages with no extractable article text (media, JS apps, bot walls).
@@ -89,7 +156,7 @@ def fetch_page_text(url: str) -> str:
         if not is_public_url(url):
             log.info("skip page fetch for non-public URL %s", url)
             return ""
-        with http().stream("GET", url, follow_redirects=False) as r:
+        with page_http().stream("GET", url, follow_redirects=False) as r:
             if r.is_redirect:
                 url = str(r.next_request.url) if r.next_request else ""
                 continue

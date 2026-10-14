@@ -1,4 +1,5 @@
 """Internet exposure with a password set: authz matrix, session, CSRF, headers, SSRF, DoS guards."""
+import socket
 import threading
 
 import httpx
@@ -273,10 +274,45 @@ def test_feed_links_cannot_redirect_into_the_lan(monkeypatch):
         seen.append(str(req.url))
         return httpx.Response(302, headers={"Location": "http://192.168.1.1/admin"})
 
-    monkeypatch.setattr(ingest, "_client", httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(ingest, "_page_client", httpx.Client(transport=httpx.MockTransport(handler)))
     assert ingest.is_public_url("http://93.184.216.34/post")
     assert ingest.fetch_page_text("http://93.184.216.34/post") == ""
     assert seen == ["http://93.184.216.34/post"]  # the LAN hop was never requested
+
+
+def _fake_dns(monkeypatch, *answers):
+    """getaddrinfo returning ``answers`` in turn (the last one repeats)."""
+    calls = []
+
+    def getaddrinfo(host, port, *a, **k):
+        ip = answers[min(len(calls), len(answers) - 1)]
+        calls.append((host, ip))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return calls
+
+
+def test_dns_rebinding_cannot_reach_the_lan(monkeypatch):
+    import httpcore
+
+    connected = []
+
+    def connect_tcp(self, host, port, *a, **k):
+        connected.append(host)
+        raise httpcore.ConnectError("test stop")
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", connect_tcp)
+    monkeypatch.setattr(ingest, "_page_client", None)
+    monkeypatch.setattr(ingest.urllib.request, "getproxies", lambda: {})
+    # First answer (pre-check) is public, the second (connect) points into the LAN.
+    _fake_dns(monkeypatch, "93.184.216.34", "192.168.1.1")
+    with pytest.raises(httpx.ConnectError, match="non-public"):
+        ingest.fetch_page_text("http://rebind.example/post")
+    assert connected == []
+    # A public answer is connected to by address, not re-resolved by name.
+    _fake_dns(monkeypatch, "93.184.216.34")
+    with pytest.raises(httpx.ConnectError, match="test stop"):
+        ingest.fetch_page_text("http://rebind.example/post")
+    assert connected == ["93.184.216.34"]
 
 
 def test_public_heads_up_never_runs_parallel_generations(monkeypatch, feed_id, llm):
