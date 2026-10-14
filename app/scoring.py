@@ -64,6 +64,19 @@ def trust_weights(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[str
     return out
 
 
+def feed_trust(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[int, float]:
+    """Effective trust per feed id: the profile's per-feed override, else its category's trust."""
+    cats = trust_weights(conn, profile)
+    overrides = profile.get("feed_weights") or {}
+    out = {}
+    for fid, cat in conn.execute("SELECT id, COALESCE(category, '') FROM Feed"):
+        try:
+            out[fid] = _clamp01(float(overrides[str(fid)])) if str(fid) in overrides else cats[cat]
+        except (TypeError, ValueError):
+            out[fid] = cats[cat]
+    return out
+
+
 def outlet_key(site_url: str | None, xml_url: str | None) -> str:
     """The publisher behind a feed: site host without ``www.`` (several feeds can share one)."""
     for url in (site_url, xml_url):
@@ -87,21 +100,21 @@ def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
     return None
 
 
-def source_stats(conn: sqlite3.Connection, trust: dict[str, float],
+def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
                  story_id: int | None = None) -> dict[int, dict[str, Any]]:
-    """``{story_id: {feeds, trust, quality}}`` per story.
+    """``{story_id: {feeds, trust, quality}}`` per story; ``trust`` = ``feed_trust()``.
 
     ``trust`` sums the best feed trust of each distinct outlet; ``quality`` is the
     trust-weighted median article quality (plain median if all trust is 0, None without scores).
     """
-    sql = ("SELECT a.story_id, a.feed_id, a.quality, COALESCE(f.category, '') AS cat, f.site_url, f.xml_url "
+    sql = ("SELECT a.story_id, a.feed_id, a.quality, f.site_url, f.xml_url "
            "FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
     rows = conn.execute(sql + " AND a.story_id = ?", (story_id,)) if story_id is not None else conn.execute(sql)
     feeds: dict[int, set[int]] = {}
     outlets: dict[int, dict[str, float]] = {}
     quals: dict[int, list[tuple[float, float]]] = {}
     for r in rows:
-        sid, w = r["story_id"], trust.get(r["cat"], config.SOURCE_TRUST_DEFAULT)
+        sid, w = r["story_id"], trust.get(r["feed_id"], config.SOURCE_TRUST_DEFAULT)
         feeds.setdefault(sid, set()).add(r["feed_id"])
         key = outlet_key(r["site_url"], r["xml_url"]) or f"feed:{r['feed_id']}"
         best = outlets.setdefault(sid, {})
@@ -221,7 +234,7 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     ``read`` is None, "read" or "updated" (significant update since it was read).
     """
     profile = profile or get_user_profile(conn)
-    stats = source_stats(conn, trust_weights(conn, profile))
+    stats = source_stats(conn, feed_trust(conn, profile))
     reads = read_states(conn)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     sql = ("SELECT * FROM Story WHERE headline IS NOT NULL AND COALESCE(news_at, updated_at) "
@@ -267,19 +280,23 @@ def get_user_profile(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "INSERT INTO UserProfile (id, tag_weights, source_weights, preferences) VALUES (1, '{}', '{}', ?)",
             (json.dumps(_DEFAULT_PREFS),),
         )
-        return {"id": 1, "tag_weights": {}, "source_weights": {}, "preferences": dict(_DEFAULT_PREFS)}
+        return {"id": 1, "tag_weights": {}, "source_weights": {}, "feed_weights": {},
+                "preferences": dict(_DEFAULT_PREFS)}
     return {
         "id": 1,
         "tag_weights": db.json_dict(row["tag_weights"]),
         "source_weights": db.json_dict(row["source_weights"]),
+        "feed_weights": db.json_dict(row["feed_weights"]),
         "preferences": db.json_dict(row["preferences"]),
     }
 
 
 def update_profile(preferences: dict[str, Any] | None = None,
                    tag_weights: dict[str, float] | None = None,
-                   source_weights: dict[str, float] | None = None) -> dict[str, Any]:
-    """Merge validated preferences; ``tag_weights`` / ``source_weights`` (if given) replace the stored ones."""
+                   source_weights: dict[str, float] | None = None,
+                   feed_weights: dict[int, float] | None = None) -> dict[str, Any]:
+    """Merge validated preferences; ``tag_weights`` / ``source_weights`` / ``feed_weights``
+    (per-feed trust overrides, if given) replace the stored ones."""
     with db.get_conn() as conn:
         profile = get_user_profile(conn)
         prefs = {**profile["preferences"], **(preferences or {})}
@@ -287,6 +304,10 @@ def update_profile(preferences: dict[str, Any] | None = None,
         if source_weights is not None:
             clean_sw = {str(k): _clamp01(float(v)) for k, v in source_weights.items()}
             conn.execute("UPDATE UserProfile SET source_weights = ? WHERE id = 1", (json.dumps(clean_sw),))
+        if feed_weights is not None:
+            known = {r[0] for r in conn.execute("SELECT id FROM Feed")}
+            clean_fw = {str(k): _clamp01(float(v)) for k, v in feed_weights.items() if int(k) in known}
+            conn.execute("UPDATE UserProfile SET feed_weights = ? WHERE id = 1", (json.dumps(clean_fw),))
         if tag_weights is not None:
             clean = {}
             for tag, w in tag_weights.items():

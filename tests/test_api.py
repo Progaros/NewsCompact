@@ -83,6 +83,20 @@ def test_profile_reports_and_source_trust(client, feed_id):
     assert client.post("/api/reports/pipeline/send").status_code == 409  # ntfy off in tests
 
 
+def test_single_source_trust_overrides_its_category(client, story, feed_id):
+    p = client.get("/api/profile").json()
+    assert p["feed_trust"] == [{"id": feed_id, "title": "Feed", "category": "News", "trust": 1.0, "custom": False}]
+    before = client.get(f"/api/stories/{story}").json()["relevance"]["credibility"]
+    body = client.put("/api/profile", json={"source_weights": {"News": 1.0},
+                                            "feed_weights": {str(feed_id): 0.2, "999": 1}}).json()
+    assert body["feed_weights"] == {str(feed_id): 0.2}  # unknown feeds are dropped
+    assert body["feed_trust"][0]["trust"] == 0.2 and body["feed_trust"][0]["custom"] is True
+    assert body["source_trust"] == {"News": 1.0}
+    assert client.get(f"/api/stories/{story}").json()["relevance"]["credibility"] < before
+    assert client.put("/api/profile", json={"feed_weights": {str(feed_id): 1.5}}).status_code == 422
+    assert client.put("/api/profile", json={"feed_weights": {}}).json()["feed_trust"][0]["custom"] is False
+
+
 def test_chat_streams_and_persists(client, story, llm):
     import json
 

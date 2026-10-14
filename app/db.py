@@ -44,6 +44,7 @@ _MIGRATIONS = (
     ("ChatMessage", "steps", "TEXT"),
     ("ChatMessage", "parent_id", "INTEGER"),
     ("ChatSession", "leaf_id", "INTEGER"),
+    ("UserProfile", "feed_weights", "TEXT DEFAULT '{}'"),
 )
 # Indexes on migrated columns (schema.sql runs before the columns exist on old DBs).
 _INDEXES = (

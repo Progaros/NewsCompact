@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS UserProfile (
     id             INTEGER PRIMARY KEY,
     tag_weights    TEXT DEFAULT '{}',
     source_weights TEXT DEFAULT '{}',
+    feed_weights   TEXT DEFAULT '{}',   -- per-feed trust overrides {feed_id: 0..1}
     preferences    TEXT DEFAULT '{}'
 );
 

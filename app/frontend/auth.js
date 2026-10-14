@@ -101,6 +101,7 @@ const Auth = (() => {
 
     let weights = {};
     let reports = [];
+    let feedOverrides = {};
     let ntfy = { enabled: false, kinds: {} };
     fetch("/api/profile")
       .then((res) => (unauth(res) ? null : res.json()))
@@ -108,11 +109,10 @@ const Auth = (() => {
         if (!p) return close();
         weights = { ...(p.tag_weights || {}) };
         reports = (p.ntfy_reports || []).map((r) => ({ ...r, days: [...(r.days || [])] }));
+        feedOverrides = { ...(p.feed_weights || {}) };
         ntfy = p.ntfy || ntfy;
-        box.innerHTML = renderProfileForm(p.preferences || {}, p.source_trust || {}, ntfy);
-        box.querySelectorAll("input[data-trust]").forEach((i) => i.addEventListener("input", () => {
-          i.nextElementSibling.textContent = Number(i.value).toFixed(1);
-        }));
+        box.innerHTML = renderProfileForm(p.preferences || {}, ntfy);
+        renderTrust(box, p.source_trust || {}, p.feed_trust || [], feedOverrides);
         renderReports(box, reports, ntfy);
         renderWeights(box, weights);
       })
@@ -136,6 +136,7 @@ const Auth = (() => {
           },
           tag_weights: weights,
           source_weights: sourceWeights,
+          feed_weights: feedOverrides,
         }),
       });
       if (unauth(res)) return;
@@ -146,12 +147,8 @@ const Auth = (() => {
     });
   }
 
-  function renderProfileForm(prefs, trust, ntfy) {
+  function renderProfileForm(prefs, ntfy) {
     const join = (v) => (Array.isArray(v) ? v.join(", ") : "");
-    const trustRows = Object.entries(trust).sort((a, b) => a[0].localeCompare(b[0])).map(([cat, w]) => `
-      <label class="trust-row"><span>${esc(cat || "(uncategorized)")}</span>
-        <input type="range" min="0" max="1" step="0.1" value="${esc(w)}" data-trust="${esc(cat)}" />
-        <output>${Number(w).toFixed(1)}</output></label>`).join("");
     return `
       <label class="field">Interest regions <span class="hint">comma-separated; matching story tags raise "impact"</span>
         <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
@@ -161,8 +158,8 @@ const Auth = (() => {
         <input name="min_quality" type="number" min="0" max="10" step="0.5" value="${esc(prefs.min_quality ?? 0)}" /></label>
       <div class="user-section">
         <div class="user-section-label">Source trust</div>
-        <p class="hint">How much a feed category counts as independent confirmation (credibility). 0 = ignore, 1 = full.</p>
-        ${trustRows || `<div class="muted">No feeds yet.</div>`}
+        <p class="hint">How much a source counts as independent confirmation (credibility) and how much its articles weigh in story quality. 0 = ignore, 1 = full. Expand a category to set single sources.</p>
+        <div id="trust"></div>
       </div>
       <div class="user-section">
         <div class="user-section-label">Scheduled ntfy reports <button type="button" class="link" id="add-report">+ add</button></div>
@@ -178,6 +175,87 @@ const Auth = (() => {
 
   const DAY_NAMES = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
   const REPORT_LABELS = { brief: "News brief", pipeline: "Pipeline report" };
+
+  /* Category sliders with expandable per-source sliders. `overrides` ({feed id: trust})
+   * is edited in place; a category with individually set sources is faded and moving
+   * its slider asks before overwriting them. */
+  function renderTrust(box, cats, feeds, overrides) {
+    const el = box.querySelector("#trust");
+    const fmt = (v) => Number(v).toFixed(1);
+    const byCat = {};
+    for (const f of feeds) (byCat[f.category] ||= []).push(f);
+    const slider = (attrs, v) => `<input type="range" min="0" max="1" step="0.1" value="${esc(v)}" ${attrs} /><output>${fmt(v)}</output>`;
+    el.innerHTML = Object.keys(cats).sort((a, b) => a.localeCompare(b)).map((cat) => `
+      <div class="trust-group" data-cat="${esc(cat)}">
+        <div class="trust-row">
+          <button type="button" class="trust-toggle" aria-expanded="false" title="Show single sources">
+            <span class="chev" aria-hidden="true"></span>${esc(cat || "(uncategorized)")} <span class="muted">${(byCat[cat] || []).length}</span></button>
+          ${slider(`data-trust="${esc(cat)}" aria-label="Trust of ${esc(cat || "uncategorized")}"`, cats[cat])}
+        </div>
+        <div class="trust-feeds" hidden>${(byCat[cat] || []).map((f) => `
+          <div class="trust-row feed" data-feed="${Number(f.id)}">
+            <span class="trust-name" title="${esc(f.title)}">${esc(f.title)}</span>
+            ${slider(`data-feed-id="${Number(f.id)}" aria-label="Trust of ${esc(f.title)}"`, f.trust)}
+            <button type="button" class="link" data-reset title="Follow the category again">\u21ba</button>
+          </div>`).join("")}</div>
+      </div>`).join("") || `<div class="muted">No feeds yet.</div>`;
+
+    el.querySelectorAll(".trust-group").forEach((g) => {
+      const cat = g.dataset.cat;
+      const catInput = g.querySelector("input[data-trust]");
+      const feedRows = [...g.querySelectorAll(".trust-row.feed")];
+      let prev = catInput.value;
+      const set = (input, v) => { input.value = v; input.nextElementSibling.textContent = fmt(v); };
+      const refresh = () => {
+        let custom = 0;
+        for (const row of feedRows) {
+          const on = row.dataset.feed in overrides;
+          row.classList.toggle("custom", on);
+          custom += on;
+        }
+        g.classList.toggle("faded", custom > 0);
+        catInput.title = custom ? `${custom} source(s) set individually — moving this resets them` : "";
+      };
+      const follow = () => feedRows.forEach((row) => {
+        if (!(row.dataset.feed in overrides)) set(row.querySelector("input"), catInput.value);
+      });
+      g.querySelector(".trust-toggle").onclick = (e) => {
+        const list = g.querySelector(".trust-feeds");
+        list.hidden = !list.hidden;
+        e.currentTarget.setAttribute("aria-expanded", !list.hidden);
+      };
+      catInput.addEventListener("input", () => {
+        catInput.nextElementSibling.textContent = fmt(catInput.value);
+        if (!g.classList.contains("faded")) { follow(); prev = catInput.value; }
+      });
+      catInput.addEventListener("change", () => {
+        if (!g.classList.contains("faded")) return;
+        const n = feedRows.length;
+        if (!confirm(`Set all ${n} sources in “${cat || "(uncategorized)"}” to ${fmt(catInput.value)}? This replaces their individual values.`)) {
+          set(catInput, prev);
+          return;
+        }
+        for (const row of feedRows) delete overrides[row.dataset.feed];
+        prev = catInput.value;
+        follow();
+        refresh();
+      });
+      for (const row of feedRows) {
+        const input = row.querySelector("input");
+        input.addEventListener("input", () => {
+          input.nextElementSibling.textContent = fmt(input.value);
+          overrides[row.dataset.feed] = parseFloat(input.value);
+          refresh();
+        });
+        row.querySelector("[data-reset]").onclick = () => {
+          delete overrides[row.dataset.feed];
+          set(input, catInput.value);
+          refresh();
+        };
+      }
+      refresh();
+    });
+  }
 
   function renderReports(box, reports, ntfy) {
     const el = box.querySelector("#reports");

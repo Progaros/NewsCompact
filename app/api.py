@@ -48,6 +48,7 @@ class ProfileUpdate(BaseModel):
     tag_weights: dict[Annotated[str, Field(max_length=80)], float] | None = Field(None, max_length=500)
     source_weights: dict[Annotated[str, Field(max_length=200)], Annotated[float, Field(ge=0, le=1)]] | None = (
         Field(None, max_length=100))
+    feed_weights: dict[int, Annotated[float, Field(ge=0, le=1)]] | None = Field(None, max_length=2000)
 
 
 class FeedCreate(BaseModel):
@@ -138,7 +139,7 @@ def _load_story(conn: sqlite3.Connection, story_id: int) -> dict[str, Any]:
     if s is None:
         raise HTTPException(404, "story not found")
     profile = scoring.get_user_profile(conn)
-    st = scoring.source_stats(conn, scoring.trust_weights(conn, profile), story_id).get(
+    st = scoring.source_stats(conn, scoring.feed_trust(conn, profile), story_id).get(
         story_id, {"feeds": 0, "trust": 0.0, "quality": None})
     quality = st["quality"] if st["quality"] is not None else s["quality_score"]
     relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality)
@@ -571,9 +572,15 @@ def create_app() -> FastAPI:
         with db.get_conn() as conn:
             profile = scoring.get_user_profile(conn)
             trust = scoring.trust_weights(conn, profile)
+            per_feed = scoring.feed_trust(conn, profile)
+            feeds = conn.execute("SELECT id, title, COALESCE(category, '') AS category FROM Feed "
+                                 "ORDER BY category, title COLLATE NOCASE").fetchall()
         return {
             **profile,
             "source_trust": trust,
+            "feed_trust": [{"id": f["id"], "title": f["title"], "category": f["category"],
+                            "trust": per_feed[f["id"]], "custom": str(f["id"]) in profile["feed_weights"]}
+                           for f in feeds],
             "ntfy_reports": reports.schedules(profile),
             "ntfy": {"enabled": bool(config.HEADS_UP_NTFY_URL), "kinds": reports.KINDS,
                      "server_time": dt.datetime.now().strftime("%H:%M")},
@@ -587,7 +594,7 @@ def create_app() -> FastAPI:
                 prefs[key] = [v.strip() for v in prefs[key] if v.strip()]
         for s in prefs.get("ntfy_reports", []):
             s["days"] = sorted(set(s["days"]))
-        scoring.update_profile(prefs, body.tag_weights, body.source_weights)
+        scoring.update_profile(prefs, body.tag_weights, body.source_weights, body.feed_weights)
         return get_profile()
 
     # --- scheduled ntfy reports ---
