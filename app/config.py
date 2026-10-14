@@ -155,7 +155,7 @@ USER_COUNTRY = _env("NEWS_USER_COUNTRY", "Germany")
 USER_LANGUAGE = _env("NEWS_USER_LANGUAGE", "de")
 
 # --- Heads-up brief + scheduled ntfy reports ---------------------------------
-HEADS_UP_TTL_MINUTES = _int("NEWS_HEADS_UP_TTL_MINUTES", 3)
+HEADS_UP_TTL_MINUTES = _int("NEWS_HEADS_UP_TTL_MINUTES", 5)
 HEADS_UP_NTFY_URL = _env("NEWS_HEADS_UP_NTFY_URL", "https://ntfy.sh/your-topic")  # empty disables all pushes
 HEADS_UP_NTFY_TITLE = _env("NEWS_HEADS_UP_NTFY_TITLE", "News Heads Up")
 # Daily brief times (server-local HH:MM) until schedules are saved in ⚙ Preferences.

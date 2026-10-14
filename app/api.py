@@ -391,7 +391,7 @@ def create_app() -> FastAPI:
             ranked = scoring.ranked_stories(conn, profile, archived=archived, query=q.strip(), tag=tag.strip(),
                                             personal=personal, user_id=uid)
             hidden = 0
-            if hide_read and uid is not None and not archived:
+            if hide_read and personal and not archived:
                 visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
                 hidden, ranked = len(ranked) - len(visible), visible
             page = ranked[:limit]

@@ -97,7 +97,7 @@ flowchart LR
    $$\text{relevance} = 10 \cdot (0.40\,\text{quality} + 0.35\,\text{credibility} + 0.25\,\text{impact})$$
    $$\text{display} = \text{relevance} + \text{urgency}\cdot W_1 + \text{clamp}(\text{interest}\cdot W_3, \pm 10) + \text{distance}\cdot W_{\text{dist}} - \text{decay}(\text{news\_at})$$
    - **Credibility**: summed trust of distinct outlets (`outlet_key` by hostname; multiple feeds from one publisher count once), using category/per-feed trust overrides.
-   - **Personalization** (`view=personal`): whole-word region/location tag matches (`impact`), 👍/👎 tag weights (`interest`), home city/country/language (`distance`), and excluded feeds (`⊘`). `view=default` uses `DEFAULT_PROFILE` with `distance = 0`.
+   - **Personalization** (`view=personal`): whole-word region/location tag matches (`impact`), 👍/👎 tag weights (`interest`), home city/country/language (`distance`), excluded feeds (`⊘`), and hiding read stories. `view=default` (**Everyone**) uses `DEFAULT_PROFILE` with `distance = 0`, shows all stories (including read), and shares the same Quick Heads Up brief as signed-out visitors.
 5. **Retention** (`app/retention.py`, hourly): deletes stories/articles older than `NEWS_RETENTION_DAYS` (7), records URL tombstones (30 d) so feeds don't re-import them, keeps `FeedbackLog` snapshots, and runs `incremental_vacuum`.
 
 ## Authentication, Access Control & Sharing
@@ -169,7 +169,7 @@ flowchart TD
 | `NEWS_W1` / `NEWS_W3` / `NEWS_INTEREST_CAP` / `NEWS_W_DISTANCE` | `1.0` / `1.5` / `10` / `2.0` | Display score weights (urgency, interest, cap, distance) |
 | `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` / `NEWS_FEEDBACK_ALPHA` | `18` / `10` / `0.1` | Time decay (from `news_at`) and 👍/👎 learning rate |
 | `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
-| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `3` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
+| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `5` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
 | `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_TURNS` | `https://searx.example.org/` / `0,1,2,3,5,7,10` | SearXNG URL and chat web-search turn options |
 | `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `24` | Owner login password (empty = open LAN mode) / session TTL |
 | `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |

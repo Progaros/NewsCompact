@@ -10,8 +10,10 @@ wheels/
 .venv
 
 # Runtime data & logs
-news.db
-news.db-*
+*.db
+*.db-*
+*.sqlite*
+*.zip
 news.pid
 *.log
 *.log.*.gz

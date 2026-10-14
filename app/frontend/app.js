@@ -231,11 +231,12 @@ function updateStatus() {
 
 function storiesUrl(limit) {
   const p = new URLSearchParams({ limit: String(limit) });
-  p.set("view", Auth.state.authenticated ? state.view : "default");
+  const view = Auth.state.authenticated ? state.view : "default";
+  p.set("view", view);
   if (state.scope === "archive") p.set("archived", "true");
   if (state.query) p.set("q", state.query);
   if (state.tag) p.set("tag", state.tag);
-  if (state.scope === "active" && !state.showRead) {
+  if (state.scope === "active" && view === "personal" && !state.showRead) {
     p.set("hide_read", "true");
     if (sessionReadIds.size) p.set("keep", [...sessionReadIds].join(","));
   }
@@ -292,7 +293,7 @@ function setTag(tag) {
 function setScope(scope) {
   state.scope = scope;
   for (const [k, b] of Object.entries(scopeBtns)) b.classList.toggle("active", k === scope);
-  showReadBtn.disabled = scope === "archive";
+  showReadBtn.disabled = scope === "archive" || state.view === "default";
   scopeBtns.archive.title = state.activeDays ? `Stories without updates for ${state.activeDays}+ days` : "";
   reload();
 }
@@ -314,6 +315,7 @@ function setView(view) {
     b.classList.toggle("active", k === view);
     b.setAttribute("aria-pressed", k === view);
   }
+  showReadBtn.disabled = state.scope === "archive" || view === "default";
 }
 for (const [k, b] of Object.entries(viewBtns)) b.addEventListener("click", () => { setView(k); reload(); loadHeadsUp(); });
 setView(state.view);

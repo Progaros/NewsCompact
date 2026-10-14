@@ -34,6 +34,7 @@ def test_mark_read_hides_keep_exempts_and_unread_restores(client, feed_id, llm):
     assert client.post("/api/stories/999/read").status_code == 404
 
     assert _ids(client, hide_read="true") == ([second], 1)
+    assert _ids(client, hide_read="true", view="default") == ([first, second], 0)  # Everyone view always shows all
     assert _ids(client, hide_read="true", keep=str(first)) == ([first, second], 0)
     assert _ids(client) == ([first, second], 0)  # "show read"
     payload = client.get(f"/api/stories/{first}").json()
