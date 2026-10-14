@@ -424,6 +424,8 @@ body.unsigned-in .interaction { display: none; }
 .users .toggle[aria-pressed="true"] { border-color: var(--accent); }
 .user-profile .muted { color: var(--muted); font-size: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; margin-bottom: 12px; }
+.field-row { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 0 10px; align-items: end; }
+.field-row .field { min-width: 0; }
 .field .hint { margin: 0; }
 .field input {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);

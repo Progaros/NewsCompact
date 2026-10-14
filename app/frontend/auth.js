@@ -117,7 +117,7 @@ const Auth = (() => {
         feedOverrides = { ...(p.feed_weights || {}) };
         excluded = new Set(((p.preferences || {}).excluded_feeds || []).map(String));
         ntfy = p.ntfy || null; // admins only
-        box.innerHTML = renderProfileForm(p.preferences || {}, ntfy);
+        box.innerHTML = renderProfileForm(p.preferences || {}, ntfy, p.home_defaults || {});
         renderTrust(box, p.source_trust || {}, p.feed_trust || [], feedOverrides, excluded);
         if (ntfy) renderReports(box, reports, ntfy);
         renderWeights(box, weights);
@@ -142,6 +142,9 @@ const Auth = (() => {
             ntfy_reports: ntfy ? reports.filter((r) => r.time) : undefined,
             excluded_feeds: [...excluded].map(Number),
             about: form.elements.about.value.trim(),
+            home_city: form.elements.home_city.value.trim(),
+            home_country: form.elements.home_country.value.trim(),
+            language: form.elements.language.value.trim().toLowerCase(),
           },
           tag_weights: weights,
           source_weights: sourceWeights,
@@ -156,11 +159,19 @@ const Auth = (() => {
     });
   }
 
-  function renderProfileForm(prefs, ntfy) {
+  function renderProfileForm(prefs, ntfy, home = {}) {
     const join = (v) => (Array.isArray(v) ? v.join(", ") : "");
     return `
       <label class="field">About you <span class="hint">a few words about yourself (job, interests, where you live) — used to make your heads-up and story chat more personal; never shared</span>
         <textarea name="about" rows="3" maxlength="1000" placeholder="e.g. Software developer in Munich, follows AI, security and local politics">${esc(prefs.about || "")}</textarea></label>
+      <div class="field-row">
+        <label class="field">Home city <span class="hint">stories there rank higher</span>
+          <input name="home_city" maxlength="80" value="${esc(prefs.home_city || "")}" placeholder="${esc(home.home_city || "")}" /></label>
+        <label class="field">Country
+          <input name="home_country" maxlength="80" value="${esc(prefs.home_country || "")}" placeholder="${esc(home.home_country || "")}" /></label>
+        <label class="field">Language <span class="hint">code</span>
+          <input name="language" maxlength="3" pattern="[A-Za-z]{2,3}" value="${esc(prefs.language || "")}" placeholder="${esc(home.language || "")}" /></label>
+      </div>
       <label class="field">Interest regions <span class="hint">comma-separated; matching story tags raise "impact"</span>
         <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
       <label class="field">Locations <span class="hint">comma-separated, same effect</span>

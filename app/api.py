@@ -45,6 +45,9 @@ class Preferences(BaseModel):
     ntfy_reports: list[ReportSchedule] | None = Field(None, max_length=20)
     excluded_feeds: list[int] | None = Field(None, max_length=2000)
     about: str | None = Field(None, max_length=1000)
+    home_city: str | None = Field(None, max_length=80)
+    home_country: str | None = Field(None, max_length=80)
+    language: str | None = Field(None, pattern=r"^\s*([A-Za-z]{2,3})?\s*$")
 
 
 class ProfileUpdate(BaseModel):
@@ -713,6 +716,8 @@ def create_app() -> FastAPI:
         out = {
             **profile,
             "user": user,
+            "home_defaults": {"home_city": config.USER_CITY, "home_country": config.USER_COUNTRY,
+                              "language": config.USER_LANGUAGE},
             "source_trust": trust,
             "feed_trust": [{"id": f["id"], "title": f["title"], "category": f["category"],
                             "trust": per_feed[f["id"]], "custom": str(f["id"]) in profile["feed_weights"]}
@@ -740,6 +745,9 @@ def create_app() -> FastAPI:
             prefs["excluded_feeds"] = sorted(set(prefs["excluded_feeds"]))
         if "about" in prefs:
             prefs["about"] = prefs["about"].strip()
+        for key in ("home_city", "home_country", "language"):
+            if key in prefs:
+                prefs[key] = prefs[key].strip().lower() if key == "language" else prefs[key].strip()
         scoring.update_profile(prefs, body.tag_weights, body.source_weights, body.feed_weights, user_id=uid)
         heads_up.invalidate(heads_up.user_key(uid))  # ranking or reader description may have changed
         return get_profile(request)

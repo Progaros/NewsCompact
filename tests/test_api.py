@@ -77,6 +77,19 @@ def test_profile_put_validates(client):
     assert client.put("/api/profile", json={"preferences": {"locations": ["x" * 200]}}).status_code == 422
 
 
+def test_home_location_is_per_user(client, story):
+    before = client.get("/api/stories").json()["stories"][0]["relevance"]["distance"]
+    body = client.put("/api/profile", json={"preferences": {
+        "home_city": " Vienna ", "home_country": "Austria", "language": "EN"}}).json()
+    assert {k: body["preferences"][k] for k in ("home_city", "home_country", "language")} == {
+        "home_city": "Vienna", "home_country": "Austria", "language": "en"}
+    assert body["home_defaults"]["home_city"] == config.USER_CITY
+    assert before == 10.0 and client.get("/api/stories").json()["stories"][0]["relevance"]["distance"] == 0.0
+    assert client.put("/api/profile", json={"preferences": {"language": "german"}}).status_code == 422
+    client.put("/api/profile", json={"preferences": {"home_city": "", "home_country": "", "language": ""}})
+    assert client.get("/api/stories").json()["stories"][0]["relevance"]["distance"] == before  # server default
+
+
 def test_profile_reports_and_source_trust(client, feed_id):
     p = client.get("/api/profile").json()
     assert p["source_trust"] == {"News": 1.0} and p["ntfy"]["enabled"] is False

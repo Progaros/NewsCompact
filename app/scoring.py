@@ -11,7 +11,8 @@
                several feeds of one outlet count once): 1.0→0.25 … 5.0→1.0
 - user_impact  0.5 baseline, +0.25 per preferences.interest_regions/locations hit in tags
 - interest     sum of the user's tag weights; clamped because weights never decay
-- distance     story location/language vs USER_CITY/COUNTRY/LANGUAGE: 1.0/0.6/0.35/0
+- distance     story location/language vs the user's home city/country/language
+               (preferences.home_city/home_country/language, else USER_CITY/COUNTRY/LANGUAGE): 1.0/0.6/0.35/0
 - time_decay   TIME_DECAY_MAX·(1 − e^(−age_h/half_life)) on Story.news_at (last update with new facts)
 """
 from __future__ import annotations
@@ -179,17 +180,24 @@ def user_impact_score(tags: list[str], preferences: dict[str, Any]) -> float:
     return _clamp01(impact)
 
 
-def distance_score(metrics: dict[str, Any]) -> float:
+def distance_score(metrics: dict[str, Any], preferences: dict[str, Any] | None = None) -> float:
+    """Story location/language vs the user's home (preferences.home_*; server config if unset)."""
+    prefs = preferences or {}
+
+    def home(key: str, default: str) -> str:
+        value = prefs.get(key)
+        return (value if isinstance(value, str) and value.strip() else default).lower().strip()
+
     location = str(metrics.get("location") or "").lower()
     language = str(metrics.get("language") or "").lower()
-    city, country = config.USER_CITY.lower().strip(), config.USER_COUNTRY.lower().strip()
+    city, country = home("home_city", config.USER_CITY), home("home_country", config.USER_COUNTRY)
     score = 0.0
     if location:
         if city and city in location:
             score = 1.0
         elif country and country in location:
             score = 0.6
-    lang = config.USER_LANGUAGE.lower().strip()
+    lang = home("language", config.USER_LANGUAGE)
     if lang and language == lang:
         score = max(score, 0.35)
     return score
@@ -220,7 +228,7 @@ def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
     )
     interest = sum(profile["tag_weights"].get(t, 0.0) for t in tags)
     interest_pts = max(-config.INTEREST_CAP, min(config.INTEREST_CAP, interest * config.W3_INTEREST))
-    distance = distance_score(metrics) if personal else 0.0
+    distance = distance_score(metrics, profile["preferences"]) if personal else 0.0
     try:
         urgency = float(metrics.get("urgency_level", 5))
     except (TypeError, ValueError):

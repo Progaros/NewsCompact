@@ -22,6 +22,10 @@ def test_components():
     assert scoring.distance_score({"location": "Berlin, Germany"}) == 0.6
     assert scoring.distance_score({"language": config.USER_LANGUAGE}) == 0.35
     assert scoring.distance_score({}) == 0.0
+    home = {"home_city": "Berlin", "home_country": "", "language": "en"}
+    assert scoring.distance_score({"location": "Berlin, Germany"}, home) == 1.0
+    assert scoring.distance_score({"location": "Munich, Germany"}, home) == 0.6  # country falls back
+    assert scoring.distance_score({"language": config.USER_LANGUAGE}, home) == 0.0
 
 
 def test_ranking_archive_search_tag_and_min_quality(feed_id):
