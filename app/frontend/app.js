@@ -137,7 +137,7 @@ class StoryCard extends HTMLElement {
           ${breaking ? `<span class="badge-breaking">Breaking</span>` : ""}
           ${m.status && !breaking ? `<span>${esc(m.status)}</span>` : ""}
           ${location}
-          <span title="${esc(fmtUtc(d.updated_at))}">${esc(timeAgo(d.updated_at))}</span>
+          <span title="Last news ${esc(fmtUtc(d.news_at))}">${esc(timeAgo(d.news_at))}</span>
         </div>
         <h2 class="headline">${esc(d.headline)}</h2>
         <p class="summary">${esc(d.summary)}</p>

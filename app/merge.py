@@ -7,10 +7,16 @@ neighbour stories (vec0 KNN over their anchors); candidates above
 MERGE_SIM_THRESHOLD go through the same event verifier as new articles.
 Spend per run is capped at MERGE_MAX_CHECKS_PER_RUN verifier calls plus one
 Prompt 2 rewrite per merge.
+
+Embeddings miss cross-language and title-only copies (a German body vs. an
+English headline), so stories that share several distinctive headline terms
+(names, numbers — rare within the window) are verified first as well.
 """
 from __future__ import annotations
 
+import collections
 import logging
+import re
 import sqlite3
 import time
 from typing import Callable
@@ -18,6 +24,39 @@ from typing import Callable
 from . import clustering, config, db, harness, ollama, story
 
 log = logging.getLogger("news.merge")
+
+_WORD = re.compile(r"[^\W_]+(?:[-.][^\W_]+)*")
+_STOPWORDS = frozenset("""
+with from that this have will been were their they them into over after amid about under than more
+most some what when where which while your other also just only very says said
+über unter nicht eine einer eines einem einen dass sich auch nach beim vom zum zur mehr wird werden
+""".split())
+
+
+def headline_terms(headline: str | None) -> set[str]:
+    """Content words of a headline: 4+ letters, or anything with a digit ("GLM-5.3", "2026")."""
+    return {w for w in _WORD.findall((headline or "").casefold())
+            if w not in _STOPWORDS and (len(w) >= 4 or (len(w) >= 2 and any(c.isdigit() for c in w)))}
+
+
+class _TermIndex:
+    """Distinctive headline terms (document frequency <= MERGE_LEXICAL_MAX_DF) of the window's stories."""
+
+    def __init__(self, conn: sqlite3.Connection, since: str):
+        rows = conn.execute("SELECT id, headline FROM Story WHERE headline IS NOT NULL AND updated_at >= ?",
+                            (since,)).fetchall()
+        terms = {r["id"]: headline_terms(r["headline"]) for r in rows}
+        df = collections.Counter(w for ws in terms.values() for w in ws)
+        self.terms = {sid: {w for w in ws if df[w] <= config.MERGE_LEXICAL_MAX_DF} for sid, ws in terms.items()}
+        self.by_term: dict[str, set[int]] = collections.defaultdict(set)
+        for sid, ws in self.terms.items():
+            for w in ws:
+                self.by_term[w].add(sid)
+
+    def candidates(self, story_id: int, headline: str | None) -> set[int]:
+        mine = self.terms.get(story_id) or {w for w in headline_terms(headline) if w in self.by_term}
+        shared = collections.Counter(sid for w in mine for sid in self.by_term[w] if sid != story_id)
+        return {sid for sid, n in shared.items() if n >= config.MERGE_LEXICAL_MIN_TERMS}
 
 
 def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
@@ -27,6 +66,8 @@ def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
     conn.execute("UPDATE FeedbackLog SET story_id = ? WHERE story_id = ?", (keep, drop))
     if conn.execute("SELECT 1 FROM ChatSession WHERE story_id = ?", (keep,)).fetchone() is None:
         conn.execute("UPDATE ChatSession SET story_id = ? WHERE story_id = ?", (keep, drop))
+    conn.execute("UPDATE Story SET news_at = MAX(COALESCE(news_at, ''), "
+                 "COALESCE((SELECT news_at FROM Story WHERE id = ?), '')) WHERE id = ?", (drop, keep))
     conn.execute("DELETE FROM Story WHERE id = ?", (drop,))
     return moved
 
@@ -35,19 +76,23 @@ def _size(conn: sqlite3.Connection, story_id: int) -> int:
     return conn.execute("SELECT count(*) FROM Article WHERE story_id = ?", (story_id,)).fetchone()[0]
 
 
-def _check(conn: sqlite3.Connection, s: sqlite3.Row, since: str) -> tuple[bool, int | None, int | None]:
+def _check(conn: sqlite3.Connection, s: sqlite3.Row, since: str,
+           index: _TermIndex) -> tuple[bool, int | None, int | None]:
     """Returns (verifier_called, keep, drop)."""
     anchors = clustering.AnchorCache(conn)
     best: dict[int, float] = {}
     for vec in anchors(s["id"])[: config.MERGE_ANCHORS_PER_STORY]:
         for sid, sim in clustering.nearest_stories(conn, vec, anchors, since=since, exclude=s["id"]):
             best[sid] = max(best.get(sid, -1.0), sim)
+    lexical = frozenset(sid for sid in index.candidates(s["id"], s["headline"])
+                        if conn.execute("SELECT 1 FROM Story WHERE id = ?", (sid,)).fetchone())
     cands = [(sid, sim) for sid, sim in best.items() if sim >= config.MERGE_SIM_THRESHOLD]
+    cands += [(sid, best.get(sid, 0.0)) for sid in lexical if best.get(sid, 0.0) < config.MERGE_SIM_THRESHOLD]
     if not cands:
         return False, None, None
     target, _ = clustering.verify(conn, s["headline"] or "", s["summary"] or "", cands,
                                   config.MERGE_SIM_THRESHOLD, f"story={s['id']}",
-                                  accept=harness.STORY_MERGE_CLASSES)
+                                  accept=harness.STORY_MERGE_CLASSES, priority=lexical)
     if target is None:
         return True, None, None
     # Keep the bigger story (older on ties) so its id / chat / votes survive.
@@ -68,6 +113,7 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
             "ORDER BY updated_at DESC LIMIT ?",
             (since, config.MERGE_MAX_CHECKS_PER_RUN * 4),
         ).fetchall()
+        index = _TermIndex(conn, since)
     for row in todo:
         if should_stop() or result["verified"] >= config.MERGE_MAX_CHECKS_PER_RUN:
             break
@@ -77,7 +123,7 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
             if s is None:  # absorbed earlier in this run
                 continue
             result["checked"] += 1
-            verified, keep, drop = _check(conn, s, since)
+            verified, keep, drop = _check(conn, s, since, index)
             result["verified"] += int(verified)
             conn.execute("UPDATE Story SET merge_checked_at = datetime('now') WHERE id = ?", (s["id"],))
             if keep is None:

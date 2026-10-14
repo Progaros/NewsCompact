@@ -38,6 +38,7 @@ _MIGRATIONS = (
     ("Article", "title_key", "TEXT"),
     ("Story", "merge_checked_at", "TEXT"),
     ("Story", "material_at", "TEXT"),
+    ("Story", "news_at", "TEXT"),
     ("Feed", "enabled", "INTEGER NOT NULL DEFAULT 1"),
     ("Feed", "last_error", "TEXT"),
     ("ChatMessage", "steps", "TEXT"),
@@ -133,8 +134,14 @@ def _chat_tree(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE ChatSession SET leaf_id = (SELECT MAX(id) FROM ChatMessage m WHERE m.session_id = ChatSession.id)")
 
 
+def _news_at(conn: sqlite3.Connection) -> None:
+    """v5: existing stories start with their last update as the news time."""
+    conn.execute("UPDATE Story SET news_at = updated_at WHERE news_at IS NULL")
+
+
 # (user_version, migration) — each runs once, inside a transaction.
-_DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree))
+_DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
+                    (5, _news_at))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

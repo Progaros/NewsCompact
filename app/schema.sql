@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS Story (
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
     merge_checked_at TEXT,             -- last recall-merge check (re-checked after updates)
-    material_at   TEXT                 -- last update significant enough to resurface a read story
+    material_at   TEXT,                -- last update significant enough to resurface a read story
+    news_at       TEXT                 -- last update that added facts (ranking recency)
 );
 
 CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);

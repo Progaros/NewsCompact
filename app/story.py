@@ -269,9 +269,11 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
     conn.execute(
         "UPDATE Story SET headline=?, summary=?, tags=?, metrics=?, quality_score=?, "
         "updated_at=datetime('now'), "
+        "news_at=CASE WHEN ? THEN datetime('now') ELSE COALESCE(news_at, datetime('now')) END, "
         "material_at=CASE WHEN ? THEN datetime('now') ELSE material_at END WHERE id=?",
         (headline, (out.get("summary") or "").strip(), json.dumps(tags),
-         json.dumps(metrics), quality, significance >= config.READ_RESURFACE_SIGNIFICANCE, story_id),
+         json.dumps(metrics), quality, significance >= 1,
+         significance >= config.READ_RESURFACE_SIGNIFICANCE, story_id),
     )
     return len(user)
 

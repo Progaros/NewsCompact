@@ -77,7 +77,9 @@ flowchart LR
 - **Recall merge** (`app/merge.py`): when the queue is empty, up to 5
   recently updated, not-yet-checked stories are compared with neighbouring
   stories (similarity ≥ 0.62) and verified duplicates are merged (one Prompt 2
-  rewrite per merge). Only `EXACT_MATCH` merges two stories — story-level
+  rewrite per merge). Stories sharing ≥ 3 distinctive headline terms (names,
+  numbers that occur in ≤ 5 window stories) are verified first — embeddings miss
+  cross-language and title-only copies. Only `EXACT_MATCH` merges two stories — story-level
   "continuations" chained whole sagas together.
 - **Ranking** (`app/scoring.py`):
 
@@ -92,8 +94,10 @@ flowchart LR
   same trust at ranking time; user_impact matches regions/locations as whole
   words in tags; interest = sum of
   👍/👎-learned tag weights; distance = story location/language vs
-  `NEWS_USER_CITY/COUNTRY/LANGUAGE`; decay half-life 18 h, max 10. Only stories
-  updated within `NEWS_STORY_ACTIVE_DAYS` are ranked; older ones are in the archive.
+  `NEWS_USER_CITY/COUNTRY/LANGUAGE`; decay half-life 18 h, max 10, counted from
+  the last update that added facts (`news_at`; rewordings and recaps don't push a
+  story up again). Only stories
+  with news within `NEWS_STORY_ACTIVE_DAYS` are ranked; older ones are in the archive.
 - **Reports** (`app/reports.py`): ntfy pushes on configurable weekdays/times —
   the news brief and a 24 h pipeline report (volume, join rate, latency,
   quality mix, failing feeds, top stories).
@@ -222,6 +226,7 @@ Environment variables; defaults in [app/config.py](app/config.py).
 | `NEWS_TITLE_QUALITY_MAX` | `6` | max quality for headline-only (non-`ok`) articles |
 | `NEWS_KNN_CANDIDATES` | `200` | nearest articles fetched from the vector index |
 | `NEWS_MERGE_ENABLED` / `NEWS_MERGE_SIM_THRESHOLD` / `NEWS_MERGE_MAX_CHECKS_PER_RUN` | `1` / `0.62` / `5` | recall merge pass |
+| `NEWS_MERGE_LEXICAL_MIN_TERMS` / `NEWS_MERGE_LEXICAL_MAX_DF` | `3` / `5` | recall merge: shared distinctive headline terms that make a candidate |
 | `NEWS_STORY_ACTIVE_DAYS` | `2` | stories without updates for longer move to the archive |
 | `NEWS_RETENTION_DAYS` | `7` | delete stories/articles older than this (0 = keep forever) |
 | `NEWS_DEDUP_WINDOW_HOURS` / `NEWS_DEDUP_TITLE_MIN_WORDS` | `72` / `5` | cross-feed duplicate detection |

@@ -12,7 +12,7 @@
 - user_impact  0.5 baseline, +0.25 per preferences.interest_regions/locations hit in tags
 - interest     sum of the user's tag weights; clamped because weights never decay
 - distance     story location/language vs USER_CITY/COUNTRY/LANGUAGE: 1.0/0.6/0.35/0
-- time_decay   TIME_DECAY_MAX·(1 − e^(−age_h/half_life)) on Story.updated_at
+- time_decay   TIME_DECAY_MAX·(1 − e^(−age_h/half_life)) on Story.news_at (last update with new facts)
 """
 from __future__ import annotations
 
@@ -181,7 +181,7 @@ def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
     except (TypeError, ValueError):
         urgency = 5.0
     display = (base + urgency * config.W1_URGENCY + interest_pts
-               + distance * config.W_DISTANCE - time_decay_penalty(story["updated_at"]))
+               + distance * config.W_DISTANCE - time_decay_penalty(news_time(story)))
     relevance = {
         "quality": round(quality * 10, 1),
         "credibility": round(credibility * 10, 1),
@@ -194,6 +194,11 @@ def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
         "base": round(base, 2),
     }
     return relevance, display
+
+
+def news_time(story: sqlite3.Row) -> str | None:
+    """Last update that added facts; rewrites without news don't make a story recent again."""
+    return story["news_at"] or story["updated_at"]
 
 
 def read_states(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
@@ -210,8 +215,8 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
                    archived: bool = False, query: str = "", tag: str = "") -> list[dict[str, Any]]:
     """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
-    Active stories (updated within STORY_ACTIVE_DAYS) are ranked by display
-    score; ``archived`` returns the older ones, newest update first.
+    Active stories (news within STORY_ACTIVE_DAYS) are ranked by display
+    score; ``archived`` returns the older ones, newest first.
     Honors ``preferences.min_quality`` and optional text / tag filters.
     ``read`` is None, "read" or "updated" (significant update since it was read).
     """
@@ -219,7 +224,8 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     stats = source_stats(conn, trust_weights(conn, profile))
     reads = read_states(conn)
     cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=config.STORY_ACTIVE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-    sql = "SELECT * FROM Story WHERE headline IS NOT NULL AND updated_at " + ("< ?" if archived else ">= ?")
+    sql = ("SELECT * FROM Story WHERE headline IS NOT NULL AND COALESCE(news_at, updated_at) "
+           + ("< ?" if archived else ">= ?"))
     params: list[Any] = [cutoff]
     if query:
         sql += " AND (headline LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
@@ -244,7 +250,7 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
         out.append({"story": s, "source_count": st["feeds"], "quality": round(quality, 2),
                     "relevance": relevance, "display": display, **reads.get(s["id"], {"read": None})})
     if archived:
-        out.sort(key=lambda x: x["story"]["updated_at"] or "", reverse=True)
+        out.sort(key=lambda x: news_time(x["story"]) or "", reverse=True)
     else:
         out.sort(key=lambda x: x["display"], reverse=True)
     return out

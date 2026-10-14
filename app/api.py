@@ -125,6 +125,7 @@ def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]
         "display_score": round(item["display"], 3),
         "created_at": s["created_at"],
         "updated_at": s["updated_at"],
+        "news_at": scoring.news_time(s),
         "read": item.get("read"),
         "read_at": item.get("read_at"),
         "read_summary": item.get("read_summary"),

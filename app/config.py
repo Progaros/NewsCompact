@@ -113,6 +113,10 @@ MERGE_ENABLED = _env("NEWS_MERGE_ENABLED", "1") == "1"
 MERGE_SIM_THRESHOLD = _float("NEWS_MERGE_SIM_THRESHOLD", 0.62)
 MERGE_MAX_CHECKS_PER_RUN = _int("NEWS_MERGE_MAX_CHECKS_PER_RUN", 5)
 MERGE_ANCHORS_PER_STORY = _int("NEWS_MERGE_ANCHORS_PER_STORY", 3)
+# Lexical channel: stories sharing this many headline terms that occur in at most
+# MERGE_LEXICAL_MAX_DF window stories are verified too (catches cross-language copies).
+MERGE_LEXICAL_MIN_TERMS = _int("NEWS_MERGE_LEXICAL_MIN_TERMS", 3)
+MERGE_LEXICAL_MAX_DF = _int("NEWS_MERGE_LEXICAL_MAX_DF", 5)
 
 # --- Story generation ------------------------------------------------------
 # Cap for headline-only quality scores: a headline can't show factual density.

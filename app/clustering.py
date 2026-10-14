@@ -156,12 +156,16 @@ def _best_clearing(cands: list[tuple[int, float]], threshold: float) -> tuple[in
 
 def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[int, float]],
            threshold: float, log_ref: Any = None,
-           accept: frozenset[str] = harness.MERGE_CLASSES) -> tuple[int | None, float]:
-    """LLM-verify the best few candidates; a verifier failure rejects them all."""
+           accept: frozenset[str] = harness.MERGE_CLASSES,
+           priority: frozenset[int] = frozenset()) -> tuple[int | None, float]:
+    """LLM-verify the best few candidates (``priority`` ids first); a verifier failure rejects them all."""
     rows = []
-    for sid, sim in sorted(cands, key=lambda c: c[1], reverse=True)[: config.CLUSTER_VERIFY_MAX_CANDIDATES]:
-        if sim < threshold:
+    ranked = sorted(cands, key=lambda c: (c[0] in priority, c[1]), reverse=True)
+    for sid, sim in ranked:
+        if len(rows) >= config.CLUSTER_VERIFY_MAX_CANDIDATES:
             break
+        if sim < threshold and sid not in priority:
+            continue
         s = conn.execute("SELECT headline, summary FROM Story WHERE id = ?", (sid,)).fetchone()
         if s is not None:
             rows.append({"id": sid, "headline": s["headline"] or "", "summary": s["summary"] or "", "sim": sim})

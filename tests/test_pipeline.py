@@ -59,6 +59,32 @@ def test_headline_only_quality_is_capped(feed_id, llm):
     assert q == config.TITLE_QUALITY_MAX < 7
 
 
+def test_only_updates_with_new_facts_make_a_story_recent(feed_id, llm):
+    from app import scoring
+
+    add_article(feed_id, "Flood hits town")
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Story SET news_at = datetime('now', '-6 hours'), updated_at = datetime('now', '-6 hours')")
+
+    def state():
+        with db.get_conn() as conn:
+            s = conn.execute("SELECT * FROM Story").fetchone()
+            return s["news_at"], s["updated_at"], scoring.ranked_stories(conn)[0]["display"]
+
+    before = state()
+    llm.significance = 0  # a rewording: no new facts
+    add_article(feed_id, "Flood recap")
+    pipeline.process_pending()
+    after = state()
+    assert after[0] == before[0] and after[1] > before[1] and abs(after[2] - before[2]) < 0.01
+
+    llm.significance = 1
+    add_article(feed_id, "Flood dam breaks")
+    pipeline.process_pending()
+    assert state()[0] > before[0] and state()[2] > before[2] + 1
+
+
 def test_newest_articles_are_processed_first(feed_id, llm):
     old = add_article(feed_id, "Alpha old", age="-2 hours")
     new = add_article(feed_id, "Beta new")

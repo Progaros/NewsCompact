@@ -53,7 +53,8 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("SELECT news_at IS updated_at FROM Story WHERE id = 5").fetchone()[0] == 1
         assert [tuple(r) for r in conn.execute("SELECT id, parent_id FROM ChatMessage ORDER BY id")] == [
             (1, None), (2, 1), (3, 2)]
         assert conn.execute("SELECT leaf_id FROM ChatSession").fetchone()[0] == 3
