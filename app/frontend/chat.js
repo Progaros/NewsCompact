@@ -280,13 +280,13 @@ const Chat = (() => {
   }
 
   // editOf/editEl: resend an edited user message as a new version of it.
-  async fubox = document.getElementById("chat-messages");
-    const text = (edited ?? input.value ?? "").trim();
-    if (!text || !storyId) returnturns");
+  async function send(edited = null, editOf = null, editEl = null) {
+    if (busy) return;
+    const storyId = currentStory;
+    const input = document.getElementById("chat-input");
     const box = document.getElementById("chat-messages");
     const text = (edited ?? input.value ?? "").trim();
     if (!text || !storyId) return;
-    const turns = parseInt(sel.value, 10) || 0;
     box.querySelector(".chat-empty")?.remove();
     if (editEl) {
       while (editEl.nextSibling) editEl.nextSibling.remove();
@@ -317,9 +317,9 @@ const Chat = (() => {
       const res = await fetch(`/api/stories/${storyId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, search_turns: turns, edit_of: editOf }),
+        body: JSON.stringify({ message: text, web_search: webSearch, edit_of: editOf }),
       });
-      if (Auth.unauth(res)) { reply.remove(); web_search: webSearch
+      if (Auth.unauth(res)) { reply.remove(); return; }
       if (!res.ok) throw new Error("HTTP " + res.status);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
