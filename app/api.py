@@ -119,7 +119,7 @@ def _story_payload(item: dict[str, Any], articles: list[dict]) -> dict[str, Any]
         "summary": s["summary"],
         "tags": db.json_list(s["tags"]),
         "metrics": db.json_dict(s["metrics"]),
-        "quality_score": s["quality_score"],
+        "quality_score": item.get("quality", s["quality_score"]),
         "source_count": item["source_count"],
         "relevance": item["relevance"],
         "display_score": round(item["display"], 3),
@@ -136,14 +136,13 @@ def _load_story(conn: sqlite3.Connection, story_id: int) -> dict[str, Any]:
     s = conn.execute("SELECT * FROM Story WHERE id = ?", (story_id,)).fetchone()
     if s is None:
         raise HTTPException(404, "story not found")
-    n = conn.execute(
-        "SELECT COUNT(DISTINCT feed_id) FROM Article WHERE story_id = ?", (story_id,)
-    ).fetchone()[0]
     profile = scoring.get_user_profile(conn)
-    _n, trust = scoring.source_stats(conn, scoring.trust_weights(conn, profile), story_id).get(story_id, (0, 0.0))
-    relevance, display = scoring.score_story(s, n, profile, trust)
-    item = {"story": s, "source_count": n, "relevance": relevance, "display": display,
-            **scoring.read_states(conn).get(story_id, {"read": None})}
+    st = scoring.source_stats(conn, scoring.trust_weights(conn, profile), story_id).get(
+        story_id, {"feeds": 0, "trust": 0.0, "quality": None})
+    quality = st["quality"] if st["quality"] is not None else s["quality_score"]
+    relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality)
+    item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
+            "display": display, **scoring.read_states(conn).get(story_id, {"read": None})}
     return _story_payload(item, _articles_by_story(conn, [story_id])[story_id])
 
 

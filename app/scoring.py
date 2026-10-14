@@ -4,9 +4,11 @@
     display   = relevance + urgency·W1 + clamp(interest·W3, ±INTEREST_CAP)
                 + distance·W_DISTANCE − time_decay
 
-- quality      story quality (median of member article qualities), 0..1
-- credibility  corroboration: summed trust of the distinct feeds (feed category
-               weight 0..1, SOURCE_TRUST / profile source_weights): 1.0→0.25 … 5.0→1.0
+- quality      trust-weighted median of member article qualities, 0..1 (low-trust
+               reposts can't water down a credible source)
+- credibility  corroboration: summed trust of the distinct outlets (site host; a feed's
+               trust = its category weight 0..1, SOURCE_TRUST / profile source_weights;
+               several feeds of one outlet count once): 1.0→0.25 … 5.0→1.0
 - user_impact  0.5 baseline, +0.25 per preferences.interest_regions/locations hit in tags
 - interest     sum of the user's tag weights; clamped because weights never decay
 - distance     story location/language vs USER_CITY/COUNTRY/LANGUAGE: 1.0/0.6/0.35/0
@@ -17,8 +19,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 import sqlite3
+import statistics
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import config, db
 from .tags import normalize_tags
@@ -59,17 +64,63 @@ def trust_weights(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[str
     return out
 
 
+def outlet_key(site_url: str | None, xml_url: str | None) -> str:
+    """The publisher behind a feed: site host without ``www.`` (several feeds can share one)."""
+    for url in (site_url, xml_url):
+        host = (urlsplit(url or "").hostname or "").lower()
+        if host:
+            return host.removeprefix("www.")
+    return ""
+
+
+def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
+    """Median of ``(value, weight)``; equal weights give the plain median, zero weights are ignored."""
+    pairs = sorted((v, w) for v, w in pairs if w > 0)
+    total = sum(w for _, w in pairs)
+    acc = 0.0
+    for i, (v, w) in enumerate(pairs):
+        acc += w
+        if acc > total / 2 + 1e-9:
+            return v
+        if abs(acc - total / 2) <= 1e-9:
+            return (v + pairs[i + 1][0]) / 2
+    return None
+
+
 def source_stats(conn: sqlite3.Connection, trust: dict[str, float],
-                 story_id: int | None = None) -> dict[int, tuple[int, float]]:
-    """``{story_id: (distinct feeds, summed trust of those feeds)}``."""
-    sql = ("SELECT DISTINCT a.story_id, a.feed_id, COALESCE(f.category, '') FROM Article a "
-           "JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
+                 story_id: int | None = None) -> dict[int, dict[str, Any]]:
+    """``{story_id: {feeds, trust, quality}}`` per story.
+
+    ``trust`` sums the best feed trust of each distinct outlet; ``quality`` is the
+    trust-weighted median article quality (plain median if all trust is 0, None without scores).
+    """
+    sql = ("SELECT a.story_id, a.feed_id, a.quality, COALESCE(f.category, '') AS cat, f.site_url, f.xml_url "
+           "FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
     rows = conn.execute(sql + " AND a.story_id = ?", (story_id,)) if story_id is not None else conn.execute(sql)
-    out: dict[int, tuple[int, float]] = {}
-    for sid, _feed, cat in rows:
-        n, t = out.get(sid, (0, 0.0))
-        out[sid] = (n + 1, t + trust.get(cat, config.SOURCE_TRUST_DEFAULT))
+    feeds: dict[int, set[int]] = {}
+    outlets: dict[int, dict[str, float]] = {}
+    quals: dict[int, list[tuple[float, float]]] = {}
+    for r in rows:
+        sid, w = r["story_id"], trust.get(r["cat"], config.SOURCE_TRUST_DEFAULT)
+        feeds.setdefault(sid, set()).add(r["feed_id"])
+        key = outlet_key(r["site_url"], r["xml_url"]) or f"feed:{r['feed_id']}"
+        best = outlets.setdefault(sid, {})
+        best[key] = max(best.get(key, 0.0), w)
+        if r["quality"] is not None:
+            quals.setdefault(sid, []).append((float(r["quality"]), w))
+    out = {}
+    for sid, fids in feeds.items():
+        q = quals.get(sid, [])
+        quality = weighted_median(q)
+        if quality is None and q:
+            quality = float(statistics.median(v for v, _ in q))
+        out[sid] = {"feeds": len(fids), "trust": sum(outlets[sid].values()), "quality": quality}
     return out
+
+
+def _mentions(value: str, tag: str) -> bool:
+    """``value`` appears in ``tag`` as whole words ("us" matches "us-politics", not "music")."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(value)}(?![a-z0-9])", tag) is not None
 
 
 def user_impact_score(tags: list[str], preferences: dict[str, Any]) -> float:
@@ -80,7 +131,7 @@ def user_impact_score(tags: list[str], preferences: dict[str, Any]) -> float:
             continue
         for v in values:
             v = str(v).lower().strip()
-            if v and any(v in t for t in tags):
+            if v and any(_mentions(v, t) for t in tags):
                 impact += 0.25
     return _clamp01(impact)
 
@@ -102,15 +153,16 @@ def distance_score(metrics: dict[str, Any]) -> float:
 
 
 def score_story(story: sqlite3.Row, source_count: int, profile: dict[str, Any],
-                trust: float | None = None) -> tuple[dict[str, float], float]:
+                trust: float | None = None, quality: float | None = None) -> tuple[dict[str, float], float]:
     """Return ``(relevance breakdown, display score)`` for one story.
 
-    ``trust`` = summed source trust (see ``source_stats``); defaults to ``source_count``.
+    ``trust`` = summed outlet trust and ``quality`` = trust-weighted article quality
+    (see ``source_stats``); they default to ``source_count`` and the stored story quality.
     """
     tags = story_tags(story)
     metrics = db.json_dict(story["metrics"])
     try:
-        quality = _clamp01(float(story["quality_score"] or 5.0) / 10.0)
+        quality = _clamp01(float(quality if quality is not None else story["quality_score"] or 5.0) / 10.0)
     except (TypeError, ValueError):
         quality = 0.5
     trust = float(source_count) if trust is None else trust
@@ -180,14 +232,17 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     wanted_tag = normalize_tags([tag])[0] if tag and normalize_tags([tag]) else ""
     out = []
     for s in conn.execute(sql, params):
-        n, trust = stats.get(s["id"], (0, 0.0))
-        if n == 0 or (s["quality_score"] or 0) < min_quality:
+        st = stats.get(s["id"])
+        if st is None:
+            continue
+        quality = st["quality"] if st["quality"] is not None else (s["quality_score"] or 0)
+        if quality < min_quality:
             continue
         if wanted_tag and wanted_tag not in story_tags(s):
             continue
-        relevance, display = score_story(s, n, profile, trust)
-        out.append({"story": s, "source_count": n, "relevance": relevance, "display": display,
-                    **reads.get(s["id"], {"read": None})})
+        relevance, display = score_story(s, st["feeds"], profile, st["trust"], quality)
+        out.append({"story": s, "source_count": st["feeds"], "quality": round(quality, 2),
+                    "relevance": relevance, "display": display, **reads.get(s["id"], {"read": None})})
     if archived:
         out.sort(key=lambda x: x["story"]["updated_at"] or "", reverse=True)
     else:

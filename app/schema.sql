@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS Story (
     summary       TEXT,
     tags          TEXT DEFAULT '[]',
     metrics       TEXT DEFAULT '{}',   -- urgency_level, impact_scale, status, location, language
-    quality_score REAL DEFAULT 5.0,    -- median of member article qualities
+    quality_score REAL DEFAULT 5.0,    -- trust-weighted median of member article qualities
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
     merge_checked_at TEXT,             -- last recall-merge check (re-checked after updates)

@@ -148,7 +148,7 @@ class StoryCard extends HTMLElement {
         <div class="metrics">
           <span class="metric" title="urgency 1-10">Urgency <b>${m.urgency_level ?? "–"}</b></span>
           ${m.impact_scale ? `<span class="metric">Impact <b>${esc(m.impact_scale)}</b></span>` : ""}
-          <span class="metric" title="Story quality (median of article quality)">Quality <b class="${qualityClass(d.quality_score)}">${Number(d.quality_score).toFixed(1)}</b></span>
+          <span class="metric" title="Story quality (trust-weighted median of article quality)">Quality <b class="${qualityClass(d.quality_score)}">${Number(d.quality_score).toFixed(1)}</b></span>
           <span class="metric" title="relevance = quality·0.40 + credibility·0.35 + impact·0.25 (0–10); display = relevance + urgency + interest + distance − time decay">
             Score <b>${d.display_score}</b>
             <span class="rel-break">rel ${rel.base ?? "–"} · q ${rel.quality ?? "–"} · cred ${rel.credibility ?? "–"} · impact ${rel.user_impact ?? "–"} · interest ${rel.user_interest_points ?? "–"} · dist ${rel.distance_points ?? "–"}</span>

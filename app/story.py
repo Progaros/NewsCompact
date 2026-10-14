@@ -13,7 +13,7 @@ import sqlite3
 import statistics
 from typing import Any
 
-from . import config, db, ollama
+from . import config, db, ollama, scoring
 from .tags import normalize_tags
 
 log = logging.getLogger("news.story")
@@ -210,7 +210,8 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
                  article_id: int | None = None, force_full: bool = False) -> int:
     """Rewrite the story from its articles. Returns the prompt size in chars (0 = nothing to do)."""
     arts = [dict(a) for a in conn.execute(
-        "SELECT * FROM Article WHERE story_id = ? ORDER BY published_date ASC", (story_id,)
+        "SELECT a.*, COALESCE(f.category, '') AS feed_category FROM Article a JOIN Feed f ON f.id = a.feed_id "
+        "WHERE a.story_id = ? ORDER BY a.published_date ASC", (story_id,)
     )]
     if not arts:
         return 0
@@ -247,10 +248,12 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
 
     raw_tags = out.get("tags") if isinstance(out.get("tags"), list) else []
     tags = normalize_tags([t for t in raw_tags if isinstance(t, str)])[:6]
-    # Median of member qualities: one bot-blocked fetch can't drag a story down.
-    quals = [a["quality"] for a in arts if a.get("quality") is not None]
+    # Trust-weighted median: one bot-blocked fetch or a pile of low-trust reposts can't drag it down.
+    quals = [(a["quality"], config.SOURCE_TRUST.get(a["feed_category"], config.SOURCE_TRUST_DEFAULT))
+             for a in arts if a.get("quality") is not None]
     if quals:
-        quality = round(float(statistics.median(quals)), 2)
+        quality = scoring.weighted_median(quals)
+        quality = round(float(quality if quality is not None else statistics.median(q for q, _ in quals)), 2)
     else:
         try:
             quality = max(1.0, min(10.0, float(out.get("quality", 5))))

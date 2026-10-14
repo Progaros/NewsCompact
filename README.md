@@ -68,7 +68,8 @@ flowchart LR
   4. **Prompt 2** (`app/story.py`): headline (one core event, never `;`-joined),
      summary, tags, metrics, location, language. Urgency / impact / status follow
      fixed anchors (urgency 1–2 opinion/chatter … 9–10 live emergency). Story
-     quality = median of member qualities. Incremental updates also rate their
+     quality = trust-weighted median of member qualities (low-trust reposts can't
+     water down a credible source). Incremental updates also rate their
      significance 0–3 (drives "updated since you read").
   A `thin` article joining a junk story skips steps 3–4. Broken-body
   articles are never processed (`skipped`). Articles failing 3 times are
@@ -85,8 +86,11 @@ flowchart LR
   display   = relevance + urgency·W1 + clamp(interest·W3, ±10) + distance·W_DISTANCE − time_decay
   ```
 
-  credibility = summed trust of the distinct feeds (trust per feed category,
-  0–1, e.g. Reddit 0.3; 1.0 → 0.25 … 5.0 → 1.0); interest = sum of
+  credibility = summed trust of the distinct outlets (site host; several feeds
+  of one outlet count once; trust per feed category,
+  0–1, e.g. Reddit 0.3; 1.0 → 0.25 … 5.0 → 1.0); quality is re-weighted with the
+  same trust at ranking time; user_impact matches regions/locations as whole
+  words in tags; interest = sum of
   👍/👎-learned tag weights; distance = story location/language vs
   `NEWS_USER_CITY/COUNTRY/LANGUAGE`; decay half-life 18 h, max 10. Only stories
   updated within `NEWS_STORY_ACTIVE_DAYS` are ranked; older ones are in the archive.
