@@ -137,16 +137,18 @@ flowchart LR
   Story**, **Work**, **Latency** (first seen → in a story) and **Merge** (recall
   merge that moved it). The status bar shows median work vs latency, the last
   ingest and the last merge pass.
-- **Feeds (`/feeds`)** — add (title auto-fetched), rename, recategorize, delete,
+- **Feeds (`/feeds`, admins)** — add (title auto-fetched), rename, recategorize, delete,
   enable/disable per feed or category, 24 h / 7 d volume, filter, failing feeds.
+- **Users (`/admin`, admins)** — create users, promote/demote admins, reset passwords
+  and delete users, with per-user vote/read/chat counts.
 - **⚙ Preferences** — "About you" (a short self-description that tailors the
   personal heads-up and the story chat; story summaries stay shared), interest regions / locations (raise "impact"), minimum
   story quality, source trust per feed category (expand a category to set single
   sources; a category with individually set sources is faded and moving its
   slider asks before resetting them; ⊘ hides a source from the personal
   "For you" feed — its articles neither count nor show there), scheduled ntfy reports (news
-  brief or pipeline report; time, weekdays, "send now") and the tag
-  weights (edit, add, remove or reset).
+  brief or pipeline report; time, weekdays, "send now", admins only), tag
+  weights (edit, add, remove or reset) and password change.
 
 ## API
 
@@ -279,11 +281,13 @@ Environment variables; defaults in [app/config.py](app/config.py).
   `t_embed_s / t_cluster_s / t_harness_s / t_story_s / t_wall_s / t_merge_s`, `pipeline_failures`
 - `Story` — headline, summary, tags, metrics (urgency, impact, status,
   location, language), `quality_score`, `created_at`, `updated_at`, `merge_checked_at`,
-  `material_at` (last update significant enough to resurface a read story)
+  `material_at` (last update significant enough to resurface a read story),
+  `news_at` (last update that added facts; drives ranking recency and active window)
 - `StoryRead` — stories marked read per user (`read_at`, summary snapshot)
 - `Article_Vectors` — vec0 `FLOAT[1024]`, cosine, primary key `article_id`
 - `AppUser` (name, scrypt password hash, `is_admin`); per user: `UserProfile` (id = user id;
-  tag weights, source trust, preferences incl. ntfy report schedules for admins),
+  tag weights, category `source_weights`, per-feed `feed_weights`, preferences incl. `about`,
+  `excluded_feeds` and ntfy report schedules for admins),
   `FeedbackLog`, `ChatSession` (+ `ChatMessage` tree), `ShareLink` snapshots; shared: `ArticleTombstone`
 
 Schema upgrades and data migrations (`PRAGMA user_version`) run automatically
