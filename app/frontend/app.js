@@ -8,8 +8,10 @@ const searchEl = document.getElementById("search");
 const chipsEl = document.getElementById("filter-chips");
 const scopeBtns = { active: document.getElementById("scope-active"), archive: document.getElementById("scope-archive") };
 const showReadBtn = document.getElementById("show-read");
+const refreshBtn = document.getElementById("refresh-btn");
 
 const PAGE = 50;
+const STALE_MS = 10 * 60 * 1000; // offer a refresh once the shown content is this old
 // Expanded parts survive live re-renders: details (tags, metrics) and the source list.
 const openIds = new Set();
 const sourcesOpenIds = new Set();
@@ -21,9 +23,8 @@ const state = {
   total: 0,
   hiddenRead: 0,
   pending: null,
-  lastArticle: null,
   activeDays: null,
-  live: false,
+  loadedAt: 0,
   loading: false,
   scope: "active",
   query: "",
@@ -215,11 +216,8 @@ function updateStatus() {
   const parts = [`${Math.min(state.shown, state.stories.length)}/${state.total} ${state.scope === "archive" ? "archived" : "stories"}`];
   if (state.hiddenRead) parts.push(`${state.hiddenRead} read hidden`);
   if (state.pending) parts.push(`${state.pending} queued`);
-  if (state.lastArticle) parts.push(`last article ${timeAgo(state.lastArticle)}`);
-  if (state.live) parts.push("live");
   statusEl.textContent = parts.join(" · ");
   statusEl.title = statusEl.textContent;
-  statusEl.classList.toggle("live", state.live);
 }
 
 function storiesUrl(limit) {
@@ -240,7 +238,7 @@ async function fetchStories(limit) {
   const data = await res.json();
   Object.assign(state, {
     stories: data.stories, total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0,
-    lastArticle: data.last_article, activeDays: data.active_days,
+    activeDays: data.active_days,
   });
   return true;
 }
@@ -262,10 +260,12 @@ async function loadMore() {
 
 function reload() {
   state.shown = 0;
+  state.loadedAt = Date.now();
+  checkStale();
   return loadMore();
 }
 
-// SSE refresh keeps the visible window instead of jumping back to page 1.
+// Keeps the visible window instead of jumping back to page 1.
 async function refreshFeed() {
   const keep = Math.max(state.shown, PAGE);
   if (await fetchStories(keep)) {
@@ -315,33 +315,34 @@ async function loadHeadsUp() {
   }
 }
 
-// --- live updates via SSE --------------------------------------------------
-let sseRetry = 0;
-function connectSSE() {
-  const es = new EventSource("/api/events");
-  es.onopen = () => {
-    sseRetry = 0;
-    state.live = true;
-    updateStatus();
-  };
-  es.onerror = () => {
-    state.live = false;
-    es.close();
-    sseRetry += 1;
-    updateStatus();
-    setTimeout(connectSSE, Math.min(30000, 1000 * sseRetry));
-  };
-  let debounce;
-  es.onmessage = () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(refreshFeed, 500);
-  };
+// --- manual refresh once the content is stale ------------------------------
+function checkStale() {
+  const mins = Math.floor((Date.now() - state.loadedAt) / 60000);
+  const stale = state.loadedAt && Date.now() - state.loadedAt >= STALE_MS;
+  refreshBtn.hidden = !stale && !refreshBtn.disabled;
+  if (stale) refreshBtn.title = `Stories loaded ${mins} min ago — reload stories and the brief`;
 }
+
+async function refreshAll() {
+  refreshBtn.disabled = true;
+  refreshBtn.classList.add("busy");
+  try {
+    await Promise.all([refreshFeed(), loadHeadsUp()]);
+    state.loadedAt = Date.now();
+  } finally {
+    refreshBtn.disabled = false;
+    refreshBtn.classList.remove("busy");
+    checkStale();
+  }
+}
+
+refreshBtn.addEventListener("click", refreshAll);
+setInterval(checkStale, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkStale(); });
 
 (async function boot() {
   await Auth.init();
   await reload();
   Auth.onChange(() => reload()); // sign-in/out or saved preferences
   loadHeadsUp();
-  connectSSE();
 })();

@@ -108,7 +108,10 @@ flowchart LR
   Breaking / it is revived or merged). The Heads Up brief always uses the full feed.
   👍/👎 train tag weights; **💬 Ask** opens a per-story
   chat whose answer streams in live (optionally after searchngx web-search
-  turns, shown as progress). Live via SSE.
+  turns; thinking, searches, page reads and tool errors are shown as small
+  collapsible steps; edited questions keep their earlier versions, ‹ n/m ›).
+  No auto-refresh: once the shown content is 10 min old a **↻ Refresh** button
+  appears next to the heads-up (reloads stories and the brief).
 - **Articles (`/list`)** — every ingested article with search, status filter and
   timings: **Wait** (first seen → pipeline start), **Embed / Cluster / Harness /
   Story**, **Work**, **Latency** (first seen → in a story) and **Merge** (recall

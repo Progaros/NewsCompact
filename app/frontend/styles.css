@@ -55,10 +55,6 @@ body.unsigned-in .nav #feeds-link { display: none; }
 }
 .controls { display: flex; align-items: center; gap: 14px; }
 .status { color: var(--muted); font-size: 13px; }
-.status.live::before {
-  content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--accent-2); margin-right: 6px; vertical-align: middle;
-}
 .btn {
   background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 8px;
@@ -110,6 +106,13 @@ body.wide main { max-width: 1400px; }
   font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
   color: var(--accent); font-weight: 700; margin-bottom: 10px;
 }
+.heads-up-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.refresh-btn {
+  background: var(--accent-soft); color: var(--accent); border: 1px solid transparent;
+  border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.refresh-btn:hover { border-color: var(--accent); }
+.refresh-btn.busy { opacity: .6; cursor: progress; }
 .heads-up p { margin: 0; color: var(--text); line-height: 1.65; white-space: pre-line; }
 
 .feed { display: flex; flex-direction: column; gap: 14px; }
