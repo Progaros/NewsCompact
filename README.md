@@ -2,15 +2,15 @@
 
 Local-first web app that ingests RSS feeds, clusters related articles into
 **stories** with a local Ollama LLM, summarizes them, scores their quality and
-ranks them for several users (shared AI summaries and classifications;
-per-user preferences, votes, read state, chats and briefs). Everything lives in one SQLite file (`news.db`,
-including the sqlite-vec embedding table) plus HTTP calls to Ollama.
+ranks them for several users. Stories, summaries and classifications are shared;
+preferences, votes, read state, story chats and personal briefs are per user.
+Everything lives in one SQLite file (`news.db`, including the `sqlite-vec`
+embedding table) plus HTTP calls to Ollama and SearXNG.
 
-## Quickstart
+## Quickstart & Deployment
 
 Requirements: [uv](https://docs.astral.sh/uv/) (Python 3.14) and an Ollama
-instance (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`) serving
-
+instance (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`) serving:
 - chat model `qwen3:27b`
 - embedding model `qwen3-embedding:0.6b-CPU` (1024-dim)
 
@@ -22,195 +22,18 @@ scripts/shutdown.sh [secs]     # graceful stop, SIGKILL after timeout (default 2
 uv run pytest                  # tests (fake LLM, temp DB)
 ```
 
-Feeds are managed in the UI (`/feeds`, admins only). Set `NEWS_AUTH_PASSWORD` to require a
-login for everything except the read-only story views — put it (and any other
-`NEWS_*` settings) in a gitignored `.env`; `start.sh` sources it. The admin user
-`admin` (user 1, owner of all data from the single-user era) signs in with that
-password; admins create further users, promote/demote them, reset passwords and
-delete them on **Users** (`/admin`); everyone can change their own password in ⚙ Preferences.
-
-## How it works
-
-```mermaid
-flowchart LR
-  I[ingest thread<br/>every 300 s] -- new articles --> W((wake))
-  W --> P[pipeline thread]
-  P --> E[embed] --> C[cluster<br/>KNN + LLM verifier] --> H[harness<br/>quality + breaking] --> S[Prompt 2<br/>story update]
-```
-
-- **Ingest** (`app/ingest.py`): all feeds fetched concurrently (ETag /
-  Last-Modified, pooled client). Bodies are normalized by
-  `content_quality.clean_body` (upvoterss Reddit/HN items become the post text
-  plus a "Top comments:" list of up to `NEWS_SOCIAL_MAX_COMMENTS` comments, used
-  like article text for quality and summaries but not for clustering; binary
-  payloads are dropped). For enabled feeds with a short post the linked HTML
-  page is fetched and extracted
-  (trafilatura → newspaper3k → BeautifulSoup) — except for media/social hosts
-  (reddit, redd.it, youtube, x, …). Disabled feeds only store RSS rows.
-  Bodies are classified `ok / thin / broken / empty` (`app/content_quality.py`).
-  **Cross-feed duplicates** (same canonical URL without tracking parameters,
-  or same title of ≥ 5 words within 72 h, `app/dedup.py`) skip all AI calls
-  and join the original's story, where they still count as a source.
-- **Retention** (`app/retention.py`, hourly): stories without an update for
-  `NEWS_RETENTION_DAYS` (7) are deleted with their articles, vectors and chat;
-  articles that never joined a story go after the same age. Deleted URLs are
-  remembered so feeds don't re-import them; 👍/👎 votes are kept. Freed space
-  is returned to the OS (incremental vacuum).
-- **Pipeline** (`app/pipeline.py`), serial, newest article first (in a backlog,
-  low-trust categories such as Reddit wait for the rest; nothing is skipped), woken as soon
-  as an enabled feed stored new articles; paused (no retries burned) while
-  Ollama is unreachable:
-  1. **Embed** title + first 100 body words (title only for non-`ok` bodies); one
-     batched embed call per 16 articles at the start of each batch.
-  2. **Cluster** (`app/clustering.py`): KNN over the vec0 index finds candidate
-     stories, scored by member-anchor similarity (≥ 0.55, 48 h window); one
-     constrained LLM call classifies them;
-     only `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` attach. Otherwise a stale
-     story (no update within the window) can be revived (≥ 0.62) or a new story is created.
-     `NEWS_CLUSTER_MODE=cosine` is the no-LLM rollback (join ≥ 0.64).
-     `SAME_TOPIC_DISTINCT_EVENT` verdicts are kept as related-story links.
-  3. **Harness** (`app/harness.py`): article quality 1–10 + breaking flag in
-     one schema-constrained call (headline-only for non-`ok` bodies, capped at
-     `NEWS_TITLE_QUALITY_MAX`).
-  4. **Prompt 2** (`app/story.py`): headline (one core event, never `;`-joined),
-     summary, tags, metrics, location, language. Urgency / impact / status follow
-     fixed anchors (urgency 1–2 opinion/chatter … 9–10 live emergency). Story
-     quality = trust-weighted median of member qualities (low-trust reposts can't
-     water down a credible source). Incremental updates also rate their
-     significance 0–3 (drives "updated since you read"). An unparseable reply is
-     retried once before the article is rolled back.
-  A `thin` article joining a junk story skips steps 3–4. Broken-body
-  articles are never processed (`skipped`). Articles failing 3 times are
-  parked (dead letter).
-- **Recall merge** (`app/merge.py`): when the queue is empty, up to 5
-  recently updated, not-yet-checked stories are compared with neighbouring
-  stories (similarity ≥ 0.62) and verified duplicates are merged (one Prompt 2
-  rewrite per merge). Stories sharing ≥ 3 distinctive headline terms (names,
-  numbers that occur in ≤ 5 window stories) are verified first — embeddings miss
-  cross-language and title-only copies. Only `EXACT_MATCH` merges two stories — story-level
-  "continuations" chained whole sagas together. Verdicts are stored (`StoryLink`): a pair is
-  only verified again after one of the two stories changed.
-- **Ranking** (`app/scoring.py`):
-
-  ```
-  relevance = 10·(quality·0.40 + credibility·0.35 + user_impact·0.25)
-  display   = relevance + urgency·W1 + clamp(interest·W3, ±10) + distance·W_DISTANCE − time_decay
-  ```
-
-  credibility = summed trust of the distinct outlets (site host; several feeds
-  of one outlet count once; trust per feed category or single feed,
-  0–1, e.g. Reddit 0.3; 1.0 → 0.25 … 5.0 → 1.0); quality is re-weighted with the
-  same trust at ranking time; user_impact matches regions/locations as whole
-  words in tags; interest = sum of
-  👍/👎-learned tag weights; distance = story location/language vs the user's
-  home city/country/language (⚙ Preferences; default `NEWS_USER_CITY/COUNTRY/LANGUAGE`); decay half-life 18 h, max 10, counted from
-  the last update that added facts (`news_at`; rewordings and recaps don't push a
-  story up again). Only stories
-  with news within `NEWS_STORY_ACTIVE_DAYS` are ranked; older ones are in the archive.
-- **Reports** (`app/reports.py`): ntfy pushes on configurable weekdays/times —
-  the news brief and a 24 h pipeline report (volume, join rate, latency,
-  quality mix, failing feeds, top stories).
-
-## UI
-
-- **Stories (`/`)** — Quick Heads Up brief (TTL-cached, also pushable via
-  ntfy), search, Active/Archive toggle, click a `#tag` to filter. Cards always
-  show the full summary; clicking a card reveals tags, metrics, the relevance
-  breakdown and related stories (same topic, different event), and the separate sources button lists every source article.
-  The ✓ at the top right marks a story read: it fades and is hidden from the
-  next page load on (toolbar toggle **Show read** brings read stories back). A
-  read story returns with a ↻ "Updated since you read" badge, the new source
-  articles flagged and the old summary to compare, once Prompt 2 rates an update
-  at least `NEWS_READ_RESURFACE_SIGNIFICANCE` (or urgency jumps / it turns
-  Breaking / it is revived or merged). The Heads Up brief always uses the full feed.
-  Signed-in users switch between **For you** (ranked with their tag weights,
-  regions/locations, location distance, source trust and minimum quality) and
-  **Everyone** (the default ranking); signed-out visitors always get the default.
-  The Quick Heads Up is generated per view and shows "(updating…)" while a
-  newer brief is being written, then fades it in.
-  🔗 copies share links: stories get a short public `/s/<id>`; the heads-up
-  (signed in) and chat answers are shared as snapshots `/p/<token>` — short for
-  the default brief, long and unguessable for personal content.
-  👍/👎 train tag weights (editable / addable in ⚙ Preferences); **💬 Ask** opens a per-story
-  chat whose answer streams in live (optionally after searchngx web-search
-  turns; thinking, searches, page reads and tool errors are shown as small
-  collapsible steps; edited questions keep their earlier versions, ‹ n/m ›).
-  No auto-refresh: once the shown content is 10 min old a **↻ Refresh** button
-  appears next to the heads-up (reloads stories and the brief).
-- **Articles (`/list`)** — every ingested article with search, status filter and
-  timings: **Wait** (first seen → pipeline start), **Embed / Cluster / Harness /
-  Story**, **Work**, **Latency** (first seen → in a story) and **Merge** (recall
-  merge that moved it). The status bar shows median work vs latency, the last
-  ingest and the last merge pass.
-- **Feeds (`/feeds`, admins)** — add (title auto-fetched), rename, recategorize, delete,
-  enable/disable per feed or category, 24 h / 7 d volume, filter, failing feeds.
-- **Users (`/admin`, admins)** — create users, promote/demote admins, reset passwords
-  and delete users, with per-user vote/read/chat counts.
-- **⚙ Preferences** — "About you" (a short self-description that tailors the
-  personal heads-up and the story chat; story summaries stay shared), home city / country /
-  language (distance ranking; empty = server default), interest regions / locations (raise "impact"), minimum
-  story quality, source trust per feed category (expand a category to set single
-  sources; a category with individually set sources is faded and moving its
-  slider asks before resetting them; ⊘ hides a source from the personal
-  "For you" feed — its articles neither count nor show there), scheduled ntfy reports (news
-  brief or pipeline report; time, weekdays, "send now", admins only), tag
-  weights (edit, add, remove or reset), password change and your shared links (open / revoke).
-
-## API
-
-| Method & path | Purpose |
-| --- | --- |
-| `GET /api/stories?limit=&archived=&q=&tag=&view=` | Ranked (or archived) stories (+ total `count`, `pending`, `last_article`); `view=personal` (default, signed-in only) or `default` |
-| `GET /api/stories/{id}` | One story with its articles (every story also carries `related`: up to 5 `{id, headline}`) |
-| `POST` / `DELETE /api/stories/{id}/read` | Mark read / unread (`GET /api/stories?hide_read=true&keep=ids` hides read stories except `keep`; each story has `read`: null \| `read` \| `updated`) |
-| `GET/POST /api/stories/{id}/chat` | Chat history (shown branch, with message versions) / send `{"message", "search_turns", "edit_of"?}` → NDJSON stream (`step` = thinking/search/read/error step, `thinking`, `delta`, `done`/`error`); steps are stored with the reply; `edit_of` resends an edited user message as a new version |
-| `POST /api/stories/{id}/chat/switch` | Show another version `{"message_id"}` of a message (with its latest replies) |
-| `GET /api/articles?limit=&order=&status=&q=` | Flat article list with timings + worker status |
-| `GET /api/heads-up?view=` | AI brief over the top 5 stories of the view (`default`, or `personal` when signed in); never waits — a stale brief (> `NEWS_HEADS_UP_TTL_MINUTES`) is regenerated in the background and `generating: true` tells the client to poll |
-| `POST /api/feedback` · `GET /api/feedback` | Vote `{"story_id", "kind": "up"\|"down"}` · raw vote log |
-| `GET/PUT /api/profile` | Profile (+ effective `source_trust` per category, `feed_trust` per feed, `ntfy_reports`, `home_defaults`); PUT merges `preferences` (`interest_regions`, `locations`, `min_quality`, `ntfy_reports`, `excluded_feeds`, `about`, `home_city`, `home_country`, `language`) and replaces `tag_weights` / `source_weights` / `feed_weights` (per-feed overrides) if given |
-| `GET /api/reports/{brief\|pipeline}` · `POST /api/reports/{kind}/send` | Preview a report · push it to ntfy now |
-| `GET/POST /api/feeds` · `PATCH/DELETE /api/feeds/{id}` | Feed management |
-| `POST /api/feeds/category` | Enable/disable a whole category |
-| `GET /api/feeds/preview?url=` | Fetch a feed's `<title>` |
-| `POST /api/refresh` | Ingest now and drain the pipeline queue (blocking) |
-| `GET /api/health` | Counts, pending, dead letter, worker status |
-| `GET /api/events` | SSE stream |
-| `GET /api/auth/session` · `POST /api/auth/login` `{"username", "password"}` · `POST /api/auth/logout` | Session (`user`: id, name, is_admin; an empty user name logs in as user 1) |
-| `POST /api/auth/password` `{"current", "new"}` | Change your own password |
-| `POST /api/share` `{"kind": "brief", "view"}` · `{"kind": "chat", "story_id", "message_id"}` | Snapshot a brief / chat answer → `{"url": "/p/<token>"}`; default-view briefs get an 8-char token, personal content a 32-char unguessable one |
-| `GET /api/share/{token}` · pages `/p/{token}`, `/s/{story id}` | Public share views (snapshot; a story in the default view) |
-| `GET /api/share` · `DELETE /api/share/{token}` | Your own share links (newest first) · revoke one |
-| `GET/POST /api/admin/users` · `PATCH/DELETE /api/admin/users/{id}` | Admins: list / create `{"name", "password", "is_admin"}` / promote, demote, set password / delete users (user 1 stays admin; no self-demotion or self-deletion) |
-
-With auth enabled, only `/`, `/list`, `/static/*`, the auth endpoints and
-`GET` on stories (not chat), articles, heads-up, health and events are public;
-read state is stripped from those public responses. Feeds, refresh, ntfy
-reports and user administration are admin-only (403 for other users).
-Without a password (open mode) everything else is limited to LAN clients, who act
-as user 1 unless they sign in as someone else
-(private/loopback addresses, judged by the address nginx appends to
-`X-Forwarded-For`).
-All writes are rejected when the browser's `Origin` is another site (CSRF), and
-non-public API calls are rejected when the browser marks them `Sec-Fetch-Site:
-cross-site` (Lax cookies still ride on cross-site GET navigations). Responses
-carry a strict CSP. Article links from feeds and chat search results are only
-fetched when every redirect hop resolves to a public IP (no LAN/metadata SSRF), and the
-connection goes to the address that was checked (no DNS rebinding; behind an
-environment proxy only the pre-check applies);
-feed URLs you add yourself may point into the LAN. Public endpoints are bounded:
-one heads-up generation at a time, at most 50 live SSE connections, capped
-`limit`s. Login is throttled per client IP (5 failures/min).
-
-### Behind nginx (HTTPS)
-
-`.env` next to `main.py`:
+Put settings in a gitignored `.env` next to `main.py` (`start.sh` sources it):
 
 ```bash
-NEWS_AUTH_PASSWORD='long random password'
-NEWS_PUBLIC_BASE=https://news.example.org   # Secure cookie, HSTS, origin check
-NEWS_HOST=127.0.0.1                         # nginx on the same host; else its LAN IP + NEWS_FORWARDED_ALLOW_IPS
+NEWS_AUTH_PASSWORD='long random password (>= 20 chars)'
+NEWS_PUBLIC_BASE=https://news.example.org   # Secure cookie, HSTS, CSRF Origin check
+NEWS_HOST=127.0.0.1                         # when nginx runs on the same host
 ```
+
+- **Open mode** (`NEWS_AUTH_PASSWORD` empty): LAN clients act as user `1` (`admin`, admin) without signing in; non-LAN requests to private routes are rejected (403).
+- **Password mode**: `admin` signs in with `NEWS_AUTH_PASSWORD` (until setting a custom password in ⚙ Preferences). Admins manage feeds (`/feeds`) and users (`/admin`: create, promote/demote, reset password, delete).
+
+### Reverse proxy (`nginx`, HTTPS)
 
 ```nginx
 limit_req_zone $binary_remote_addr zone=news_login:1m rate=10r/m;
@@ -223,7 +46,7 @@ location / {
     proxy_read_timeout 1h;   # SSE stream + slow chat replies
     client_max_body_size 64k;
 }
-location = /api/auth/login {   # second throttle layer in front of the app's own
+location = /api/auth/login {
     limit_req zone=news_login burst=5 nodelay;
     proxy_pass http://127.0.0.1:8787;
     proxy_set_header Host $host;
@@ -232,113 +55,142 @@ location = /api/auth/login {   # second throttle layer in front of the app's own
 }
 ```
 
-Use a long random password (≥ 20 chars): sessions last 24 h and survive restarts
-(only token hashes are stored; sessions opened with `NEWS_AUTH_PASSWORD` end when
-it changes), and the throttle is per IP, so a distributed guesser is
-only slowed, not stopped.
+## Architecture & Data Flow
 
-## Configuration
+```mermaid
+flowchart LR
+  subgraph Ingest ["1 · Ingest (every 300 s)"]
+    RSS[RSS / Reddit / HN feeds] --> Clean[Clean & classify<br/>ok · thin · broken · empty]
+    Clean -->|short body & enabled| Page[Fetch page<br/>DNS-pinned public IP]
+    Clean & Page --> Dedup{URL / title<br/>duplicate?}
+  end
 
-Environment variables; defaults in [app/config.py](app/config.py).
+  subgraph Pipeline ["2 · Serial GPU Pipeline (newest first, low-trust last)"]
+    Embed[Batch embed<br/>16 × title + 100w] --> KNN[vec0 KNN + AnchorCache<br/>48 h active / stale revive]
+    KNN --> Verify[27B event verifier<br/>EXACT · CONT · SAME_TOPIC]
+    Verify --> Harness[27B harness<br/>quality 1–10 + breaking]
+    Harness --> P2[27B Prompt 2<br/>headline · summary · metrics · news_at]
+  end
+
+  subgraph Idle ["3 · Idle & Serving"]
+    Merge[Recall merge<br/>vec0 + rare headline terms]
+    Rank[Rank & personalize<br/>For you vs Everyone]
+    Brief[Heads-up brief &<br/>ntfy reports]
+  end
+
+  Dedup -->|copy| StoryDB[(SQLite + vec0<br/>Story · Article · StoryLink)]
+  Dedup -->|new| Embed
+  Verify -. SAME_TOPIC .-> StoryDB
+  P2 --> StoryDB
+  StoryDB <--> Merge
+  StoryDB --> Rank & Brief
+```
+
+1. **Ingest** (`app/ingest.py`, `app/dedup.py`): fetches feeds concurrently (ETag / Last-Modified, 5 MB cap). Normalizes bodies (`content_quality.clean_body`; Reddit/HN items keep post text + up to `NEWS_SOCIAL_MAX_COMMENTS` comments). Enabled feeds with short descriptions fetch the linked article HTML (`trafilatura` → `newspaper3k` → `BeautifulSoup`) via a DNS-pinned client that connects only to vetted global IPs. Cross-feed duplicates (canonical URL or ≥ 5-word title within 72 h) attach directly to the original's story without LLM calls.
+2. **Pipeline** (`app/pipeline.py`, `app/clustering.py`, `app/harness.py`, `app/story.py`): processes pending articles newest-first (categories with `SOURCE_TRUST < 0.5` like Reddit wait until higher-trust backlog clears; `broken` bodies are skipped).
+   - **Embed**: title + first 100 body words (title-only unless `ok`), batched in chunks of `NEWS_EMBED_BATCH` (16) and stored as the article is processed.
+   - **Cluster**: `vec0` KNN retrieves candidates scored by max cosine similarity to non-broken member anchors (`AnchorCache`). The 27B verifier classifies top candidates (`≥ 0.55` within 48 h, or `≥ 0.62` stale revival); `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` join, `SAME_TOPIC_DISTINCT_EVENT` is saved in `StoryLink` as a related story.
+   - **Harness**: scores article quality (1–10, capped at `NEWS_TITLE_QUALITY_MAX` for non-`ok` bodies) and `breaking` in one schema-constrained call. Thin articles joining a junk story skip Harness & Prompt 2.
+   - **Prompt 2**: generates/updates headline, 2–4 sentence summary, tags, `location`, `language`, and anchored `metrics` (`urgency_level`, `impact_scale`, `status`), retrying once on malformed JSON. Story quality is the **trust-weighted median** of member articles. Incremental rewrites rate `update_significance` (0–3): `≥ 1` advances `news_at` (recency), `≥ 2` (or urgency jump / Breaking) advances `material_at` (resurfaces read stories).
+3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges; non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
+4. **Ranking** (`app/scoring.py`):
+   $$\text{relevance} = 10 \cdot (0.40\,\text{quality} + 0.35\,\text{credibility} + 0.25\,\text{impact})$$
+   $$\text{display} = \text{relevance} + \text{urgency}\cdot W_1 + \text{clamp}(\text{interest}\cdot W_3, \pm 10) + \text{distance}\cdot W_{\text{dist}} - \text{decay}(\text{news\_at})$$
+   - **Credibility**: summed trust of distinct outlets (`outlet_key` by hostname; multiple feeds from one publisher count once), using category/per-feed trust overrides.
+   - **Personalization** (`view=personal`): whole-word region/location tag matches (`impact`), 👍/👎 tag weights (`interest`), home city/country/language (`distance`), and excluded feeds (`⊘`). `view=default` uses `DEFAULT_PROFILE` with `distance = 0`.
+5. **Retention** (`app/retention.py`, hourly): deletes stories/articles older than `NEWS_RETENTION_DAYS` (7), records URL tombstones (30 d) so feeds don't re-import them, keeps `FeedbackLog` snapshots, and runs `incremental_vacuum`.
+
+## Authentication, Access Control & Sharing
+
+```mermaid
+flowchart TD
+  Req[Incoming HTTP Request] --> Origin{Write or cross-site<br/>API fetch?}
+  Origin -->|bad Origin / Sec-Fetch-Site| E403C[403 Forbidden]
+  Origin -->|ok| Cookie[Resolve session cookie<br/>SHA-256 token in AuthSession]
+  Cookie --> Route{Route class}
+
+  Route -->|Public GET<br/>/ /list /s/* /p/*<br/>/api/stories /api/heads-up| Pub[200 OK · strip read state<br/>if anonymous]
+  Route -->|User route<br/>read · vote · profile · chat · share| Mode{Auth enabled?}
+  Mode -->|No: open mode| LAN{From LAN IP?}
+  LAN -->|Yes: act as user 1| UserOK[200 OK · per-user state]
+  LAN -->|No| E403L[403 LAN only]
+  Mode -->|Yes: password mode| SignedIn{Valid session?}
+  SignedIn -->|No| E401[401 / 303 redirect]
+  SignedIn -->|Yes| AdminCheck{Admin route?<br/>/feeds /admin /api/refresh /api/reports}
+  AdminCheck -->|Yes & not admin| E403A[403 Admins only]
+  AdminCheck -->|No or is admin| UserOK
+```
+
+- **Sessions & passwords** (`app/auth.py`): passwords use salted `scrypt` (`AppUser.password_hash`). Cookie tokens are 256-bit (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS); only `sha256(token)` is stored in `AuthSession` (24 h TTL, max 500 sessions, survives restarts). Changing your password revokes sibling sessions; changing `NEWS_AUTH_PASSWORD` invalidates env-password sessions via `env_stamp`. Login and password changes are rate-limited (5 failures / 60 s per client IP, using the right-most `X-Forwarded-For` hop from a local proxy).
+- **SSRF & hardening** (`app/api.py`, `app/ingest.py`): strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, HSTS on HTTPS, CSRF `Origin` check against `Host`/`NEWS_PUBLIC_BASE`, `Sec-Fetch-Site: cross-site` block on private APIs, DNS-pinned public-IP page fetching, single-flight heads-up generation, 50-stream SSE cap.
+- **Sharing**: stories share via `/s/<id>` (public default view). Briefs and chat answers are snapshotted via `POST /api/share` into `ShareLink` (`/p/<token>`: 8-char token for the default brief, 32-char unguessable token for personal briefs and chat answers) and can be listed or revoked in ⚙ Preferences.
+
+## UI & Pages
+
+- **Stories (`/`)** — Quick Heads Up brief (per view, background regeneration with `(updating…)` indicator and fade-in, 🔗 share), search, **For you / Everyone** toggle, **Active / Archive** toggle, **Show read** toggle, `#tag` filter chips. Cards show the full summary; clicking expands tags, metrics, relevance breakdown, "Summary when you read it" (on ↻ resurfaced stories) and **Related stories**; the sources bar expands member articles (`new` badges since read). Card actions: ✓ read/unread, 🔗 share `/s/<id>`, 👍/👎 feedback, **💬 Ask** per-story chat (0–N SearXNG web-search turns, collapsible thinking/search/read/error steps, `✎` message editing with `‹ n/m ›` branch switching, 🔗 answer share). A **↻ Refresh** button appears once the view is ≥ 10 min old.
+- **Articles (`/list`)** — flat article table with search, status filter (`assigned / pending / duplicate / skipped / dead`), sort toggle, stage timings (`Wait / Embed / Cluster / Harness / Story / Work / Latency / Merge`) and worker status bar.
+- **Feeds (`/feeds`, admins)** — add feed (auto-fetches `<title>`), rename, recategorize, delete, enable/disable per feed or category, 24 h / 7 d volume and error filter.
+- **Users (`/admin`, admins)** — create users, toggle admin role, set passwords, delete users, view vote/read/chat counts.
+- **⚙ Preferences** — *About you* (tailors personal brief & chat), home city/country/language, interest regions & locations, minimum quality, category & per-feed trust sliders + `⊘` feed exclusions, scheduled ntfy reports (admins), editable tag weights, password change, and **Shared links** (open / revoke).
+
+## API Summary
+
+| Endpoint | Access | Purpose |
+| --- | --- | --- |
+| `GET /api/stories` · `GET /api/stories/{id}` | Public | Ranked/archived stories (`view=personal\|default`, `q`, `tag`, `hide_read`, `keep`) with `articles` and `related` |
+| `POST` / `DELETE /api/stories/{id}/read` | User | Mark story read (snapshots summary) / unread |
+| `GET/POST /api/stories/{id}/chat` · `POST .../chat/switch` | User | Per-story chat tree & NDJSON stream (`step`, `thinking`, `delta`, `done`; `edit_of` branches, `switch` selects version) |
+| `GET /api/heads-up?view=` | Public | Non-blocking top-5 brief (`default` or `personal`; triggers background refresh when stale) |
+| `POST /api/feedback` · `GET /api/feedback` | User | 👍/👎 vote (`up\|down`) · vote log |
+| `GET/PUT /api/profile` | User | Preferences (`about`, `home_*`, `interest_regions`, `locations`, `min_quality`, `excluded_feeds`, `ntfy_reports`), `tag_weights`, `source_weights`, `feed_weights` |
+| `POST /api/share` · `GET /api/share` · `GET/DELETE /api/share/{token}` | User / Public `GET {token}` | Create snapshot (`/p/<token>`), list own links, view snapshot (public), revoke link |
+| `GET /api/articles` · `GET /api/health` · `GET /api/events` | Public | Article timing table · DB/worker health · SSE stream |
+| `GET /api/auth/session` · `POST /api/auth/login` · `POST /api/auth/logout` · `POST /api/auth/password` | Public / User | Session probe, login (`username`, `password`), logout, change own password |
+| `GET/POST /api/feeds` · `PATCH/DELETE /api/feeds/{id}` · `POST /api/feeds/category` · `GET /api/feeds/preview` | Admin | Feed & category management |
+| `POST /api/refresh` · `GET /api/reports/{kind}` · `POST /api/reports/{kind}/send` | Admin | Blocking ingest+pipeline run · preview / push `brief` or `pipeline` ntfy report |
+| `GET/POST /api/admin/users` · `PATCH/DELETE /api/admin/users/{id}` | Admin | User management (user 1 stays admin; no self-demotion/deletion) |
+
+## Configuration (`app/config.py`)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama host |
-| `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` | see above | models (fixed for this deployment) |
-| `NEWS_OLLAMA_KEEP_ALIVE` | `15m` | keep models loaded between runs (`""` = server default) |
-| `NEWS_WORKER_INTERVAL` | `300` | ingest period in seconds (start-to-start) |
-| `NEWS_PIPELINE_BATCH` / `NEWS_PIPELINE_MAX_FAILURES` | `50` / `3` | pipeline batch size / dead-letter threshold |
-| `NEWS_EMBED_BATCH` | `16` | texts per embed call at batch start |
-| `NEWS_BACKLOG_LOW_TRUST_BELOW` | `0.5` | pending articles of categories with `NEWS_SOURCE_TRUST` below this are processed after the rest |
-| `NEWS_FETCH_CONCURRENCY` / `NEWS_FETCH_TIMEOUT` | `16` / `20` | parallel feed fetches / HTTP timeout (s) |
-| `NEWS_MAX_ITEMS_PER_FEED` | `10` | entries read per feed per run |
-| `NEWS_SOCIAL_MAX_COMMENTS` | `10` | Reddit/HN comments kept per upvoterss item |
-| `NEWS_CLUSTER_MODE` | `two_stage` | `two_stage` (LLM verifier) or `cosine` (rollback) |
-| `NEWS_CLUSTER_VERIFY_RETRIEVE_THRESHOLD` / `NEWS_CLUSTER_SIM_THRESHOLD` / `NEWS_CLUSTER_REVIVE_SIM_THRESHOLD` | `0.55` / `0.64` / `0.62` | retrieval / cosine-mode join / stale-story revive |
-| `NEWS_CLUSTER_WINDOW_HOURS` | `48` | freshness window for joining |
-| `NEWS_CLUSTER_VERIFY_MAX_CANDIDATES` / `NEWS_CLUSTER_VERIFY_TIMEOUT_SECONDS` | `3` / `60` | verifier batch size / deadline |
-| `NEWS_JUNK_SKIP_QUALITY_THRESHOLD` | `2.0` | junk-join skip threshold |
-| `NEWS_READ_RESURFACE_SIGNIFICANCE` | `2` | update significance (0 none, 1 minor, 2 notable, 3 major) that brings a read story back as updated |
-| `NEWS_TITLE_QUALITY_MAX` | `6` | max quality for headline-only (non-`ok`) articles |
-| `NEWS_KNN_CANDIDATES` | `200` | nearest articles fetched from the vector index |
-| `NEWS_MERGE_ENABLED` / `NEWS_MERGE_SIM_THRESHOLD` / `NEWS_MERGE_MAX_CHECKS_PER_RUN` | `1` / `0.62` / `5` | recall merge pass |
-| `NEWS_MERGE_LEXICAL_MIN_TERMS` / `NEWS_MERGE_LEXICAL_MAX_DF` | `3` / `5` | recall merge: shared distinctive headline terms that make a candidate |
-| `NEWS_STORY_ACTIVE_DAYS` | `2` | stories without updates for longer move to the archive |
-| `NEWS_RETENTION_DAYS` | `7` | delete stories/articles older than this (0 = keep forever) |
-| `NEWS_DEDUP_WINDOW_HOURS` / `NEWS_DEDUP_TITLE_MIN_WORDS` | `72` / `5` | cross-feed duplicate detection |
-| `NEWS_W1` / `NEWS_W3` / `NEWS_INTEREST_CAP` / `NEWS_W_DISTANCE` | `1.0` / `1.5` / `10` / `2.0` | display-score weights |
-| `NEWS_W_REL_QUALITY` / `_CREDIBILITY` / `_IMPACT` | `0.40` / `0.35` / `0.25` | relevance weights |
-| `NEWS_SOURCE_TRUST` / `NEWS_SOURCE_TRUST_DEFAULT` | `Reddit=0.3,Hacker News=0.5,Reviews=0.5` / `1.0` | trust per feed category (Preferences override) |
-| `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` | `18` / `10` | time decay |
-| `NEWS_FEEDBACK_ALPHA` | `0.1` | feedback learning rate |
-| `NEWS_USER_CITY` / `_COUNTRY` / `_LANGUAGE` | `Munich` / `Germany` / `de` | default home for distance sorting (per user in Preferences) |
-| `NEWS_HEADS_UP_TTL_MINUTES` | `3` | brief cache TTL |
-| `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `https://ntfy.sh/your-topic` / `07:00` | ntfy target (empty disables all pushes) / daily brief times until schedules are saved in Preferences |
-| `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `24` | login (empty = open mode) |
-| `NEWS_CHAT_SEARCH_TURNS` | `0,1,2,3,5,7,10` | chat web-search turn options |
-| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_SEARCHNGX_API_KEY` | `https://searx.example.org/` / empty | SearXNG for chat web search (JSON format enabled) |
-| `NEWS_SEARCHNGX_CATEGORIES` / `NEWS_SEARCHNGX_FALLBACK_ENGINES` | `general,news` / `bing,bing news` | first query / retry when it returns nothing |
-| `NEWS_HOST` / `NEWS_PORT` / `NEWS_DB_PATH` / `NEWS_PID_FILE` | `0.0.0.0` / `8787` / `news.db` / `news.pid` | server |
-| `NEWS_PUBLIC_BASE` / `NEWS_FORWARDED_ALLOW_IPS` | `http://127.0.0.1:8787` / `127.0.0.1` | public URL (https → Secure cookie + HSTS) / trusted reverse proxies |
-| `NEWS_LOG_LEVEL` | `INFO` | log level |
-| `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty (stderr) / `10` / `10` | rotating log file, backups gzip-compressed (`start.sh` sets `server.log`) |
+| `OLLAMA_BASE_URL` / `NEWS_OLLAMA_KEEP_ALIVE` | `http://127.0.0.1:11434` / `15m` | Ollama server / model keep-alive |
+| `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` | Qwen3.8-27B / qwen3-embedding:0.6b | LLM and 1024-dim embedding model |
+| `NEWS_WORKER_INTERVAL` / `NEWS_PIPELINE_BATCH` / `NEWS_EMBED_BATCH` | `300` / `50` / `16` | Ingest interval (s) / pipeline batch / texts per embed call |
+| `NEWS_PIPELINE_MAX_FAILURES` / `NEWS_BACKLOG_LOW_TRUST_BELOW` | `3` / `0.5` | Dead-letter threshold / trust cutoff processed last in backlog |
+| `NEWS_FETCH_CONCURRENCY` / `NEWS_FETCH_TIMEOUT` / `NEWS_MAX_ITEMS_PER_FEED` | `16` / `20` / `10` | Feed fetch pool / timeout (s) / items per feed |
+| `NEWS_CLUSTER_MODE` / `NEWS_CLUSTER_WINDOW_HOURS` | `two_stage` / `48` | `two_stage` (LLM verifier) or `cosine` / active join window |
+| `NEWS_CLUSTER_VERIFY_RETRIEVE_THRESHOLD` / `NEWS_CLUSTER_SIM_THRESHOLD` / `NEWS_CLUSTER_REVIVE_SIM_THRESHOLD` | `0.55` / `0.64` / `0.62` | Verifier retrieval / cosine fallback / stale-story revival |
+| `NEWS_MERGE_ENABLED` / `NEWS_MERGE_SIM_THRESHOLD` / `NEWS_MERGE_MAX_CHECKS_PER_RUN` | `1` / `0.62` / `5` | Idle-time recall merge settings |
+| `NEWS_MERGE_LEXICAL_MIN_TERMS` / `NEWS_MERGE_LEXICAL_MAX_DF` | `3` / `5` | Shared rare headline terms for lexical merge candidates |
+| `NEWS_READ_RESURFACE_SIGNIFICANCE` / `NEWS_TITLE_QUALITY_MAX` | `2` / `6` | Update significance (0–3) to resurface read stories / cap for non-`ok` bodies |
+| `NEWS_STORY_ACTIVE_DAYS` / `NEWS_RETENTION_DAYS` / `NEWS_DEDUP_WINDOW_HOURS` | `2` / `7` / `72` | Active feed window / DB retention (0 = forever) / URL+title dedup window |
+| `NEWS_SOURCE_TRUST` / `NEWS_SOURCE_TRUST_DEFAULT` | `Reddit=0.3,Hacker News=0.5,Reviews=0.5` / `1.0` | Default category trust weights |
+| `NEWS_W1` / `NEWS_W3` / `NEWS_INTEREST_CAP` / `NEWS_W_DISTANCE` | `1.0` / `1.5` / `10` / `2.0` | Display score weights (urgency, interest, cap, distance) |
+| `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` / `NEWS_FEEDBACK_ALPHA` | `18` / `10` / `0.1` | Time decay (from `news_at`) and 👍/👎 learning rate |
+| `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
+| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `3` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
+| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_TURNS` | `https://searx.example.org/` / `0,1,2,3,5,7,10` | SearXNG URL and chat web-search turn options |
+| `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `24` | Owner login password (empty = open LAN mode) / session TTL |
+| `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |
+| `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty / `10` / `10` | Rotating gzipped log (`start.sh` sets `server.log`) |
 
-## Database
+## Database & Layout
 
-`news.db` (WAL, foreign keys, sqlite-vec). Timestamps are naive UTC.
-
-- `Feed` — URL, category, `enabled` (AI on/off), HTTP cache headers, `last_error`
-- `Article` — RSS item + cleaned body, `content_class`, `quality`, `story_id` (NULL =
-  not in a story), `created_at` (first seen), `processed_at`, stage timings
-  `t_embed_s / t_cluster_s / t_harness_s / t_story_s / t_wall_s / t_merge_s`, `pipeline_failures`
-- `Story` — headline, summary, tags, metrics (urgency, impact, status,
-  location, language), `quality_score`, `created_at`, `updated_at`, `merge_checked_at`,
-  `material_at` (last update significant enough to resurface a read story),
-  `news_at` (last update that added facts; drives ranking recency and active window;
-  indexed, set by trigger as soon as a story has a headline)
-- `StoryLink` — verifier verdict per story pair (`relation`, `source` merge/article,
-  `checked_at`): skips repeated merge checks, feeds "related stories"
-- `StoryRead` — stories marked read per user (`read_at`, summary snapshot)
-- `Article_Vectors` — vec0 `FLOAT[1024]`, cosine, primary key `article_id`
-- `AppUser` (name, scrypt password hash, `is_admin`); `AuthSession` (SHA-256 of the session
-  token, user, expiry); per user: `UserProfile` (id = user id;
-  tag weights, category `source_weights`, per-feed `feed_weights`, preferences incl. `about`,
-  home city/country/language, `excluded_feeds` and ntfy report schedules for admins),
-  `FeedbackLog`, `ChatSession` (+ `ChatMessage` tree), `ShareLink` snapshots; shared: `ArticleTombstone`
-
-Schema upgrades and data migrations (`PRAGMA user_version`) run automatically
-at startup (`app/db.py`).
-
-## Layout
+`news.db` (SQLite WAL, foreign keys, `sqlite-vec`, auto-migrated via `PRAGMA user_version` in `app/db.py`):
+- **Shared tables**: `Feed`, `Article` (timings, `content_class`, `quality`, `duplicate_of`), `Article_Vectors` (`vec0 FLOAT[1024]`), `Story` (`headline`, `summary`, `tags`, `metrics`, `quality_score`, `news_at`, `material_at`, `merge_checked_at`), `StoryLink` (pair verdicts for merge skip + related stories), `ArticleTombstone`.
+- **Per-user tables**: `AppUser`, `AuthSession` (hashed tokens), `UserProfile` (weights, feed overrides, exclusions, `about`, `home_*`, ntfy schedules), `StoryRead`, `FeedbackLog`, `ChatSession` + `ChatMessage` (branching tree + agent `steps`), `ShareLink`.
 
 ```
-main.py                 entrypoint (uvicorn, PID file)
+main.py                 uvicorn entrypoint & PID file
 app/
-  config.py             settings
-  db.py, schema.sql     connections, schema + migrations, helpers
-  ingest.py             feed fetch + text extraction
-  content_quality.py    body classifier
-  pipeline.py           per-article orchestration, queue
-  clustering.py         embeddings, vec0 KNN, story assignment
-  merge.py              idle-time recall merge of duplicate stories
-  dedup.py              cross-feed duplicate detection
-  retention.py          time-based cleanup
-  harness.py            constrained LLM classifiers (quality, event verifier)
-  story.py              Prompt 2 story generation
-  scoring.py            ranking + feedback
-  heads_up.py           heads-up brief
-  reports.py            scheduled ntfy reports (brief, pipeline report)
-  chat.py, searchngx.py per-story chat + web search
-  worker.py             ingest / pipeline threads
-  api.py, auth.py, bus.py  HTTP, login, SSE
-  frontend/             static UI (no build step)
-tests/                  pytest suite (fake LLM, temp DB)
-scripts/
-  start.sh, shutdown.sh
-  pipeline_report.py    queue wait / work / latency report from news.db
-  rescore_metrics.py    dry-run Prompt 2 on sample stories: old vs new urgency/impact/status
-  recluster_stories.py  dissolve over-merged stories back into the queue (dry run unless --apply)
-  benchmark/            clustering benchmark tooling + labeled pairs
-  archive/              historical one-shot migrations/probes (unmaintained)
-docs/                   changelog (plan.md), open todos, findings, design spec, ideas
+  api.py, auth.py, bus.py       FastAPI routes, scrypt/session auth, SSE bus
+  db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations, env config
+  ingest.py, content_quality.py, dedup.py, retention.py
+  pipeline.py, clustering.py, merge.py, harness.py, story.py, scoring.py, tags.py
+  heads_up.py, reports.py, chat.py, searchngx.py, worker.py
+  frontend/                     vanilla JS/CSS UI (index, list, feeds, admin, share)
+scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, rescore_metrics.py, benchmark/
+tests/                  pytest suite (102 tests: API, security, pipeline, merge, scoring, read, ingest, migrations)
+docs/                   plan.md (changelog), todo.md, findings.md, future_ideas.md
 ```

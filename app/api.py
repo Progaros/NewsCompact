@@ -191,7 +191,7 @@ def _load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = N
     item = {"story": s, "source_count": st["feeds"], "quality": quality, "relevance": relevance,
             "display": display, **scoring.read_states(conn, user_id).get(story_id, {"read": None})}
     return _story_payload(item, _articles_by_story(conn, [story_id], exclude)[story_id],
-                          clustering.related_stories(conn, [story_id])[story_id])
+                          clustering.related_stories(conn, [story_id], exclude=exclude)[story_id])
 
 
 _ADMIN_PREFIXES = ("/feeds", "/api/feeds", "/api/refresh", "/api/reports", "/api/admin", "/admin")
@@ -395,8 +395,9 @@ def create_app() -> FastAPI:
                 visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
                 hidden, ranked = len(ranked) - len(visible), visible
             page = ranked[:limit]
-            arts = _articles_by_story(conn, [i["story"]["id"] for i in page], scoring.excluded_feeds(profile))
-            related = clustering.related_stories(conn, [i["story"]["id"] for i in page])
+            exclude = scoring.excluded_feeds(profile)
+            arts = _articles_by_story(conn, [i["story"]["id"] for i in page], exclude)
+            related = clustering.related_stories(conn, [i["story"]["id"] for i in page], exclude=exclude)
             pending = pipeline.pending_count(conn)
             last_article = conn.execute("SELECT MAX(created_at) FROM Article").fetchone()[0]
         return {

@@ -177,30 +177,38 @@ def link_stories(conn: sqlite3.Connection, x: int, y: int, relation: str, source
 
 
 def merge_settled(conn: sqlite3.Connection, x: int, y: int) -> bool:
-    """True if a story-vs-story check of x and y happened after both last changed."""
+    """True if a story-vs-story check of x and y happened at/after both last changed."""
     a, b = sorted((x, y))
     return conn.execute(
         "SELECT 1 FROM StoryLink l JOIN Story sa ON sa.id = l.a JOIN Story sb ON sb.id = l.b "
         "WHERE l.a = ? AND l.b = ? AND l.source = 'merge' "
-        "AND sa.updated_at < l.checked_at AND sb.updated_at < l.checked_at", (a, b),
+        "AND sa.updated_at <= l.checked_at AND sb.updated_at <= l.checked_at", (a, b),
     ).fetchone() is not None
 
 
-def related_stories(conn: sqlite3.Connection, story_ids: list[int], limit: int = 5) -> dict[int, list[dict]]:
-    """``{story_id: [{id, headline}]}``: linked same-topic stories, most recent news first."""
+def related_stories(conn: sqlite3.Connection, story_ids: list[int], limit: int = 5,
+                    exclude: set[int] = frozenset()) -> dict[int, list[dict]]:
+    """``{story_id: [{id, headline}]}``: linked same-topic stories, most recent news first.
+
+    When ``exclude`` (hidden feed ids) is non-empty, related stories whose articles all
+    come from excluded feeds are omitted.
+    """
     out: dict[int, list[dict]] = {sid: [] for sid in story_ids}
     if not story_ids:
         return out
     ids, rels = json.dumps(story_ids), json.dumps(RELATED_CLASSES)
+    vis = (" AND EXISTS (SELECT 1 FROM Article a WHERE a.story_id = s.id "
+           "AND a.feed_id NOT IN (SELECT value FROM json_each(?)))") if exclude else ""
+    vis_arg = (json.dumps(sorted(exclude)),) if exclude else ()
     rows = conn.execute(
         "SELECT l.a AS sid, s.id, s.headline, s.news_at FROM StoryLink l JOIN Story s ON s.id = l.b "
         "WHERE l.a IN (SELECT value FROM json_each(?)) AND l.relation IN (SELECT value FROM json_each(?)) "
-        "AND s.headline IS NOT NULL "
+        f"AND s.headline IS NOT NULL{vis} "
         "UNION ALL "
         "SELECT l.b, s.id, s.headline, s.news_at FROM StoryLink l JOIN Story s ON s.id = l.a "
         "WHERE l.b IN (SELECT value FROM json_each(?)) AND l.relation IN (SELECT value FROM json_each(?)) "
-        "AND s.headline IS NOT NULL ORDER BY 4 DESC",
-        (ids, rels, ids, rels),
+        f"AND s.headline IS NOT NULL{vis} ORDER BY 4 DESC",
+        (ids, rels, *vis_arg, ids, rels, *vis_arg),
     )
     for r in rows:
         if len(out[r[0]]) < limit:

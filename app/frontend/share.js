@@ -7,10 +7,13 @@ function storyHtml(d) {
       <a href="${esc(safeUrl(a.url))}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>
       <div class="src">${esc([a.feed || hostname(a.url), a.author].filter(Boolean).join(" · "))}${a.published_date ? ` · ${esc(timeAgo(a.published_date))}` : ""}</div>
     </li>`).join("");
+  const related = (d.related || []).map((r) =>
+    `<li><a href="/s/${Number(r.id)}">${esc(r.headline)}</a></li>`).join("");
   return `<div class="shared-kicker">Story · ${esc(timeAgo(d.news_at || d.updated_at))}</div>
     <h2 class="headline">${esc(d.headline)}</h2>
     <p class="summary">${esc(d.summary)}</p>
     <div class="tags">${(d.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</div>
+    ${related ? `<div class="related"><span class="muted">Related stories</span><ul>${related}</ul></div>` : ""}
     <div class="shared-label">${d.source_count} ${d.source_count === 1 ? "source" : "sources"}</div>
     <ol class="article-list">${sources}</ol>`;
 }

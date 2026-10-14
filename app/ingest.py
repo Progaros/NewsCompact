@@ -163,7 +163,11 @@ def fetch_page_text(url: str) -> str:
             r.raise_for_status()
             if "html" not in r.headers.get("content-type", "html").lower():
                 return ""
-            if int(r.headers.get("content-length") or 0) > _MAX_PAGE_BYTES:
+            try:
+                content_length = int(r.headers.get("content-length") or 0)
+            except ValueError:
+                content_length = 0
+            if content_length > _MAX_PAGE_BYTES:
                 return ""
             body = bytearray()
             for chunk in r.iter_bytes():

@@ -57,7 +57,6 @@ def test_merge_verdicts_are_remembered_until_a_story_changes(feed_id, llm):
     llm.verdict = "SAME_TOPIC_DISTINCT_EVENT"
     with db.get_conn() as conn:
         conn.execute("DELETE FROM StoryLink")
-        conn.execute("UPDATE Story SET updated_at = datetime('now', '-1 minutes')")
     assert merge.run()["verified"] >= 1
     with db.get_conn() as conn:
         links = conn.execute("SELECT a, b, relation, source FROM StoryLink").fetchall()
@@ -66,7 +65,7 @@ def test_merge_verdicts_are_remembered_until_a_story_changes(feed_id, llm):
         assert b in [r["id"] for r in clustering.related_stories(conn, [a])[a]]
         conn.execute("UPDATE Story SET merge_checked_at = NULL")
     llm.calls.clear()
-    assert merge.run()["verified"] == 0 and "verify" not in llm.calls  # same inputs, same verdict
+    assert merge.run()["verified"] == 0 and "verify" not in llm.calls  # same inputs (incl. same-second), same verdict
     with db.get_conn() as conn:
         conn.execute("UPDATE Story SET merge_checked_at = NULL, updated_at = datetime('now', '+1 minutes') "
                      "WHERE id = ?", (a,))
