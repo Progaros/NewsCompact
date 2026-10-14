@@ -419,6 +419,12 @@ body.unsigned-in .interaction { display: none; }
 .add-weight { border-bottom: 1px dashed var(--border); margin-bottom: 4px; padding-bottom: 6px; }
 .pw-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .pw-row input { flex: 1; min-width: 140px; }
+.share-list { font-size: 13px; }
+.share-row { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.share-row:last-child { border-bottom: none; }
+.share-row a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; }
+.share-row a:hover { color: var(--accent); }
+.share-row .muted { font-size: 12px; white-space: nowrap; }
 .users .toggle { min-width: 72px; font-size: 12px; }
 .add-feed .check input { flex: none; min-width: 0; }
 .users .toggle[aria-pressed="true"] { border-color: var(--accent); }

@@ -122,6 +122,7 @@ const Auth = (() => {
         if (ntfy) renderReports(box, reports, ntfy);
         renderWeights(box, weights);
         renderPassword(box);
+        renderShares(box);
       })
       .catch(() => { box.textContent = "(profile unavailable)"; });
 
@@ -222,6 +223,36 @@ const Auth = (() => {
       if (res.ok) { cur.value = ""; nw.value = ""; }
     };
   }
+  // Own share links: anyone with a link can read the snapshot until it is revoked here.
+  async function renderShares(box) {
+    const sec = document.createElement("div");
+    sec.className = "user-section";
+    sec.innerHTML = `<div class="user-section-label">Shared links</div><div class="share-list muted">Loading…</div>`;
+    box.appendChild(sec);
+    const list = sec.querySelector(".share-list");
+    const res = await fetch("/api/share");
+    if (unauth(res) || !res.ok) { list.textContent = "(unavailable)"; return; }
+    const { links } = await res.json();
+    if (!links.length) { list.textContent = "You haven't shared anything yet."; return; }
+    list.classList.remove("muted");
+    list.innerHTML = links.map((l) => `
+      <div class="share-row">
+        <a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>
+        <span class="muted" title="${esc(fmtUtc(l.created_at))}">${esc(timeAgo(l.created_at))}</span>
+        <button type="button" class="link" data-token="${esc(l.token)}">revoke</button>
+      </div>`).join("");
+    list.querySelectorAll("button[data-token]").forEach((b) => {
+      b.onclick = async () => {
+        const r = await fetch(`/api/share/${encodeURIComponent(b.dataset.token)}`, { method: "DELETE" });
+        if (unauth(r)) return;
+        if (!r.ok) return toast(`revoking failed: ${r.status}`);
+        b.closest(".share-row").remove();
+        if (!list.children.length) list.textContent = "You haven't shared anything yet.";
+        toast("Link revoked.");
+      };
+    });
+  }
+
   const REPORT_LABELS = { brief: "News brief", pipeline: "Pipeline report" };
 
   /* Category sliders with expandable per-source sliders. `overrides` ({feed id: trust})

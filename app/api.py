@@ -816,6 +816,32 @@ def create_app() -> FastAPI:
         return {"kind": row["kind"], "shared_by": row["name"], "created_at": row["created_at"],
                 **db.json_dict(row["payload"])}
 
+    @app.get("/api/share")
+    def list_shares(request: Request):
+        """The signed-in user's own share links, newest first."""
+        uid = _uid(request)
+        with db.get_conn() as conn:
+            rows = conn.execute("SELECT token, kind, payload, created_at FROM ShareLink WHERE user_id = ? "
+                                "ORDER BY created_at DESC, rowid DESC", (uid,)).fetchall()
+        links = []
+        for r in rows:
+            p = db.json_dict(r["payload"])
+            if r["kind"] == "brief":
+                title = f"Heads-up ({'personal' if p.get('view') == 'personal' else 'default view'})"
+            else:
+                title = f"{p.get('headline') or 'Story'} — {(p.get('question') or '')[:80]}"
+            links.append({"token": r["token"], "url": f"/p/{r['token']}", "kind": r["kind"],
+                          "title": title, "created_at": r["created_at"]})
+        return {"links": links}
+
+    @app.delete("/api/share/{token}")
+    def revoke_share(request: Request, token: str = FastPath(pattern=_SHARE_TOKEN)):
+        uid = _uid(request)
+        with db.get_conn() as conn:
+            if not conn.execute("DELETE FROM ShareLink WHERE token = ? AND user_id = ?", (token, uid)).rowcount:
+                raise HTTPException(404, "link not found")
+        return {"ok": True}
+
     # --- user administration (admins only, see _ADMIN_PREFIXES) ---
     def _users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(

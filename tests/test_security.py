@@ -25,6 +25,7 @@ PRIVATE = [
     ("POST", "/api/feeds/category"), ("PATCH", "/api/feeds/1"), ("DELETE", "/api/feeds/1"),
     ("GET", "/api/admin/users"), ("POST", "/api/admin/users"), ("PATCH", "/api/admin/users/2"),
     ("DELETE", "/api/admin/users/2"), ("POST", "/api/auth/password"), ("POST", "/api/share"),
+    ("GET", "/api/share"), ("DELETE", "/api/share/abcdefgh"),
 ]
 PUBLIC = ["/", "/list", "/api/stories", "/api/stories/1", "/api/articles", "/api/heads-up",
           "/api/health", "/api/auth/session", "/static/app.js"]
@@ -256,6 +257,21 @@ def test_share_links(exposed, monkeypatch):
     assert exposed.get("/api/share/bad").status_code == 422
     assert exposed.get("/p/../../etc").status_code in (401, 404)
     assert exposed.get("/p/a%2F..%2F..%2Fetc").status_code in (404, 422)
+
+    # Only the owner lists and revokes their links.
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO AppUser (name, password_hash) VALUES ('anna', ?)", (auth.hash_password("anna-pw-1234"),))
+    exposed.post("/api/auth/login", json={"username": "anna", "password": "anna-pw-1234"})
+    assert exposed.get("/api/share").json()["links"] == []
+    assert exposed.delete("/api/share/" + private[3:]).status_code == 404
+    exposed.post("/api/auth/logout")
+    _login(exposed)
+    links = exposed.get("/api/share").json()["links"]
+    assert {l["url"] for l in links} == {public, private, chat_url}
+    assert any(l["title"].startswith("Heads-up (personal") for l in links)
+    assert exposed.delete("/api/share/" + private[3:]).status_code == 200
+    assert exposed.get("/api/share/" + private[3:]).status_code == 404
+    assert len(exposed.get("/api/share").json()["links"]) == 2
 
 
 def test_password_hashes():
