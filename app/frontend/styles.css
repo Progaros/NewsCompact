@@ -569,13 +569,13 @@ body.unsigned-in .interaction { display: none; }
     padding: calc(8px + env(safe-area-inset-top)) 14px 8px;
   }
   .brand h1 { font-size: 17px; }
-  .controls { grid-row: 1; grid-column: 2; justify-content: flex-end; gap: 8px; min-width: 0; }
+  .controls { grid-row: 1; grid-column: 2; justify-content: flex-end; gap: 8px; min-width: 0; overflow: hidden; }
   .status {
     min-width: 0; font-size: 11px; line-height: 1.3; text-align: right; overflow: hidden;
     display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
   }
   .controls .btn { padding: 6px 10px; flex: none; }
-  .btn-label { display: none; }
+  .btn-label { white-space: nowrap; font-size: 12px; }
   .nav {
     grid-row: 2; grid-column: 1 / -1; margin: 0; gap: 2px; padding: 3px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;

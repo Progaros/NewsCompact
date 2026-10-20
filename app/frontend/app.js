@@ -112,7 +112,9 @@ class StoryCard extends HTMLElement {
     const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE" });
     if (Auth.unauth(res) || !res.ok) return;
     if (markRead) {
-      Object.assign(d, { read: "read", read_at: utcNowDb(), changes: [] });
+      // Keep d.changes for the rest of the page visit: the "New since you
+      // read it" block stays under the freshly-marked story until a refresh.
+      Object.assign(d, { read: "read", read_at: utcNowDb() });
       sessionReadIds.add(d.id);
     } else {
       d.read = null;
@@ -143,7 +145,10 @@ class StoryCard extends HTMLElement {
         </li>`;
     }).join("");
     const newCount = updated ? articles.filter((a) => (a.created_at || "") > (d.read_at || "")).length : 0;
-    const changes = updated && d.changes?.length
+    // Freshly-marked (this session) stories keep showing the delta until a
+    // page reload / refresh replaces this state.
+    const showChanges = (updated || (d.read === "read" && sessionReadIds.has(d.id))) && d.changes?.length;
+    const changes = showChanges
       ? `<div class="changes"><span class="changes-label">New since you read it</span><ul>${d.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></div>` : "";
     const related = (d.related || []).map((r) =>
       `<li><a href="/s/${Number(r.id)}" target="_blank" rel="noopener">${esc(r.headline)}</a></li>`).join("");
@@ -215,9 +220,15 @@ class StoryCard extends HTMLElement {
       body.setAttribute("aria-expanded", openNow);
       setSummary(openNow);
     };
-    // Selecting summary text must not toggle the card.
-    body.addEventListener("click", () => { if (!String(window.getSelection())) toggleDetails(); });
-    body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleDetails(); } });
+    // Selecting summary text must not toggle the card. Clicking a story
+    // that you haven't read marks it read instead of expanding details.
+    const onClick = () => {
+      if (String(window.getSelection())) return;
+      if (!this._data.read) return this._toggleRead();
+      toggleDetails();
+    };
+    body.addEventListener("click", onClick);
+    body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } });
     const srcBtn = this.querySelector(".src-toggle");
     srcBtn.addEventListener("click", () => srcBtn.setAttribute("aria-expanded", toggleIn(sourcesOpenIds, d.id, this, "src-open")));
     this.querySelectorAll(".fb[data-kind]").forEach((b) => b.addEventListener("click", () => this._feedback(b.dataset.kind)));
