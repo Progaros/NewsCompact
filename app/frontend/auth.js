@@ -99,7 +99,7 @@ const Auth = (() => {
     }
     if (state.authenticated) {
       const name = state.user?.name || "Preferences";
-      el.innerHTML = `<span class="btn-label">${esc(name)}</span>`;
+      el.innerHTML = `<span aria-hidden="true">\u2699</span> <span class="btn-label">${esc(name)}</span>`;
       el.title = "Preferences & sign out";
       el.setAttribute("aria-label", "Preferences");
       el.onclick = () => showUserModal();

@@ -450,8 +450,7 @@ const Chat = (() => {
       });
       if (Auth.unauth(res)) {
         reply.remove();
-        unauth = true;
-        return; // finally: streams.delete() + the shared tail below still run
+        return; // finally: streams.delete() runs; Send state stays consistent (unauth → streams.has() false)
       }
       if (!res.ok) throw new Error("HTTP " + res.status);
       const reader = res.body.getReader();
@@ -490,7 +489,7 @@ const Chat = (() => {
     // plus add a "Retry" pill when the user interrupted the answer.
     const messages = await refresh(storyId);
     if (cancelled && messages) attachRetry(storyId, messages);
-    if (!unauth) syncSendBtn();
+    syncSendBtn();
     drain(storyId);
   }
 
