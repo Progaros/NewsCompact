@@ -4,13 +4,22 @@
  * itself whether and how deep to search via searchngx before answering.
  * History persists per-story in the DB.
  *
- * Backend: app/chat.py, app/searchngx.py. One popup instance, bound to a
- * single story at a time; reopening for the same story focuses it, a different
- * story switches it. Survives story-card re-renders (it lives on <body>). */
+ * Backend: app/chat.py, app/chat_history.py, app/searchngx.py. One popup
+ * instance, bound to a single story at a time; reopening for the same story
+ * focuses it, a different story switches it. Survives story-card re-renders
+ * (it lives on <body>).
+ *
+ * Streams are per-story and run in the background: closing the popup does
+ * NOT abort a running answer (nor does switching stories) — only the Stop
+ * button aborts. After every stream end the history is re-fetched from the
+ * server, so the view settles into a consistent state (✎ / version arrows
+ * are always present). */
 
 const Chat = (() => {
   let currentStory = null; // story_id the popup is bound to
-  let busy = false;        // a reply is in flight (guards double-send)
+  const streams = new Map(); // story_id -> AbortController for the live stream; outlives the box
+  const queues = new Map();  // story_id -> FIFO queue of sends typed while its stream is running
+  function busyFor(storyId) { return streams.has(storyId); }
   let webSearch = localStorage.getItem("chatWebSearch") !== "0"; // on by default
 
   // --- markdown (compact, HTML-safe) ---------------------------------------
@@ -86,7 +95,7 @@ const Chat = (() => {
     if (el.open) detail.scrollTop = detail.scrollHeight;
   }
 
-  function msgEl(role, text, steps = [], pending = false) {
+  function msgEl(role, text, steps = [], working = false) {
     const div = document.createElement("div");
     div.className = `chat-msg ${role}`;
     const who = role === "user" ? "You" : "AI";
@@ -97,7 +106,7 @@ const Chat = (() => {
     div.innerHTML = `<span class="chat-who">${who}</span><div class="chat-steps"></div><span class="chat-body"></span>`;
     const box = div.querySelector(".chat-steps");
     for (const s of steps || []) upsertStep(box, s);
-    div.querySelector(".chat-body").innerHTML = pending
+    div.querySelector(".chat-body").innerHTML = working
       ? `<span class="chat-thinking">Working\u2026</span>` : mdToHtml(text);
     return div;
   }
@@ -119,13 +128,16 @@ const Chat = (() => {
   }
 
   function close() {
+    // Closing does NOT abort the stream: it belongs to the story, not to
+    // this box, and the model keeps working (whatever was generated is
+    // persisted server-side). Only stopSend() (the Stop button) aborts.
+    // render()/open() re-fetches the fresh state next time.
     document.getElementById("chat-popup")?.remove();
     currentStory = null;
   }
 
   function render(storyId) {
     close();
-    busy = false;
     currentStory = storyId;
     const overlay = document.createElement("div");
     overlay.id = "chat-popup";
@@ -143,7 +155,7 @@ const Chat = (() => {
           <textarea id="chat-input" rows="2" placeholder="Ask about this story\u2026"></textarea>
           <button id="chat-send" class="btn">Send</button>
         </div>
-        <div class="chat-foot">Local model · Ctrl/⌘+Enter to send · per-story history</div>
+        <div class="chat-foot">Local model · Enter to send · Shift+Enter for newline · Stop interrupts · closing keeps the agent running · messages queue while working · per-story history</div>
       </div>`;
     document.body.appendChild(overlay);
 
@@ -158,12 +170,31 @@ const Chat = (() => {
       searchBtn.setAttribute("aria-pressed", webSearch);
     };
     const input = overlay.querySelector("#chat-input");
-    const sendBtn = overlay.querySelector("#chat-send");
-    sendBtn.onclick = () => send();
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
     });
+    input.addEventListener("input", syncSendBtn);
+    syncSendBtn();
     loadHistory(storyId, input);
+    drain(storyId); // anything queued before the close now starts
+  }
+
+  // "Send" turns into "Stop" once the agent is working and there is nothing
+  // to send: aborting the stream stops the server from making further model
+  // / web-search calls (whatever was generated is kept and saved).
+  function syncSendBtn() {
+    const btn = document.getElementById("chat-send");
+    const input = document.getElementById("chat-input");
+    if (!btn) return;
+    const stopMode = busyFor(currentStory) && input && !input.value.trim();
+    btn.textContent = stopMode ? "Stop" : "Send";
+    btn.classList.toggle("stop", stopMode);
+    btn.title = stopMode ? "Stop the answer (aborts further model calls)" : "";
+    btn.onclick = stopMode ? stopSend : () => send(); // must not pass the click event as `edited`
+  }
+
+  function stopSend() {
+    streams.get(currentStory)?.abort(); // the only abort path
   }
 
   function loadHistory(storyId, input) {
@@ -173,8 +204,14 @@ const Chat = (() => {
         return res.json();
       })
       .then((d) => {
-        if (!d || !document.getElementById("chat-messages")) return; // popup closed meanwhile
+        const box = document.getElementById("chat-messages");
+        if (!d || !box) return; // popup closed meanwhile
         renderMessages(d.messages);
+        if (streams.has(storyId)) {
+          // This story's stream was started before the close: add a
+          // "Working…" placeholder; the stream's terminal refresh() re-renders.
+          box.appendChild(msgEl("assistant", "", [], true));
+        }
         input.focus();
       })
       .catch(() => { /* history is non-critical; the input still works */ });
@@ -195,7 +232,39 @@ const Chat = (() => {
       else if (m.content) addAnswerTools(el, m);
       box.appendChild(el);
     }
+    renderQueue();
     box.scrollTop = box.scrollHeight;
+  }
+
+  // "N queued" indicator with per-item × (removal); rebuilt after every
+  // full re-render of the box.
+  function renderQueue() {
+    const box = document.getElementById("chat-messages");
+    box?.querySelector(".chat-queue")?.remove();
+    if (!box || !currentStory) return;
+    const q = queues.get(currentStory) || [];
+    if (!q.length) return;
+    const div = document.createElement("div");
+    div.className = "chat-queue";
+    div.appendChild(document.createTextNode(`⏳ ${q.length} queued · `));
+    // inserted in reverse so the items end up in queue order
+    for (let i = q.length - 1; i >= 0; i--) {
+      const p = q[i];
+      const t = p.text || "";
+      const item = document.createElement("span");
+      item.className = "chat-queue-item";
+      item.appendChild(document.createTextNode(t.slice(0, 50) + (t.length > 50 ? "\u2026" : "")));
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "chat-queue-x";
+      x.title = "Remove queued message";
+      x.textContent = "\u00D7";
+      x.onclick = () => { q.splice(i, 1); renderQueue(); };
+      item.appendChild(x);
+      div.appendChild(document.createTextNode(" · "));
+      div.appendChild(item);
+    }
+    box.appendChild(div);
   }
 
   function addAnswerTools(el, m) {
@@ -233,7 +302,7 @@ const Chat = (() => {
   }
 
   async function switchVersion(messageId) {
-    if (busy || messageId == null) return;
+    if (busyFor(currentStory) || messageId == null) return; // nav while streaming is a race
     const res = await fetch(`/api/stories/${currentStory}/chat/switch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -244,7 +313,9 @@ const Chat = (() => {
   }
 
   function startEdit(el, m) {
-    if (busy || el.querySelector(".chat-edit-box")) return;
+    // No busy guard: editing is always possible — if a stream is active the
+    // resulting send is simply queued (see send()/drain()).
+    if (el.querySelector(".chat-edit-box")) return;
     const body = el.querySelector(".chat-body");
     const tools = el.querySelector(".chat-msg-tools");
     const form = document.createElement("div");
@@ -261,55 +332,112 @@ const Chat = (() => {
     const cancel = () => { form.remove(); body.hidden = false; tools.hidden = false; };
     const submit = () => {
       const text = ta.value.trim();
-      if (!text || text === m.content.trim()) return cancel();
+      if (text === m.content.trim()) return cancel();
+      if (!text) return; // empty edit: keep the ✎ open so it can't be sent
+      cancel(); // close the edit box now; the send may just be queued
       send(text, m.id, el);
     };
     form.querySelector('[data-a="cancel"]').onclick = cancel;
     form.querySelector('[data-a="send"]').onclick = submit;
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { e.stopPropagation(); cancel(); }
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
     });
   }
 
-  async function refreshMessages(storyId) {
+  // Re-fetch the story's history (server-side source of truth) and
+  // re-render it. Runs after every stream end — completed, stopped, or
+  // error — because the question and whatever was generated are already
+  // persisted; we get real message ids + versions, so ✎ and version arrows
+  // are always present, whatever state the stream ended in.
+  async function refresh(storyId) {
+    if (currentStory !== storyId) return null; // popup bound elsewhere: next open() re-fetches
     try {
       const res = await fetch(`/api/stories/${storyId}/chat`);
-      if (res.ok && currentStory === storyId) renderMessages((await res.json()).messages);
-    } catch { /* keep the streamed view */ }
+      if (!res.ok) return null;
+      const messages = (await res.json()).messages;
+      if (currentStory === storyId) { renderMessages(messages); syncSendBtn(); }
+      return messages;
+    } catch { return null; }
+  }
+
+  // "Retry" pill under a stopped answer: resends the question as a new
+  // version (edit_of) rather than a fresh duplicate.
+  function attachRetry(storyId, messages) {
+    const box = document.getElementById("chat-messages");
+    if (currentStory !== storyId || !box) return;
+    let qi = -1;
+    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { qi = i; break; }
+    const els = box.querySelectorAll(".chat-msg");
+    if (qi < 0 || els.length !== messages.length) return;
+    const question = messages[qi];
+    const qEl = els[qi];
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "chat-retry";
+    pill.title = "Send this message again";
+    pill.textContent = "↻ Retry";
+    pill.onclick = () => { pill.remove(); send(question.content, question.id, qEl); };
+    els[els.length - 1].appendChild(pill);
   }
 
   // editOf/editEl: resend an edited user message as a new version of it.
-  async function send(edited = null, editOf = null, editEl = null) {
-    if (busy) return;
+  // While a story's stream is in flight, further sends are queued per-story
+  // and pumped FIFO by drain(storyId) once that stream ends.
+  function send(edited = null, editOf = null, editEl = null) {
     const storyId = currentStory;
     const input = document.getElementById("chat-input");
-    const box = document.getElementById("chat-messages");
     const text = (edited ?? input.value ?? "").trim();
     if (!text || !storyId) return;
+    if (busyFor(storyId)) {
+      let q = queues.get(storyId);
+      if (!q) { q = []; queues.set(storyId, q); }
+      q.push({ text, editOf, editEl, isNew: edited == null });
+      if (edited == null && input) input.value = "";
+      renderQueue();
+      syncSendBtn();
+      return;
+    }
+    doSend(storyId, text, editOf, editEl, edited == null);
+  }
+
+  // A stream belongs to a story, not to the popup: it's registered in
+  // `streams` synchronously (before the first await) and may outlive this
+  // box — closing or switching stories detaches the DOM, from then on
+  // writes are no-ops, but the fetch keeps going. On every stream end,
+  // history is re-fetched (question and partial/full answer are already
+  // persisted server-side), so ✎ and version arrows always exist afterward.
+  async function doSend(storyId, text, editOf = null, editEl = null, isNew = true) {
+    const input = document.getElementById("chat-input");
+    const box = document.getElementById("chat-messages");
     box.querySelector(".chat-empty")?.remove();
     if (editEl) {
       while (editEl.nextSibling) editEl.nextSibling.remove();
       editEl.remove();
     }
-    box.appendChild(msgEl("user", text));
-    if (edited == null) input.value = "";
     const reply = msgEl("assistant", "", [], true);
+    if (!editEl) box.appendChild(msgEl("user", text));
     box.appendChild(reply);
+    if (isNew) input.value = "";
     box.scrollTop = box.scrollHeight;
-    busy = true;
+    const controller = new AbortController();
+    streams.set(storyId, controller); // before any awaits: Stop button effective immediately
+    syncSendBtn();
 
     const stepsBox = reply.querySelector(".chat-steps");
     const bodyEl = reply.querySelector(".chat-body");
     let answer = "";
     let rendered = 0;
     let failed = "";
-    let finished = false;
+    let cancelled = false;
+    let unauth = false;
     const setStatus = (s) => { const t = bodyEl.querySelector(".chat-thinking"); if (t) t.textContent = s; };
     const render = () => {
-      bodyEl.innerHTML = mdToHtml(answer)
-        + (failed ? `<p class="chat-error">${esc(failed)}</p>` : "");
       rendered = answer.length;
+      if (!reply.isConnected) return; // box got unmounted meanwhile (popup closed)
+      bodyEl.innerHTML = mdToHtml(answer)
+        + (cancelled ? `<p class="chat-cancelled">Stopped — answer interrupted${answer ? " (partial)" : ""}</p>` : "")
+        + (failed ? `<p class="chat-error">${esc(failed)}</p>` : "");
       const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
       if (nearBottom) box.scrollTop = box.scrollHeight;
     };
@@ -318,8 +446,13 @@ const Chat = (() => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, web_search: webSearch, edit_of: editOf }),
+        signal: controller.signal,
       });
-      if (Auth.unauth(res)) { reply.remove(); return; }
+      if (Auth.unauth(res)) {
+        reply.remove();
+        unauth = true;
+        return; // finally: streams.delete() + the shared tail below still run
+      }
       if (!res.ok) throw new Error("HTTP " + res.status);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -339,21 +472,34 @@ const Chat = (() => {
             if (!answer) setStatus(ev.step.status === "running" ? ev.step.title : "Working\u2026");
           } else if (ev.type === "thinking") appendThinking(stepsBox, ev.text);
           else if (ev.type === "delta") answer += ev.text;
-          else if (ev.type === "error") { failed = ev.text; finished = true; }
-          else if (ev.type === "done") finished = true;
+          else if (ev.type === "error") failed = ev.text;
+          // "done" carries no payload; the end of the stream is the signal.
         }
         if (answer.length > rendered) render();
       }
-      if (!answer && !failed) failed = "No answer.";
+      if (!answer && !failed && !cancelled) failed = "No answer.";
       render();
     } catch (err) {
-      failed = `Error: ${err.message || err}`;
+      cancelled = !!(controller.signal.aborted || (err && err.name === "AbortError"));
+      if (!cancelled) failed = `Error: ${err.message || err}`;
       render();
     } finally {
-      busy = false;
+      streams.delete(storyId);
     }
-    // Pick up message ids and versions (enables edit / version arrows on the new messages).
-    if (finished) refreshMessages(storyId);
+    // Normalize: re-fetch → re-render (ids + versions → ✎, version arrows),
+    // plus add a "Retry" pill when the user interrupted the answer.
+    const messages = await refresh(storyId);
+    if (cancelled && messages) attachRetry(storyId, messages);
+    if (!unauth) syncSendBtn();
+    drain(storyId);
+  }
+
+  function drain(storyId) {
+    const q = queues.get(storyId);
+    if (storyId !== currentStory || busyFor(storyId) || !q || !q.length) return;
+    const next = q.shift();
+    renderQueue();
+    doSend(storyId, next.text, next.editOf, next.editEl, next.isNew);
   }
 
   return { open, close, mdToHtml };

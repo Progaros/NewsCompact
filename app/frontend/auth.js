@@ -7,6 +7,8 @@ const Auth = (() => {
   const state = { authenticated: false, user: null };
   const listeners = [];
   let toastTimer = null;
+  const tagWeights = {}; // tag -> weight, cached so article tag buttons can react (see addTagWeight)
+  const tagListeners = [];
 
   async function init() {
     try {
@@ -21,6 +23,49 @@ const Auth = (() => {
     }
     applyDom();
     _notify();
+    if (state.authenticated) loadTagWeights();
+  }
+
+  /* Tag weights outside the prefs modal: cached on boot + after every change so the
+   * article tag buttons can show "already in my list" and offer "add to my list". */
+  function loadTagWeights() {
+    fetch("/api/profile")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((p) => {
+        if (!p) return;
+        for (const k of Object.keys(tagWeights)) delete tagWeights[k];
+        Object.assign(tagWeights, p.tag_weights || {});
+        _tagsNotify();
+      })
+      .catch(() => {});
+  }
+
+  function _tagsNotify() {
+    for (const fn of tagListeners) {
+      try { fn(tagWeights); } catch { /* listener bugs never break the feed */ } }
+  }
+
+  function onTagWeights(fn) { tagListeners.push(fn); }
+
+  function tagWeight(tag) { return tagWeights[tag]; }
+
+  function hasTagWeight(tag) { return Object.prototype.hasOwnProperty.call(tagWeights, tag); }
+
+  /* PUT replaces the whole tag_weights map — read-back keeps the cache canonical.
+   * weight=null deletes. */
+  async function addTagWeight(tag, weight) {
+    const next = { ...tagWeights };
+    if (weight === null || weight === undefined) delete next[tag];
+    else next[tag] = Math.max(-10, Math.min(10, Number(weight) || 0));
+    const res = await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag_weights: next }) });
+    if (res.ok) {
+      const p = await res.json();
+      for (const k of Object.keys(tagWeights)) delete tagWeights[k];
+      Object.assign(tagWeights, p.tag_weights || {});
+      _tagsNotify();
+    }
+    return res.ok;
   }
 
   function onChange(fn) {
@@ -54,7 +99,7 @@ const Auth = (() => {
     }
     if (state.authenticated) {
       const name = state.user?.name || "Preferences";
-      el.innerHTML = `<span aria-hidden="true">\u2699</span><span class="btn-label"> ${esc(name)}</span>`;
+      el.innerHTML = `<span class="btn-label">${esc(name)}</span>`;
       el.title = "Preferences & sign out";
       el.setAttribute("aria-label", "Preferences");
       el.onclick = () => showUserModal();
@@ -72,6 +117,8 @@ const Auth = (() => {
     } catch { /* ignore */ }
     state.authenticated = false;
     state.user = null;
+    for (const k of Object.keys(tagWeights)) delete tagWeights[k];
+    _tagsNotify();
     applyDom();
     _notify();
   }
@@ -397,17 +444,30 @@ const Auth = (() => {
           <span><input type="number" class="weight-input" min="-10" max="10" step="0.5" value="2" aria-label="New tag weight" />
           <button type="button" class="link" data-add>add</button></span></div>`
       + (entries.length
-        ? entries.map(([t, w]) => `<div class="pref-row"><span>#${esc(t)}</span>
-          <span class="${w >= 0 ? "pos" : "neg"}">
-          <input type="number" class="weight-input" min="-10" max="10" step="0.5" value="${esc(w)}" data-tag="${esc(t)}" aria-label="Weight of #${esc(t)}" />
-          <button type="button" class="link" data-del="${esc(t)}" title="Forget this tag">\u00d7</button></span></div>`).join("")
+        ? `<div class="weight-chips">` + entries.map(([t, w]) => `<div class="weight-chip" title="weight ${w >= 0 ? "+" : ""}${w} for #${esc(t)}">
+          <span class="w-tag">#${esc(t)}</span>
+          <button type="button" class="w-val ${w >= 0 ? "pos" : "neg"}" data-tag="${esc(t)}" title="Adjust weight" aria-label="Weight of #${esc(t)}: ${w}">${w}</button>
+          <button type="button" class="w-x" data-del="${esc(t)}" title="Forget this tag" aria-label="Remove #${esc(t)}">\u00d7</button></div>`).join("") + `</div>`
         : `<div class="muted">No tag weights yet \u2014 use \u{1F44D}/\u{1F44E} on stories or add one above.</div>`);
-    el.querySelectorAll("input[data-tag]").forEach((i) => i.addEventListener("change", () => {
-      const v = Math.max(-10, Math.min(10, parseFloat(i.value)));
-      if (isNaN(v)) { i.value = weights[i.dataset.tag]; return; }
-      weights[i.dataset.tag] = v;
-      i.value = v;
-      i.parentElement.className = v >= 0 ? "pos" : "neg";
+    el.querySelectorAll(".w-val").forEach((b) => b.addEventListener("click", () => {
+      const tag = b.dataset.tag;
+      const input = document.createElement("input");
+      input.type = "number"; input.min = "-10"; input.max = "10"; input.step = "0.5";
+      input.value = weights[tag];
+      b.replaceWith(input);
+      input.focus(); input.select();
+      let done = false;
+      const commit = () => {
+        if (done) return; done = true;
+        const v = Math.max(-10, Math.min(10, parseFloat(input.value)));
+        if (!isNaN(v)) weights[tag] = v;
+        renderWeights(box, weights);
+      };
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        else if (e.key === "Escape") { done = true; renderWeights(box, weights); }
+      });
     }));
     el.querySelectorAll("button[data-del]").forEach((b) => b.addEventListener("click", () => {
       delete weights[b.dataset.del];
@@ -476,6 +536,7 @@ const Auth = (() => {
         close();
         applyDom();
         _notify();
+        loadTagWeights();
       } else {
         err.hidden = false;
         err.textContent = res.status === 429
@@ -527,6 +588,10 @@ const Auth = (() => {
   return {
     init,
     onChange,
+    onTagWeights,
+    hasTagWeight,
+    tagWeight,
+    addTagWeight,
     unauth,
     toast,
     showLoginModal,

@@ -172,7 +172,7 @@ HEADS_UP_NTFY_TIMES = _list("NEWS_HEADS_UP_NTFY_TIMES", "07:00")
 
 # --- Auth (startup fails unless this is set or an admin has a stored password) ---
 AUTH_PASSWORD = _env("NEWS_AUTH_PASSWORD", "")
-AUTH_SESSION_HOURS = _float("NEWS_AUTH_SESSION_HOURS", 24)
+AUTH_SESSION_HOURS = _float("NEWS_AUTH_SESSION_HOURS", 7200)
 AUTH_COOKIE = _env("NEWS_AUTH_COOKIE", "news_session")
 
 # --- Per-story chat --------------------------------------------------------

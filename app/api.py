@@ -37,8 +37,8 @@ def _is_public(request: Request) -> bool:
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
-        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+        "default-src 'self'; script-src 'self' https://analytics.example.org; style-src 'self'; img-src 'self' data: https:; "
+        "connect-src 'self' https://analytics.example.org; object-src 'none'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",

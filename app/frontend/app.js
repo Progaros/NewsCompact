@@ -70,6 +70,16 @@ function toggleIn(set, id, el, cls) {
   return open;
 }
 
+// Collapsed cards show at most this much summary; the full text appears
+// with the details when the card is expanded.
+const SUMMARY_MAX = 400;
+function clampSummary(text) {
+  if (!text || text.length <= SUMMARY_MAX) return text;
+  const cut = text.slice(0, SUMMARY_MAX);
+  const at = cut.lastIndexOf(" ");
+  return (at > SUMMARY_MAX * 0.8 ? cut.slice(0, at) : cut) + "\u2026";
+}
+
 // --- <story-card> ---------------------------------------------------------
 class StoryCard extends HTMLElement {
   set story(data) {
@@ -121,7 +131,7 @@ class StoryCard extends HTMLElement {
     const feeds = [...new Set(articles.map((a) => shortFeed(a.feed || hostname(a.url))).filter(Boolean))];
     const feedPreview = feeds.slice(0, 3).map(esc).join(" · ") + (feeds.length > 3 ? ` +${feeds.length - 3}` : "");
     const location = m.location && !/^global\b/i.test(m.location) ? `<span>📍 ${esc(m.location)}</span>` : "";
-    const tags = (d.tags || []).map((t) => `<button type="button" class="tag" data-tag="${esc(t)}" title="Filter by tag">#${esc(t)}</button>`).join("");
+    const tags = (d.tags || []).map((t) => tagButton(t)).join("");
     const updated = d.read === "updated";
     const articleRows = articles.map((a) => {
       const src = [a.feed || hostname(a.url), a.author].filter(Boolean).join(" · ");
@@ -141,6 +151,8 @@ class StoryCard extends HTMLElement {
       || "Mark as read";
     const open = openIds.has(d.id);
     const srcOpen = sourcesOpenIds.has(d.id);
+    const fullSummary = d.summary || "";
+    const summary = clampSummary(fullSummary);
 
     this.className = [urgencyClass(m.urgency_level), breaking ? "breaking" : "", open ? "open" : "", srcOpen ? "src-open" : "",
       d.read === "read" ? "is-read" : "", updated ? "is-updated" : ""].filter(Boolean).join(" ");
@@ -157,7 +169,7 @@ class StoryCard extends HTMLElement {
           <span title="Last news ${esc(fmtUtc(d.news_at))}">${esc(timeAgo(d.news_at))}</span>
         </div>
         <h2 class="headline">${esc(d.headline)}</h2>
-        <p class="summary">${esc(d.summary)}</p>
+        <p class="summary">${esc(summary)}</p>
         ${changes}
       </div>
       <div class="collapse details"><div>
@@ -191,13 +203,23 @@ class StoryCard extends HTMLElement {
       </div></div>`;
 
     const body = this.querySelector(".card-body");
-    const toggleDetails = () => body.setAttribute("aria-expanded", toggleIn(openIds, d.id, this, "open"));
+    const summaryEl = this.querySelector(".summary");
+    // Same element serves both states — the text swaps instead of duplicating:
+    // collapsed shows ~400 chars, expanded shows the full summary.
+    const setSummary = (openNow) => {
+      summaryEl.textContent = openNow ? fullSummary : clampSummary(fullSummary);
+    };
+    setSummary(open);
+    const toggleDetails = () => {
+      const openNow = toggleIn(openIds, d.id, this, "open");
+      body.setAttribute("aria-expanded", openNow);
+      setSummary(openNow);
+    };
     // Selecting summary text must not toggle the card.
     body.addEventListener("click", () => { if (!String(window.getSelection())) toggleDetails(); });
     body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleDetails(); } });
     const srcBtn = this.querySelector(".src-toggle");
     srcBtn.addEventListener("click", () => srcBtn.setAttribute("aria-expanded", toggleIn(sourcesOpenIds, d.id, this, "src-open")));
-    this.querySelectorAll(".tag").forEach((b) => b.addEventListener("click", () => setTag(b.dataset.tag)));
     this.querySelectorAll(".fb[data-kind]").forEach((b) => b.addEventListener("click", () => this._feedback(b.dataset.kind)));
     this.querySelector(".chat-btn").addEventListener("click", () => Chat.open(d.id));
     this.querySelector(".share-btn").addEventListener("click", () => copyLink(`/s/${d.id}`));
@@ -205,6 +227,124 @@ class StoryCard extends HTMLElement {
   }
 }
 customElements.define("story-card", StoryCard);
+
+// --- tag popup menu: hover/click a tag → "add to my tag list" / filter ---
+function tagButton(t) {
+  const weighted = Auth.state.authenticated && Auth.hasTagWeight(t);
+  const title = Auth.state.authenticated ? "My tag list · filter by tag" : "Filter by tag";
+  return `<button type="button" class="tag${weighted ? " tag-weighted" : ""}" data-tag="${esc(t)}" title="${title}">#${esc(t)}${weighted ? " <span class=\"tag-weighted-dot\" title=\"In your tag list\"></span>" : ""}</button>`;
+}
+
+const tagMenuEl = document.createElement("div");
+tagMenuEl.className = "tag-menu";
+tagMenuEl.hidden = true;
+tagMenuEl.setAttribute("role", "menu");
+document.body.appendChild(tagMenuEl);
+let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0;
+
+function tagMenuRender() {
+  const tag = tagMenuTag;
+  const inList = Auth.state.authenticated && Auth.hasTagWeight(tag);
+  const w = Auth.tagWeight(tag);
+  tagMenuEl.innerHTML = `${inList ? `<span class="tag-menu-badge">your tag · weight <input type="number" id="tag-menu-weight" class="tag-weight-input" min="-10" max="10" step="0.5" value="${w ?? 1}" /></span>` : ""}
+  <button type="button" class="tag-menu-opt" id="tag-menu-add">${inList ? "Remove from my tag list" : "Add to my tag list"}</button>
+  <button type="button" class="tag-menu-opt" id="tag-menu-filter">Filter feed by this tag</button>`;
+  const weight = tagMenuEl.querySelector("#tag-menu-weight");
+  if (weight) {
+    let pending = false;
+    const commit = () => {
+      if (pending || !weight.value) return;
+      const v = parseFloat(weight.value);
+      if (Number.isNaN(v)) return;
+      pending = true;
+      const clamped = Math.max(-10, Math.min(10, v));
+      weight.value = clamped;
+      Auth.addTagWeight(tag, clamped).finally(() => {
+        pending = false;
+        refreshTagButtons();
+        if (tagMenuTag === tag) tagMenuRender();
+      });
+    };
+    weight.addEventListener("click", (e) => e.stopPropagation());
+    weight.addEventListener("change", commit);
+    weight.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+    });
+  }
+  const add = tagMenuEl.querySelector("#tag-menu-add");
+  add.addEventListener("click", (e) => {
+    e.stopPropagation();
+    add.disabled = true;
+    Auth.addTagWeight(tag, inList ? null : 1).finally(() => {
+      add.disabled = false;
+      if (tagMenuTag === tag) tagMenuRender();
+      refreshTagButtons();
+    });
+  });
+  tagMenuEl.querySelector("#tag-menu-filter").addEventListener("click", (e) => { e.stopPropagation(); closeTagMenu(); setTag(tag); });
+}
+
+function openTagMenu(tag, anchor) {
+  if (tagMenuTag !== tag) {
+    tagMenuTag = tag;
+    tagMenuRender();
+  }
+  const r = anchor.getBoundingClientRect();
+  tagMenuEl.hidden = false;
+  const w = tagMenuEl.offsetWidth, h = tagMenuEl.offsetHeight;
+  const left = Math.max(8, Math.min(r.left, innerWidth - w - 8));
+  const below = r.top - h - 6 < 4; // no room above → open below
+  tagMenuEl.style.left = left + "px";
+  tagMenuEl.style.top = (below ? r.bottom + 6 : r.top - h - 6) + "px";
+}
+
+function closeTagMenu() {
+  tagMenuEl.hidden = true;
+  tagMenuTag = null;
+  clearTimeout(tagMenuHoverTimer);
+  clearTimeout(tagMenuCloseTimer);
+}
+
+/* Delegated handlers — story-cards render tags dynamically, so there is no
+ * per-button binding. Signed out: click filters directly (no personal list).
+ * Signed in: mouse pointer-over opens after 250 ms, closes 400 ms after it
+ * leaves the tag/menu; touch or click toggles immediately. */
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest?.(".tag");
+  if (btn) {
+    if (!Auth.state.authenticated) { setTag(btn.dataset.tag); return; }
+    if (tagMenuTag === btn.dataset.tag) closeTagMenu();
+    else openTagMenu(btn.dataset.tag, btn);
+    return;
+  }
+  if (!tagMenuEl.hidden && !tagMenuEl.contains(e.target)) closeTagMenu();
+});
+document.addEventListener("pointerover", (e) => {
+  if (e.pointerType !== "mouse") return; // touch = tap-toggle via click only
+  clearTimeout(tagMenuCloseTimer);
+  const btn = e.target.closest?.(".tag");
+  if (btn) {
+    clearTimeout(tagMenuHoverTimer);
+    const b = btn;
+    tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b), 250);
+    return;
+  }
+  if (tagMenuEl.contains(e.target) || tagMenuEl.hidden || tagMenuTag === null) return;
+  clearTimeout(tagMenuHoverTimer);
+  tagMenuCloseTimer = setTimeout(closeTagMenu, 400);
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeTagMenu(); });
+document.addEventListener("scroll", () => { if (!tagMenuEl.hidden) closeTagMenu(); }, { passive: true });
+
+/* Re-render the weighted state of every open card's tag buttons. */
+function refreshTagButtons() {
+  document.querySelectorAll("story-card .tag").forEach((b) => {
+    const tag = b.dataset.tag, weighted = Auth.state.authenticated && Auth.hasTagWeight(tag);
+    b.classList.toggle("tag-weighted", weighted);
+    b.innerHTML = `#${esc(tag)}${weighted ? " <span class=\"tag-weighted-dot\" title=\"In your tag list\"></span>" : ""}`;
+  });
+}
+Auth.onTagWeights(refreshTagButtons);
 
 // --- feed ------------------------------------------------------------------
 function renderFeed() {
