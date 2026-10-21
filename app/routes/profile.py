@@ -50,9 +50,11 @@ def post_feedback(body: Feedback, request: Request):
     kind = None if body.kind in (None, "", "none") else body.kind
     if kind not in ("up", "down", None):
         raise HTTPException(400, "kind must be 'up', 'down' or null")
-    profile = scoring.apply_feedback(body.story_id, kind, require_uid(request))
+    uid = require_uid(request)
+    profile = scoring.apply_feedback(body.story_id, kind, uid)
     if profile is None:
         raise HTTPException(404, "story not found")
+    heads_up.invalidate(heads_up.user_key(uid))
     return {"ok": True, "vote": kind, "profile": profile}
 
 

@@ -68,10 +68,12 @@ def preview_title(url: str) -> str:
 
 def set_category_enabled(category: str | None, enabled: bool) -> int:
     with db.get_conn() as conn:
+        reset = ", fetch_failures = 0, next_fetch_at = NULL" if enabled else ""
         if category:
-            n = conn.execute("UPDATE Feed SET enabled = ? WHERE category = ?", (int(enabled), category)).rowcount
+            n = conn.execute(f"UPDATE Feed SET enabled = ?{reset} WHERE category = ?",
+                             (int(enabled), category)).rowcount
         else:
-            n = conn.execute("UPDATE Feed SET enabled = ? WHERE category IS NULL OR category = ''",
+            n = conn.execute(f"UPDATE Feed SET enabled = ?{reset} WHERE category IS NULL OR category = ''",
                              (int(enabled),)).rowcount
     if enabled:
         worker.wake_pipeline()
@@ -90,6 +92,8 @@ def update(feed_id: int, changes: dict[str, Any]) -> bool:
             return False
         if changes:
             assignments = ", ".join(f"{col} = ?" for col in changes)  # whitelisted above
+            if "xml_url" in changes or changes.get("enabled"):
+                assignments += ", fetch_failures = 0, next_fetch_at = NULL"  # fetch again right away
             try:
                 conn.execute(f"UPDATE Feed SET {assignments} WHERE id = ?", (*changes.values(), feed_id))
             except sqlite3.IntegrityError:

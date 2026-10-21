@@ -70,6 +70,10 @@ EMBED_BATCH = _int("NEWS_EMBED_BATCH", 16)  # texts per Ollama /api/embed call a
 BACKLOG_LOW_TRUST_BELOW = _float("NEWS_BACKLOG_LOW_TRUST_BELOW", 0.5)
 # Articles failing this many pipeline runs are parked (dead letter).
 PIPELINE_MAX_FAILURES = _int("NEWS_PIPELINE_MAX_FAILURES", 3)
+# Ollama timeouts (slow GPU, not a bad article) retry after a doubling delay instead of
+# counting as failures; an article is parked only after this many timeouts in a row.
+PIPELINE_MAX_TIMEOUTS = _int("NEWS_PIPELINE_MAX_TIMEOUTS", 6)
+PIPELINE_TIMEOUT_BACKOFF_MINUTES = _float("NEWS_PIPELINE_TIMEOUT_BACKOFF_MINUTES", 15)
 
 # --- Ingestion -------------------------------------------------------------
 FETCH_CONCURRENCY = _int("NEWS_FETCH_CONCURRENCY", 16)
@@ -83,6 +87,8 @@ USER_AGENT = _env(
 EXTRACT_MIN_DESC_WORDS = _int("NEWS_EXTRACT_MIN_DESC_WORDS", 100)
 MAX_FEEDS_PER_RUN = _int("NEWS_MAX_FEEDS_PER_RUN", 0)  # 0 = all
 MAX_ITEMS_PER_FEED = _int("NEWS_MAX_ITEMS_PER_FEED", 10)
+# A failing feed is retried after WORKER_INTERVAL doubling per consecutive failure, up to this.
+FEED_BACKOFF_MAX_HOURS = _float("NEWS_FEED_BACKOFF_MAX_HOURS", 6)
 # Reddit / Hacker News (upvoterss) comments kept as part of the article body.
 SOCIAL_MAX_COMMENTS = _int("NEWS_SOCIAL_MAX_COMMENTS", 10)
 # Cross-feed duplicates (same canonical URL, or same title of at least N words,
@@ -126,15 +132,32 @@ MERGE_CANDIDATE_WINDOW_HOURS = _int("NEWS_MERGE_CANDIDATE_WINDOW_HOURS", 96)
 MERGE_LEXICAL_MIN_TERMS = _int("NEWS_MERGE_LEXICAL_MIN_TERMS", 3)
 MERGE_LEXICAL_MAX_DF = _int("NEWS_MERGE_LEXICAL_MAX_DF", 5)
 
+# Split pass (app/split.py): a story with SPLIT_MIN_ARTICLES+ articles of which at least
+# SPLIT_FAR_PAIR_SHARE of the pairs are unrelated (cosine < SPLIT_FAR_SIM) is regrouped by
+# embedding. Calibrated 2026-10-21: coherent 30+ stories <= 4.5 %, catch-alls 10-36 %.
+SPLIT_ENABLED = _env("NEWS_SPLIT_ENABLED", "1") == "1"
+SPLIT_MIN_ARTICLES = _int("NEWS_SPLIT_MIN_ARTICLES", 30)
+SPLIT_FAR_SIM = _float("NEWS_SPLIT_FAR_SIM", 0.4)
+SPLIT_FAR_PAIR_SHARE = _float("NEWS_SPLIT_FAR_PAIR_SHARE", 0.10)
+SPLIT_GROUP_SIM = _float("NEWS_SPLIT_GROUP_SIM", 0.6)  # article-to-group-centroid cosine
+SPLIT_MIN_GROUP = _int("NEWS_SPLIT_MIN_GROUP", 3)  # smaller groups fold into the nearest one
+SPLIT_PART_SIM = _float("NEWS_SPLIT_PART_SIM", 0.8)  # parts this close (centroid cosine) stay together
+SPLIT_MAX_PARTS = _int("NEWS_SPLIT_MAX_PARTS", 6)
+SPLIT_MAX_PER_RUN = _int("NEWS_SPLIT_MAX_PER_RUN", 1)  # each part costs a full Prompt 2 rewrite
+
 # --- Story generation ------------------------------------------------------
 # Cap for headline-only quality scores: a headline can't show factual density.
 TITLE_QUALITY_MAX = _int("NEWS_TITLE_QUALITY_MAX", 6)
 # A thin article joining a story at/below this quality skips harness + Prompt2.
 JUNK_SKIP_QUALITY_THRESHOLD = _float("NEWS_JUNK_SKIP_QUALITY_THRESHOLD", 2.0)
+# A joining article this similar to a member whose text has all of its words skips Harness + Prompt 2 (> 1 = off).
+COPY_SKIP_SIM = _float("NEWS_COPY_SKIP_SIM", 0.9)
 # Combined article text budget for full Prompt2 runs before older items are compressed.
 CONTEXT_BUDGET_CHARS = _int("NEWS_CONTEXT_BUDGET_CHARS", 200_000)
 # Update significance (0 none … 3 major, story.py) at which a read story shows up again as updated.
 READ_RESURFACE_SIGNIFICANCE = _int("NEWS_READ_RESURFACE_SIGNIFICANCE", 2)
+# Longer Prompt 2 summaries are sent back once for shortening, then cut at a sentence end.
+SUMMARY_MAX_CHARS = _int("NEWS_SUMMARY_MAX_CHARS", 800)
 
 # --- Scoring ---------------------------------------------------------------
 # Stories without an update for this many days drop out of the ranked feed into
@@ -177,9 +200,13 @@ AUTH_COOKIE = _env("NEWS_AUTH_COOKIE", "news_session")
 
 # --- Per-story chat --------------------------------------------------------
 CHAT_TEMPERATURE = _float("NEWS_CHAT_TEMPERATURE", 0.3)
-CHAT_MAX_TOKENS = _int("NEWS_CHAT_MAX_TOKENS", 1024)
+# Thinking tokens count against this; 1024 often ran out before the answer started.
+CHAT_MAX_TOKENS = _int("NEWS_CHAT_MAX_TOKENS", 4096)
 # Safety cap on autonomous search+scrape turns per message when web search is enabled.
 CHAT_SEARCH_MAX_TURNS = _int("NEWS_CHAT_SEARCH_MAX_TURNS", 8)
+CHAT_SEARCH_MAX_SECONDS = _float("NEWS_CHAT_SEARCH_MAX_SECONDS", 120)
+# Article lines in the chat system prompt (newest first); big stories had 300+.
+CHAT_STORY_MAX_ARTICLES = _int("NEWS_CHAT_STORY_MAX_ARTICLES", 30)
 CHAT_CONTEXT_PER_SOURCE = _int("NEWS_CHAT_CONTEXT_PER_SOURCE", 1500)
 CHAT_CONTEXT_MAX = _int("NEWS_CHAT_CONTEXT_MAX", 6000)
 

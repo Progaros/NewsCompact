@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -18,8 +19,11 @@ import httpx
 
 from . import config
 
+log = logging.getLogger("news.ollama")
 _client: httpx.Client | None = None
 _client_lock = threading.Lock()
+_stats = threading.local()
+_STAT_KEYS = ("load_duration", "prompt_eval_count", "prompt_eval_duration", "eval_count", "eval_duration")
 
 
 def _http() -> httpx.Client:
@@ -39,7 +43,7 @@ def _keep_alive(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # Errors meaning "Ollama is unreachable" (as opposed to a bad/slow answer).
-UNAVAILABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+UNAVAILABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
 
 
 def available() -> bool:
@@ -168,7 +172,9 @@ def extract_json(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    for start, end in (("{", "}"), ("[", "]")):
+    obj_i, arr_i = text.find("{"), text.find("[")
+    pairs = [("[", "]"), ("{", "}")] if 0 <= arr_i < (obj_i if obj_i >= 0 else len(text)) else [("{", "}")]
+    for start, end in pairs:
         i, j = text.find(start), text.rfind(end)
         if i != -1 and j > i:
             try:
@@ -183,6 +189,28 @@ def chat_json(messages: list[dict[str, Any]], **kwargs: Any) -> Any:
 
 
 # --- schema-constrained chat ----------------------------------------------
+def _record(body: dict[str, Any]) -> None:
+    """Add Ollama's own timings (ns) of one /api/chat reply to this thread's totals."""
+    acc = getattr(_stats, "acc", None)
+    if acc is None:
+        acc = _stats.acc = dict.fromkeys(("calls", *_STAT_KEYS), 0)
+    acc["calls"] += 1
+    for k in _STAT_KEYS:
+        acc[k] += body.get(k) or 0
+    if (body.get("load_duration") or 0) > 1e9:
+        log.info("ollama loaded %s in %.1fs (evicted by another model or keep_alive expiry)",
+                 config.CHAT_MODEL, body["load_duration"] / 1e9)
+
+
+def take_stats() -> dict[str, float]:
+    """Totals of this thread's structured calls since the last take (seconds / tokens)."""
+    acc = getattr(_stats, "acc", None) or dict.fromkeys(("calls", *_STAT_KEYS), 0)
+    _stats.acc = None
+    return {"calls": acc["calls"], "load_s": acc["load_duration"] / 1e9,
+            "in_tok": acc["prompt_eval_count"], "in_s": acc["prompt_eval_duration"] / 1e9,
+            "out_tok": acc["eval_count"], "out_s": acc["eval_duration"] / 1e9}
+
+
 def structured(schema: dict[str, Any], messages: list[dict[str, Any]], *,
                temperature: float = 0.0, num_predict: int = 1024,
                timeout: float | None = None, prose_fallback: bool = False) -> Any:
@@ -201,7 +229,9 @@ def structured(schema: dict[str, Any], messages: list[dict[str, Any]], *,
     })
     r = _http().post("/api/chat", json=payload, timeout=timeout or httpx.USE_CLIENT_DEFAULT)
     r.raise_for_status()
-    content = (r.json().get("message") or {}).get("content") or ""
+    body = r.json()
+    _record(body)
+    content = (body.get("message") or {}).get("content") or ""
     if not content.strip():
         if prose_fallback:
             return chat_json(messages, temperature=temperature, max_tokens=num_predict)

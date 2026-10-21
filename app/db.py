@@ -26,6 +26,8 @@ _MIGRATIONS = (
     ("Article", "quality", "REAL"),
     ("Article", "content_class", "TEXT"),
     ("Article", "pipeline_failures", "INTEGER"),
+    ("Article", "pipeline_timeouts", "INTEGER"),
+    ("Article", "retry_after", "TEXT"),
     ("Article", "processed_at", "TEXT"),
     ("Article", "t_embed_s", "REAL"),
     ("Article", "t_cluster_s", "REAL"),
@@ -37,10 +39,13 @@ _MIGRATIONS = (
     ("Article", "url_key", "TEXT"),
     ("Article", "title_key", "TEXT"),
     ("Story", "merge_checked_at", "TEXT"),
+    ("Story", "split_checked_at", "TEXT"),
     ("Story", "material_at", "TEXT"),
     ("Story", "news_at", "TEXT"),
     ("Feed", "enabled", "INTEGER NOT NULL DEFAULT 1"),
     ("Feed", "last_error", "TEXT"),
+    ("Feed", "fetch_failures", "INTEGER NOT NULL DEFAULT 0"),
+    ("Feed", "next_fetch_at", "TEXT"),
     ("ChatMessage", "steps", "TEXT"),
     ("ChatMessage", "parent_id", "INTEGER"),
     ("ChatSession", "leaf_id", "INTEGER"),
@@ -217,8 +222,32 @@ def init_db() -> None:
                     conn.execute("ROLLBACK")
                     raise
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS article_vector_delete AFTER DELETE ON Article "
+            f"BEGIN DELETE FROM {VECTOR_TABLE} WHERE article_id = OLD.id; END"
+        )
+        conn.execute(f"DELETE FROM {VECTOR_TABLE} WHERE article_id NOT IN (SELECT id FROM Article)")
+        # One vote per user and story (older code could log a vote twice).
+        conn.execute("DELETE FROM FeedbackLog WHERE story_id IS NOT NULL AND id NOT IN "
+                     "(SELECT MAX(id) FROM FeedbackLog WHERE story_id IS NOT NULL GROUP BY user_id, story_id)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_user_story "
+                     "ON FeedbackLog(user_id, story_id) WHERE story_id IS NOT NULL")
         conn.execute("UPDATE Story SET news_at = COALESCE(updated_at, created_at) "
                      "WHERE news_at IS NULL AND headline IS NOT NULL")
+        for row in conn.execute("SELECT id, content, steps FROM ChatMessage WHERE steps LIKE '%\"running\"%'").fetchall():
+            steps = json_list(row["steps"])
+            for s in steps:
+                if isinstance(s, dict) and s.get("status") == "running":
+                    s["status"] = "ok" if s.get("kind") == "thinking" else "warn"
+                    if "(stopped)" not in (s.get("title") or ""):
+                        s["title"] = f"{s.get('title') or 'Step'} (stopped)"
+            if not (row["content"] or "").strip() and not any(
+                isinstance(s, dict) and s.get("kind") in ("stopped", "error") for s in steps
+            ):
+                steps.append({"id": len(steps), "kind": "stopped",
+                              "title": "Stopped — answer interrupted", "status": "warn", "detail": ""})
+            conn.execute("UPDATE ChatMessage SET steps = ? WHERE id = ?",
+                         (json.dumps(steps, ensure_ascii=False), row["id"]))
         for row in conn.execute(
             "SELECT id, content_raw FROM Article WHERE content_class IS NULL"
         ).fetchall():

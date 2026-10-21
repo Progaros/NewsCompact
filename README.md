@@ -85,13 +85,14 @@ flowchart LR
   StoryDB --> Rank & Brief
 ```
 
-1. **Ingest** (`app/ingest.py`, `app/dedup.py`): fetches feeds concurrently (ETag / Last-Modified, 5 MB cap). Normalizes bodies (`content_quality.clean_body`; Reddit/HN items keep post text + up to `NEWS_SOCIAL_MAX_COMMENTS` comments); a longer `<content:encoded>` beats a teaser description. Enabled feeds with short descriptions fetch the linked article HTML (`trafilatura` → `newspaper3k` → `BeautifulSoup`; link-list extractions such as related-article sidebars are rejected) via a DNS-pinned client that connects only to vetted global IPs. Cross-feed duplicates (canonical URL or ≥ 5-word title within 72 h) attach directly to the original's story without LLM calls.
+1. **Ingest** (`app/ingest.py`, `app/dedup.py`): fetches feeds concurrently (ETag / Last-Modified, 5 MB cap; a failing feed is retried after a doubling delay up to `NEWS_FEED_BACKOFF_MAX_HOURS`). Normalizes bodies (`content_quality.clean_body`; Reddit/HN items keep post text + up to `NEWS_SOCIAL_MAX_COMMENTS` comments); a longer `<content:encoded>` beats a teaser description. Enabled feeds with short descriptions fetch the linked article HTML (`trafilatura` → `newspaper3k` → `BeautifulSoup`; link-list extractions such as related-article sidebars are rejected) via a DNS-pinned client that connects only to vetted global IPs. Cross-feed duplicates (canonical URL or ≥ 5-word title within 72 h) attach directly to the original's story without LLM calls.
 2. **Pipeline** (`app/pipeline.py`, `app/clustering.py`, `app/harness.py`, `app/story.py`): processes pending articles newest-first (categories with `SOURCE_TRUST < 0.5` like Reddit wait until higher-trust backlog clears; `broken` bodies are skipped). Before each batch it self-heals: placeholder stories, and bodies one feed served identically under ≥ 3 titles (site chrome) are re-extracted and re-processed.
    - **Embed**: title + first 100 body words (title-only unless `ok`), batched in chunks of `NEWS_EMBED_BATCH` (16) and stored as the article is processed.
    - **Cluster**: `vec0` KNN retrieves candidates scored by max cosine similarity to non-broken member anchors (`AnchorCache`). The 27B verifier classifies top candidates (`≥ 0.55` within 48 h, or `≥ 0.62` stale revival); `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` join, `SAME_TOPIC_DISTINCT_EVENT` is saved in `StoryLink` as a related story.
-   - **Harness**: scores article quality (1–10, capped at `NEWS_TITLE_QUALITY_MAX` for non-`ok` bodies) and `breaking` in one schema-constrained call. Thin articles joining a junk story skip Harness & Prompt 2.
-   - **Prompt 2**: generates/updates headline, 2–4 sentence summary, tags, `location`, `language`, and anchored `metrics` (`urgency_level`, `impact_scale`, `status`), retrying once on malformed JSON. Story quality is the **trust-weighted median** of member articles. Incremental rewrites rate `update_significance` (0–3): `≥ 1` advances `news_at` (recency), `≥ 2` (or urgency jump / Breaking) advances `material_at` (resurfaces read stories).
+   - **Harness**: scores article quality (1–10, capped at `NEWS_TITLE_QUALITY_MAX` for non-`ok` bodies) and `breaking` in one schema-constrained call. Thin articles joining a junk story skip Harness & Prompt 2, and so do word-for-word copies (`≥ NEWS_COPY_SKIP_SIM` = 0.9 cosine to a full-text member that already contains every word; one new word means a possible new fact, so the article runs normally). Copies take the member's quality.
+   - **Prompt 2**: generates/updates headline, 2–4 sentence summary, tags, `location`, `language`, and anchored `metrics` (`urgency_level`, `impact_scale`, `status`), retrying once on malformed JSON; a summary over `NEWS_SUMMARY_MAX_CHARS` is sent back once for shortening, then cut at a sentence end. Story quality is the **trust-weighted median** of member articles. Incremental rewrites rate `update_significance` (0–3): `≥ 1` advances `news_at` (recency), `≥ 2` (or urgency jump / Breaking) advances `material_at` (resurfaces read stories).
 3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine to stories updated within 96 h, or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges; non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
+   - **Split** (`app/split.py`): article-level `CONTINUING_DEVELOPMENT` joins can still chain a saga into one catch-all story. A story with `≥ 30` articles of which `≥ 10 %` of the pairs are unrelated (cosine `< 0.4`; coherent stories stay under 5 %) is regrouped by embedding (centroid cosine `≥ 0.6`, groups `< 3` fold in, parts `≥ 0.8` alike rejoin). The largest part keeps the story (votes, chat, links); the others become new stories that inherit read marks, are linked as related, and get a full Prompt 2 rewrite (one story per run). Preview with `uv run python scripts/split_stories.py`.
 4. **Ranking** (`app/scoring.py`):
    $$\text{relevance} = 10 \cdot (0.40\,\text{quality} + 0.35\,\text{credibility} + 0.25\,\text{impact})$$
    $$\text{display} = \text{relevance} + \text{urgency}\cdot W_1 + \text{clamp}(\text{interest}\cdot W_3, \pm 10) + \text{distance}\cdot W_{\text{dist}} - \text{decay}(\text{news\_at})$$
@@ -133,7 +134,8 @@ flowchart TD
 | Endpoint | Access | Purpose |
 | --- | --- | --- |
 | `GET /api/stories` · `GET /api/stories/{id}` | Public | Ranked/archived stories (`view=personal\|default`, `q`, `tag`, `hide_read`, `keep`) with `articles` and `related` |
-| `POST` / `DELETE /api/stories/{id}/read` | User | Mark story read (snapshots summary) / unread |
+| `GET /api/stories/pulse?since=` | Public | Cheap poll: stories with news after `since` + queue size (drives the "↑ N new" pill) |
+| `POST` / `DELETE /api/stories/{id}/read` | User | Mark story read / unread ("New since you read it" comes from `StoryUpdate`) |
 | `GET/POST /api/stories/{id}/chat` · `POST .../chat/switch` | User | Per-story chat tree & NDJSON stream (`step`, `thinking`, `delta`, `done`; `edit_of` branches, `switch` selects version) |
 | `GET /api/heads-up?view=` | Public | Non-blocking top-5 brief (`default` or `personal`; triggers background refresh when stale) |
 | `POST /api/feedback` · `GET /api/feedback` | User | 👍/👎 vote (`up\|down`, or `null` to undo and revert tag weights) · vote log |
@@ -153,13 +155,20 @@ flowchart TD
 | `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` | Qwen3.8-27B / qwen3-embedding:0.6b | LLM and 1024-dim embedding model |
 | `NEWS_WORKER_INTERVAL` / `NEWS_PIPELINE_BATCH` / `NEWS_EMBED_BATCH` | `300` / `50` / `16` | Ingest interval (s) / pipeline batch / texts per embed call |
 | `NEWS_PIPELINE_MAX_FAILURES` / `NEWS_BACKLOG_LOW_TRUST_BELOW` | `3` / `0.5` | Dead-letter threshold / trust cutoff processed last in backlog |
+| `NEWS_PIPELINE_MAX_TIMEOUTS` / `NEWS_PIPELINE_TIMEOUT_BACKOFF_MINUTES` | `6` / `15` | Ollama timeouts don't count as failures: the article retries after a doubling delay and the run pauses; parked after this many in a row |
+| `NEWS_FEED_BACKOFF_MAX_HOURS` | `6` | Longest wait before retrying a failing feed (starts at `NEWS_WORKER_INTERVAL`, doubles) |
 | `NEWS_FETCH_CONCURRENCY` / `NEWS_FETCH_TIMEOUT` / `NEWS_MAX_ITEMS_PER_FEED` | `16` / `20` / `10` | Feed fetch pool / timeout (s) / items per feed |
 | `NEWS_CLUSTER_MODE` / `NEWS_CLUSTER_WINDOW_HOURS` | `two_stage` / `48` | `two_stage` (LLM verifier) or `cosine` / active join window |
 | `NEWS_CLUSTER_VERIFY_RETRIEVE_THRESHOLD` / `NEWS_CLUSTER_SIM_THRESHOLD` / `NEWS_CLUSTER_REVIVE_SIM_THRESHOLD` | `0.55` / `0.64` / `0.62` | Verifier retrieval / cosine fallback / stale-story revival |
 | `NEWS_MERGE_ENABLED` / `NEWS_MERGE_SIM_THRESHOLD` / `NEWS_MERGE_MAX_CHECKS_PER_RUN` | `1` / `0.62` / `5` | Idle-time recall merge settings |
 | `NEWS_MERGE_CANDIDATE_WINDOW_HOURS` | `96` | Age limit of embedding merge candidates (checked stories stay within the 48 h window) |
 | `NEWS_MERGE_LEXICAL_MIN_TERMS` / `NEWS_MERGE_LEXICAL_MAX_DF` | `3` / `5` | Shared rare headline terms for lexical merge candidates |
+| `NEWS_SPLIT_ENABLED` | `1` | Split incoherent catch-all stories (`app/split.py`) |
+| `NEWS_SPLIT_MIN_ARTICLES` / `NEWS_SPLIT_FAR_SIM` / `NEWS_SPLIT_FAR_PAIR_SHARE` | `30` / `0.4` / `0.10` | Split gate: size and share of unrelated article pairs |
+| `NEWS_SPLIT_GROUP_SIM` / `NEWS_SPLIT_MIN_GROUP` / `NEWS_SPLIT_PART_SIM` | `0.6` / `3` / `0.8` | Grouping: join threshold, smallest part, parts that rejoin |
+| `NEWS_SPLIT_MAX_PARTS` / `NEWS_SPLIT_MAX_PER_RUN` | `6` / `1` | Parts per story, stories split per pipeline run |
 | `NEWS_READ_RESURFACE_SIGNIFICANCE` / `NEWS_TITLE_QUALITY_MAX` | `2` / `6` | Update significance (0–3) to resurface read stories / cap for non-`ok` bodies |
+| `NEWS_SUMMARY_MAX_CHARS` | `800` | Story summary length cap (one shortening request, then cut at a sentence end) |
 | `NEWS_STORY_ACTIVE_DAYS` / `NEWS_RETENTION_DAYS` / `NEWS_DEDUP_WINDOW_HOURS` | `7` / `30` / `72` | Active feed window / DB retention (0 = forever) / URL+title dedup window |
 | `NEWS_BOILERPLATE_MIN_TITLES` | `3` | One feed's identical body under this many titles = extracted site chrome; re-extracted (else title-only) and re-processed |
 | `NEWS_SOURCE_TRUST` / `NEWS_SOURCE_TRUST_DEFAULT` | `Reddit=0.3,Hacker News=0.5,Reviews=0.5` / `1.0` | Default category trust weights |
@@ -168,10 +177,12 @@ flowchart TD
 | `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` / `NEWS_FEEDBACK_ALPHA` | `18` / `10` / `0.1` | Time decay (from `news_at`) and 👍/👎 learning rate |
 | `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
 | `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `5` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
-| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` | `https://searx.example.org/` / `8` | SearXNG URL and safety cap on autonomous chat search turns |
+| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` / `NEWS_CHAT_SEARCH_MAX_SECONDS` | `https://searx.example.org/` / `8` / `120` | SearXNG URL and safety caps on autonomous chat search (turns, time) |
+| `NEWS_CHAT_MAX_TOKENS` / `NEWS_CHAT_STORY_MAX_ARTICLES` | `4096` / `30` | Chat answer budget (thinking included) / newest article lines in the chat system prompt |
 | `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `7200` | Owner login password (required unless an admin has a stored password; startup fails otherwise) / session TTL in hours (default ~3 months) |
 | `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |
 | `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty / `10` / `10` | Rotating gzipped log (`start.sh` sets `server.log`) |
+| `NEWS_COPY_SKIP_SIM` | `0.9` | Word-for-word copies above this cosine skip Harness & Prompt 2 (`> 1` = off) |
 
 ## Database & Layout
 
@@ -188,10 +199,10 @@ app/
   stories.py, chat_history.py, share.py, feeds.py   Story payloads & read marks, chat tree, share links, feed management
   db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations, env config
   ingest.py, content_quality.py, dedup.py, retention.py
-  pipeline.py, clustering.py, merge.py, harness.py, story.py, scoring.py, tags.py
+  pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, tags.py
   heads_up.py, reports.py, chat.py, searchngx.py, worker.py
   frontend/                     vanilla JS/CSS UI (index, list, feeds, admin, share)
-scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, rescore_metrics.py, benchmark/
-tests/                  pytest suite (108 tests: API, security, pipeline, merge, scoring, read, ingest, migrations)
+scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, split_stories.py, rescore_metrics.py, benchmark/
+tests/                  pytest suite (130 tests: API, security, pipeline, merge, split, scoring, read, ingest, migrations, frontend JS syntax via tree-sitter)
 docs/                   plan.md (changelog), todo.md, findings.md, future_ideas.md
 ```

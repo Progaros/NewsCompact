@@ -13,6 +13,8 @@ import sqlite3
 import statistics
 from typing import Any
 
+import httpx
+
 from . import config, db, ollama, scoring
 from .tags import normalize_tags
 
@@ -50,7 +52,7 @@ _SYSTEM_FULL = (
     + _METRICS_GUIDE
 )
 _SIGNIFICANCE_GUIDE = (
-    " new_facts lists, before anything else, each concrete fact the New Article reports "
+    " new_facts lists, before anything else, at most 5 concrete facts the New Article reports "
     "that the Current Summary does not already state or imply (a new event, figure, "
     "decision or official statement), each as one short sentence in the summary's "
     "language; background, recaps, rewording, analysis, opinion "
@@ -109,7 +111,7 @@ _SCHEMA = {
 # new_facts comes first so the rating is grounded in an explicit list.
 _RATED_SCHEMA = {
     **_SCHEMA,
-    "properties": {"new_facts": {"type": "array", "items": {"type": "string"}},
+    "properties": {"new_facts": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
                    **_SCHEMA["properties"],
                    "update_significance": {"type": "integer", "minimum": 0, "maximum": 3}},
     "required": ["new_facts", *_SCHEMA["required"], "update_significance"],
@@ -209,13 +211,69 @@ def _build_prompt(story: sqlite3.Row | None, arts: list[dict[str, Any]],
     return _SYSTEM_FULL, user
 
 
-def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = False,
-                 article_id: int | None = None, force_full: bool = False) -> int:
-    """Rewrite the story from its articles. Returns the prompt size in chars (0 = nothing to do)."""
-    arts = [dict(a) for a in conn.execute(
+_SHORTEN = ("Your summary has {n} characters; the limit is {limit}. Rewrite only the summary in at "
+            "most 4 sentences and {limit} characters, keeping the most important and the newest "
+            "facts. Return the complete JSON object again.")
+_SENTENCE_END = re.compile(r"[.!?][\"'”»)]?\s+")
+
+
+def clip_summary(summary: str) -> str:
+    """Cut a summary over SUMMARY_MAX_CHARS at its last sentence end (else a word, with …)."""
+    limit = config.SUMMARY_MAX_CHARS
+    if len(summary) <= limit:
+        return summary
+    ends = [m.end() for m in _SENTENCE_END.finditer(summary[: limit + 1])]
+    if ends and ends[-1] >= limit * 0.4:
+        return summary[: ends[-1]].strip()
+    head = summary[:limit]
+    return head[: head.rfind(" ")].rstrip(" ,;:") + "…"
+
+
+def _ask(schema: dict[str, Any], messages: list[dict[str, str]], story_id: int) -> dict[str, Any]:
+    """Prompt 2 call; an unparseable reply is retried once."""
+    for attempt in range(2):
+        try:
+            out = ollama.structured(schema, messages, temperature=0.2, num_predict=1536, prose_fallback=True)
+            if isinstance(out, list):  # prose fallback may wrap the object in an array
+                out = next((x for x in out if isinstance(x, dict)), None)
+            if not isinstance(out, dict):
+                raise ValueError(f"Prompt2 returned non-object JSON: {str(out)[:200]!r}")
+            return out
+        except ValueError as e:
+            if attempt:
+                raise
+            log.warning("Prompt2 reply unusable for story %s, retrying once: %s", story_id, e)
+    raise AssertionError("unreachable")
+
+
+def _story_articles(conn: sqlite3.Connection, story_id: int) -> list[dict[str, Any]]:
+    return [dict(a) for a in conn.execute(
         "SELECT a.*, COALESCE(f.category, '') AS feed_category FROM Article a JOIN Feed f ON f.id = a.feed_id "
         "WHERE a.story_id = ? ORDER BY a.published_date ASC", (story_id,)
     )]
+
+
+def _quality(arts: list[dict[str, Any]]) -> float | None:
+    """Trust-weighted median: one bot-blocked fetch or a pile of low-trust reposts can't drag it down."""
+    quals = [(a["quality"], config.SOURCE_TRUST.get(a["feed_category"], config.SOURCE_TRUST_DEFAULT))
+             for a in arts if a.get("quality") is not None]
+    if not quals:
+        return None
+    quality = scoring.weighted_median(quals)
+    return round(float(quality if quality is not None else statistics.median(q for q, _ in quals)), 2)
+
+
+def refresh_quality(conn: sqlite3.Connection, story_id: int) -> None:
+    """Recompute the story quality after a member joined without a Prompt 2 rewrite."""
+    quality = _quality(_story_articles(conn, story_id))
+    if quality is not None:
+        conn.execute("UPDATE Story SET quality_score = ? WHERE id = ?", (quality, story_id))
+
+
+def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = False,
+                 article_id: int | None = None, force_full: bool = False) -> int:
+    """Rewrite the story from its articles. Returns the prompt size in chars (0 = nothing to do)."""
+    arts = _story_articles(conn, story_id)
     if not arts:
         return 0
     story = conn.execute("SELECT headline, summary, metrics FROM Story WHERE id = ?", (story_id,)).fetchone()
@@ -224,24 +282,23 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
     prev_summary = (story["summary"] or "") if story is not None else ""
 
     # A malformed reply is retried once here instead of re-running the whole article later.
-    for attempt in range(2):
-        try:
-            out = ollama.structured(
-                _RATED_SCHEMA if rated else _SCHEMA,
-                [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.2,
-                prose_fallback=True,
-            )
-            if isinstance(out, list):  # prose fallback may wrap the object in an array
-                out = next((x for x in out if isinstance(x, dict)), None)
-            if not isinstance(out, dict):
-                raise ValueError(f"Prompt2 returned non-object JSON: {str(out)[:200]!r}")
-            break
-        except ValueError as e:
-            if attempt:
-                raise
-            log.warning("Prompt2 reply unusable for story %s, retrying once: %s", story_id, e)
+    schema = _RATED_SCHEMA if rated else _SCHEMA
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    out = _ask(schema, messages, story_id)
     _log_violations(story_id, out)
+    summary = (out.get("summary") or "").strip()
+    if len(summary) > config.SUMMARY_MAX_CHARS:
+        try:
+            short = _ask(schema, messages + [
+                {"role": "assistant", "content": json.dumps(out, ensure_ascii=False)},
+                {"role": "user", "content": _SHORTEN.format(n=len(summary), limit=config.SUMMARY_MAX_CHARS)},
+            ], story_id)
+            shorter = (short.get("summary") or "").strip()
+            if shorter and len(shorter) < len(summary):
+                summary = shorter
+        except (ValueError, httpx.HTTPError) as e:
+            log.warning("Prompt2 shortening failed for story %s: %s", story_id, e)
+        out["summary"] = clip_summary(summary)
 
     metrics = sanitize_metrics(out.get("metrics"))
     if breaking:
@@ -259,13 +316,8 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
 
     raw_tags = out.get("tags") if isinstance(out.get("tags"), list) else []
     tags = normalize_tags([t for t in raw_tags if isinstance(t, str)])[:6]
-    # Trust-weighted median: one bot-blocked fetch or a pile of low-trust reposts can't drag it down.
-    quals = [(a["quality"], config.SOURCE_TRUST.get(a["feed_category"], config.SOURCE_TRUST_DEFAULT))
-             for a in arts if a.get("quality") is not None]
-    if quals:
-        quality = scoring.weighted_median(quals)
-        quality = round(float(quality if quality is not None else statistics.median(q for q, _ in quals)), 2)
-    else:
+    quality = _quality(arts)
+    if quality is None:
         try:
             quality = max(1.0, min(10.0, float(out.get("quality", 5))))
         except (TypeError, ValueError):

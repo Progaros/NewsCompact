@@ -69,6 +69,15 @@ def start_turn(conn: sqlite3.Connection, story_id: int, user_id: int, text: str,
         if idx is None:
             return None
         msgs = msgs[:idx]
+    else:
+        # If the previous turn was stopped or failed without an answer, branch as a new
+        # version of that unanswered question instead of chaining under an empty bubble.
+        while msgs and msgs[-1]["role"] == "assistant" and not (msgs[-1]["content"] or "").strip():
+            msgs.pop()
+            if msgs and msgs[-1]["role"] == "user":
+                msgs.pop()
+        while msgs and msgs[-1]["role"] == "user":
+            msgs.pop()
     history = [{"role": m["role"], "content": m["content"]} for m in msgs[-max_history:]]
     question_id = conn.execute(
         "INSERT INTO ChatMessage (session_id, parent_id, role, content) VALUES (?, ?, 'user', ?)",

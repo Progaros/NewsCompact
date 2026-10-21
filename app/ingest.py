@@ -295,8 +295,11 @@ def ingest_feed(feed: dict[str, Any]) -> int:
         r = fetch(feed["xml_url"], feed.get("etag"), feed.get("last_modified"))
     except Exception as e:  # noqa: BLE001
         log.warning("feed fetch error %s: %s", feed["xml_url"], e)
+        failures = (feed.get("fetch_failures") or 0) + 1
+        wait = min(config.WORKER_INTERVAL_SECONDS * 2 ** (failures - 1), config.FEED_BACKOFF_MAX_HOURS * 3600)
         with db.get_conn() as conn:
-            conn.execute("UPDATE Feed SET last_error = ? WHERE id = ?", (str(e)[:300], feed["id"]))
+            conn.execute("UPDATE Feed SET last_error = ?, fetch_failures = ?, next_fetch_at = datetime('now', ?) "
+                         "WHERE id = ?", (str(e)[:300], failures, f"+{int(wait)} seconds", feed["id"]))
         return 0
 
     new = 0
@@ -340,8 +343,8 @@ def ingest_feed(feed: dict[str, Any]) -> int:
                 )
                 new += cur.rowcount
         conn.execute(
-            "UPDATE Feed SET last_fetched_at = ?, etag = ?, last_modified = ?, last_error = NULL "
-            "WHERE id = ?",
+            "UPDATE Feed SET last_fetched_at = ?, etag = ?, last_modified = ?, last_error = NULL, "
+            "fetch_failures = 0, next_fetch_at = NULL WHERE id = ?",
             (db.utcnow(), r.headers.get("ETag") or feed.get("etag"),
              r.headers.get("Last-Modified") or feed.get("last_modified"), feed["id"]),
         )
@@ -349,9 +352,11 @@ def ingest_feed(feed: dict[str, Any]) -> int:
 
 
 def ingest_all(on_new: Callable[[], None] | None = None) -> int:
-    """Fetch all feeds concurrently; ``on_new`` fires whenever a feed stored new articles."""
+    """Fetch all feeds concurrently (failing ones wait out their backoff); ``on_new`` fires
+    whenever a feed stored new articles."""
     with db.get_conn() as conn:
-        sql = "SELECT * FROM Feed ORDER BY enabled DESC, id"
+        sql = ("SELECT * FROM Feed WHERE next_fetch_at IS NULL OR next_fetch_at <= datetime('now') "
+               "ORDER BY enabled DESC, id")
         if config.MAX_FEEDS_PER_RUN > 0:
             sql += f" LIMIT {int(config.MAX_FEEDS_PER_RUN)}"
         feeds = [dict(r) for r in conn.execute(sql)]

@@ -309,6 +309,67 @@ def test_chat_reports_failed_tools(client, story, llm, monkeypatch):
     assert client.get(f"/api/stories/{story}/chat").json()["messages"][-1]["steps"][0]["kind"] == "error"
 
 
+def test_chat_after_failed_turn_branches_instead_of_chaining_empty_reply(client, story, llm, monkeypatch):
+    url = f"/api/stories/{story}/chat"
+    client.post(url, json={"message": "First question", "web_search": False})
+    orig_stream = ollama.chat_stream
+
+    def dead_llm(*_a, **_k):
+        raise httpx.ConnectError("ollama down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ollama, "chat_stream", dead_llm)
+    client.post(url, json={"message": "Failed follow-up", "web_search": False})
+    msgs = client.get(url).json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+    assert msgs[-1]["content"] == ""
+
+    # Sending a new message after the empty failed turn replaces it as a sibling version (2/2).
+    monkeypatch.setattr(ollama, "chat_stream", orig_stream)
+    client.post(f"/api/stories/{story}/chat", json={"message": "Retried follow-up", "web_search": False})
+    msgs2 = client.get(url).json()["messages"]
+    assert [m["content"] for m in msgs2] == ["First question", "Short answer.", "Retried follow-up", "Short answer."]
+    assert msgs2[2]["version"] == 2 and len(msgs2[2]["versions"]) == 2
+
+
+def test_extract_json_rejects_inner_array_of_truncated_object():
+    truncated = '{\n  "new_facts": ["Fact 1", "Fact 2"],\n  "headline": "Truncated'
+    with pytest.raises(ValueError, match="could not parse JSON"):
+        ollama.extract_json(truncated)
+    assert ollama.extract_json('Prose before [{"headline": "H"}] after') == [{"headline": "H"}]
+
+
+def test_stories_pulse_counts_news_since(client, story):
+    news_at = client.get("/api/stories").json()["stories"][0]["news_at"]
+    assert client.get("/api/stories/pulse", params={"since": news_at}).json() == {
+        "new": 0, "latest": None, "pending": 0}
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Story SET news_at = datetime('now', '+1 minute')")
+    pulse = client.get("/api/stories/pulse", params={"since": news_at}).json()
+    assert pulse["new"] == 1 and pulse["latest"] > news_at
+    client.post("/api/auth/logout")
+    assert client.get("/api/stories/pulse").json()["new"] == 0  # public, like the story list
+
+
+def test_one_vote_per_user_and_story(client, story):
+    import sqlite3
+
+    for kind in ("up", "up", "down"):
+        assert client.post("/api/feedback", json={"story_id": story, "kind": kind}).status_code == 200
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT count(*), max(kind) FROM FeedbackLog").fetchone()[:] == (1, "down")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO FeedbackLog (user_id, story_id, kind) VALUES (1, ?, 'up')", (story,))
+
+
+def test_chat_prompt_lists_only_the_newest_articles(monkeypatch):
+    from app import chat
+
+    monkeypatch.setattr(config, "CHAT_STORY_MAX_ARTICLES", 3)
+    prompt = chat.story_system_prompt({"articles": [{"title": f"Art {i}"} for i in range(5)]})
+    assert "Art 2" in prompt and "Art 3" not in prompt and "… and 2 older articles" in prompt
+
+
 def test_think_tags_are_split_from_the_answer():
     split = ollama._ThinkSplitter()
     out = []

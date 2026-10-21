@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS Feed (
     etag            TEXT,
     last_modified   TEXT,
     enabled         INTEGER NOT NULL DEFAULT 1,   -- 0 = fetch RSS rows only, no AI
-    last_error      TEXT                          -- NULL after a successful fetch
+    last_error      TEXT,                         -- NULL after a successful fetch
+    fetch_failures  INTEGER NOT NULL DEFAULT 0,   -- consecutive failed fetches (backoff)
+    next_fetch_at   TEXT                          -- skip the feed until then (NULL = every run)
 );
 
 CREATE TABLE IF NOT EXISTS Article (
@@ -31,6 +33,8 @@ CREATE TABLE IF NOT EXISTS Article (
     created_at        TEXT DEFAULT (datetime('now')),   -- first seen (ingest)
     quality           REAL,
     pipeline_failures INTEGER,
+    pipeline_timeouts INTEGER,   -- consecutive Ollama timeouts (retried with backoff)
+    retry_after       TEXT,      -- not picked up by the pipeline before this time
     processed_at      TEXT,      -- pipeline finished (story written)
     t_embed_s         REAL,      -- per-stage wall times of the successful run
     t_cluster_s       REAL,
@@ -57,6 +61,7 @@ CREATE TABLE IF NOT EXISTS Story (
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
     merge_checked_at TEXT,             -- last recall-merge check (re-checked after updates)
+    split_checked_at TEXT,             -- last split check (app/split.py; re-checked after updates)
     material_at   TEXT,                -- last update significant enough to resurface a read story
     news_at       TEXT                 -- last update that added facts (ranking recency)
 );

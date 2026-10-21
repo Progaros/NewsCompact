@@ -18,6 +18,8 @@ import math
 import sqlite3
 from typing import Any
 
+import httpx
+
 from . import config, db, harness, ollama
 from .content_quality import classify as classify_content
 from .content_quality import split_post
@@ -247,6 +249,8 @@ def verify(conn: sqlite3.Connection, title: str, text: str, cands: list[tuple[in
         return None, -1.0
     try:
         decisions = harness.classify_event_candidates(title, text, rows)
+    except (httpx.TimeoutException, *ollama.UNAVAILABLE_ERRORS):
+        raise  # Ollama is slow/down: retry the article later rather than guessing "new story"
     except Exception:  # noqa: BLE001
         log.exception("event verification failed for %s", log_ref)
         return None, -1.0
@@ -296,7 +300,12 @@ def decide_story(conn: sqlite3.Connection, vec: Vector,
     # Explicit id: SQLite would otherwise reuse a merged-away (aliased) max id.
     cur = conn.execute(
         "INSERT INTO Story (id, headline, summary, tags, metrics, quality_score) "
-        "VALUES (MAX((SELECT COALESCE(MAX(id), 0) FROM Story), "
-        "(SELECT COALESCE(MAX(old_id), 0) FROM StoryAlias)) + 1, NULL, NULL, '[]', '{}', 5.0)"
+        "VALUES (?, NULL, NULL, '[]', '{}', 5.0)", (next_story_id(conn),)
     )
     return cur.lastrowid, True, False
+
+
+def next_story_id(conn: sqlite3.Connection) -> int:
+    """Id for a new story; never one that a merged-away story still resolves from (StoryAlias)."""
+    return conn.execute("SELECT MAX((SELECT COALESCE(MAX(id), 0) FROM Story), "
+                        "(SELECT COALESCE(MAX(old_id), 0) FROM StoryAlias)) + 1").fetchone()[0]

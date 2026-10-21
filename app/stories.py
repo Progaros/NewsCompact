@@ -83,6 +83,7 @@ def exists(conn: sqlite3.Connection, story_id: int) -> bool:
 
 def mark_read(conn: sqlite3.Connection, user_id: int, story_id: int) -> bool:
     """Marks the story read (shown again when it changes materially); False if no such story."""
+    story_id = resolve_id(conn, story_id)
     if not exists(conn, story_id):
         return False
     conn.execute("INSERT OR REPLACE INTO StoryRead (user_id, story_id, read_at) "
@@ -91,4 +92,5 @@ def mark_read(conn: sqlite3.Connection, user_id: int, story_id: int) -> bool:
 
 
 def mark_unread(conn: sqlite3.Connection, user_id: int, story_id: int) -> None:
+    story_id = resolve_id(conn, story_id)
     conn.execute("DELETE FROM StoryRead WHERE user_id = ? AND story_id = ?", (user_id, story_id))

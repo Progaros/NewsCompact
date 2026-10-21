@@ -34,6 +34,13 @@ def test_story_links_follow_merges_until_deletion(feed_id, llm, client):
         ids = [r[0] for r in conn.execute("SELECT id FROM Story ORDER BY id")]
         merge._absorb(conn, ids[0], ids[-1])
     assert client.get(f"/api/stories/{ids[-1]}?view=default").json()["id"] == ids[0]
+    # Read, feedback and chat on the merged-away id resolve to the surviving story.
+    assert client.post(f"/api/stories/{ids[-1]}/read").status_code == 200
+    assert client.get(f"/api/stories/{ids[0]}").json()["read"] == "read"
+    assert client.post("/api/feedback", json={"story_id": ids[-1], "kind": "up"}).status_code == 200
+    assert client.get(f"/api/stories/{ids[0]}").json()["vote"] == "up"
+    assert client.post(f"/api/stories/{ids[-1]}/chat", json={"message": "Hi", "web_search": False}).status_code == 200
+    assert len(client.get(f"/api/stories/{ids[0]}/chat").json()["messages"]) == 2
 
     llm.verdict = "UNRELATED"
     add_article(feed_id, "Volcano erupts")

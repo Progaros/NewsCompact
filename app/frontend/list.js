@@ -53,6 +53,9 @@ function statusText() {
   if (w.merge_last_finished) {
     text += ` · last merge pass ${timeAgo(w.merge_last_finished)} (${w.merge_last_checked} checked, ${w.merge_last_merged} merged)`;
   }
+  if (w.split_last_split) {
+    text += ` · last split pass ${timeAgo(w.split_last_finished)} (${w.split_last_split} split)`;
+  }
   if (w.retention_last_run) {
     text += ` · cleanup ${timeAgo(w.retention_last_run)} (${w.retention_last_deleted_articles} articles removed)`;
   }

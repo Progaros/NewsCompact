@@ -425,39 +425,55 @@ def apply_feedback(story_id: int, kind: str | None, user_id: int = 1) -> dict[st
     ``kind`` is ``"up"`` or ``"down"`` (±FEEDBACK_ALPHA·10, clamped ±10).
     """
     with db.get_conn() as conn:
-        story = conn.execute("SELECT headline, tags FROM Story WHERE id = ?", (story_id,)).fetchone()
-        if story is None:
-            return None
-        prev_rows = conn.execute(
-            "SELECT kind, tags FROM FeedbackLog WHERE user_id = ? AND story_id = ? ORDER BY id ASC",
-            (user_id, story_id),
-        ).fetchall()
-        conn.execute("DELETE FROM FeedbackLog WHERE user_id = ? AND story_id = ?", (user_id, story_id))
-        profile = get_user_profile(conn, user_id)
-        weights = profile["tag_weights"]
-        unit = config.FEEDBACK_ALPHA * 10
-        for r in prev_rows:
-            if r["kind"] not in ("up", "down"):
-                continue
-            undo = (-1.0 if r["kind"] == "up" else 1.0) * unit
-            for tag in normalize_tags(db.json_list(r["tags"])) or story_tags(story):
-                w = round(weights.get(tag, 0.0) + undo, 6)
-                if abs(w) < 1e-6:
-                    weights.pop(tag, None)
-                else:
-                    weights[tag] = max(-10.0, min(10.0, w))
-        if kind in ("up", "down"):
-            conn.execute("INSERT INTO FeedbackLog (user_id, story_id, headline, tags, kind) VALUES (?, ?, ?, ?, ?)",
-                         (user_id, story_id, story["headline"], story["tags"], kind))
-            step = (1.0 if kind == "up" else -1.0) * unit
-            for tag in story_tags(story):
-                w = round(weights.get(tag, 0.0) + step, 6)
-                if abs(w) < 1e-6:
-                    weights.pop(tag, None)
-                else:
-                    weights[tag] = max(-10.0, min(10.0, w))
-        conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = ?", (json.dumps(weights), user_id))
+        # Serialized: two quick clicks must not both reverse the same prior vote.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            profile = _apply_vote(conn, story_id, kind, user_id)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         return profile
+
+
+def _apply_vote(conn: sqlite3.Connection, story_id: int, kind: str | None,
+                user_id: int) -> dict[str, Any] | None:
+    alias = conn.execute("SELECT story_id FROM StoryAlias WHERE old_id = ?", (story_id,)).fetchone()
+    if alias is not None:
+        story_id = alias[0]
+    story = conn.execute("SELECT headline, tags FROM Story WHERE id = ?", (story_id,)).fetchone()
+    if story is None:
+        return None
+    prev_rows = conn.execute(
+        "SELECT kind, tags FROM FeedbackLog WHERE user_id = ? AND story_id = ? ORDER BY id ASC",
+        (user_id, story_id),
+    ).fetchall()
+    conn.execute("DELETE FROM FeedbackLog WHERE user_id = ? AND story_id = ?", (user_id, story_id))
+    profile = get_user_profile(conn, user_id)
+    weights = profile["tag_weights"]
+    unit = config.FEEDBACK_ALPHA * 10
+    for r in prev_rows:
+        if r["kind"] not in ("up", "down"):
+            continue
+        undo = (-1.0 if r["kind"] == "up" else 1.0) * unit
+        for tag in normalize_tags(db.json_list(r["tags"])) or story_tags(story):
+            w = round(weights.get(tag, 0.0) + undo, 6)
+            if abs(w) < 1e-6:
+                weights.pop(tag, None)
+            else:
+                weights[tag] = max(-10.0, min(10.0, w))
+    if kind in ("up", "down"):
+        conn.execute("INSERT INTO FeedbackLog (user_id, story_id, headline, tags, kind) VALUES (?, ?, ?, ?, ?)",
+                     (user_id, story_id, story["headline"], story["tags"], kind))
+        step = (1.0 if kind == "up" else -1.0) * unit
+        for tag in story_tags(story):
+            w = round(weights.get(tag, 0.0) + step, 6)
+            if abs(w) < 1e-6:
+                weights.pop(tag, None)
+            else:
+                weights[tag] = max(-10.0, min(10.0, w))
+    conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = ?", (json.dumps(weights), user_id))
+    return profile
 
 
 def feedback_log(limit: int = 200, user_id: int = 1) -> list[dict[str, Any]]:

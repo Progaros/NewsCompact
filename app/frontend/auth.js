@@ -23,20 +23,21 @@ const Auth = (() => {
     }
     applyDom();
     _notify();
-    if (state.authenticated) loadTagWeights();
+    if (state.authenticated) await loadTagWeights();
   }
 
   /* Tag weights outside the prefs modal: cached on boot + after every change so the
    * article tag buttons can show "already in my list" and offer "add to my list". */
+  function setTagWeights(weights) {
+    for (const k of Object.keys(tagWeights)) delete tagWeights[k];
+    Object.assign(tagWeights, weights || {});
+    _tagsNotify();
+  }
+
   function loadTagWeights() {
-    fetch("/api/profile")
+    return fetch("/api/profile")
       .then((res) => (res.ok ? res.json() : null))
-      .then((p) => {
-        if (!p) return;
-        for (const k of Object.keys(tagWeights)) delete tagWeights[k];
-        Object.assign(tagWeights, p.tag_weights || {});
-        _tagsNotify();
-      })
+      .then((p) => { if (p) setTagWeights(p.tag_weights); })
       .catch(() => {});
   }
 
@@ -61,9 +62,7 @@ const Auth = (() => {
       body: JSON.stringify({ tag_weights: next }) });
     if (res.ok) {
       const p = await res.json();
-      for (const k of Object.keys(tagWeights)) delete tagWeights[k];
-      Object.assign(tagWeights, p.tag_weights || {});
-      _tagsNotify();
+      setTagWeights(p.tag_weights);
     }
     return res.ok;
   }
@@ -200,6 +199,8 @@ const Auth = (() => {
       });
       if (unauth(res)) return;
       if (!res.ok) return toast(`saving failed: ${res.status}`);
+      const saved = await res.json().catch(() => null);
+      if (saved) setTagWeights(saved.tag_weights);
       close();
       toast("Preferences saved.");
       _notify();
@@ -466,7 +467,7 @@ const Auth = (() => {
       input.addEventListener("blur", commit);
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter") { e.preventDefault(); commit(); }
-        else if (e.key === "Escape") { done = true; renderWeights(box, weights); }
+        else if (e.key === "Escape") { e.stopPropagation(); done = true; renderWeights(box, weights); }
       });
     }));
     el.querySelectorAll("button[data-del]").forEach((b) => b.addEventListener("click", () => {
@@ -592,6 +593,7 @@ const Auth = (() => {
     hasTagWeight,
     tagWeight,
     addTagWeight,
+    setTagWeights,
     unauth,
     toast,
     showLoginModal,

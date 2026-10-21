@@ -9,9 +9,12 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import re
 import sqlite3
 import time
 from typing import Any, Callable
+
+import httpx
 
 from . import clustering, config, content_quality, db, dedup, harness, ingest, ollama, story
 
@@ -23,6 +26,7 @@ PENDING_WHERE = (
     "a.story_id IS NULL AND a.duplicate_of IS NULL "
     "AND COALESCE(a.content_class, 'empty') != 'broken' "
     "AND COALESCE(a.pipeline_failures, 0) < ? "
+    "AND (a.retry_after IS NULL OR a.retry_after <= datetime('now')) "
     "AND a.feed_id IN (SELECT id FROM Feed WHERE enabled = 1)"
 )
 
@@ -199,20 +203,53 @@ def _is_junk_join(conn: sqlite3.Connection, art: dict[str, Any], story_id: int) 
     return classes <= {"", "broken", "thin"}
 
 
+_WORDS = re.compile(r"\w+")
+
+
+def _words(a: dict[str, Any] | sqlite3.Row) -> set[str]:
+    return set(_WORDS.findall(f"{a['title'] or ''} {a['content_raw'] or ''}".casefold()))
+
+
+def _copy_of(conn: sqlite3.Connection, art: dict[str, Any], vec: list[float], story_id: int) -> sqlite3.Row | None:
+    """A member this article reprints: a very similar full text that already has every word of it.
+
+    Such a join can't add a fact (one new word like "verurteilt" already disqualifies it), so
+    Harness and Prompt 2 would only spend ~8 s confirming that.
+    """
+    if art.get("content_class") != "ok":
+        return None
+    v = clustering.normalize(vec)
+    members = []
+    for m in conn.execute("SELECT id, title, content_raw, quality FROM Article WHERE story_id = ? AND id != ? "
+                          "AND duplicate_of IS NULL AND content_class = 'ok' AND quality IS NOT NULL",
+                          (story_id, art["id"])):
+        w = clustering.get_vector(conn, m["id"])
+        if w is not None and (sim := clustering.dot(v, clustering.normalize(w))) >= config.COPY_SKIP_SIM:
+            members.append((sim, m))
+    words = _words(art)
+    for _, m in sorted(members, key=lambda x: -x[0]):
+        if words <= _words(m):
+            return m
+    return None
+
+
 def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = None, *,
                     anchors: clustering.AnchorCache | None = None,
                     embedded: tuple[list[float], float] | None = None) -> str:
     """Run the full pipeline for one article.
 
     ``anchors`` may be shared across a batch; ``embedded`` = ``(vector, seconds)`` from a batch
-    embedding call. Returns "ok", "failed" (counted towards the dead letter) or "unavailable"
-    (Ollama unreachable: rolled back without counting).
+    embedding call. Returns "ok", "failed" (counted towards the dead letter), "timeout" (Ollama
+    too slow: retried after a doubling delay) or "unavailable" (Ollama unreachable: rolled back
+    without counting).
     """
     wall0, cpu0 = time.perf_counter(), time.process_time()
     t: dict[str, float] = {"embed": 0.0, "cluster": 0.0, "harness": 0.0, "story": 0.0}
     story_id: int | None = None
     created = junk = False
+    copy: sqlite3.Row | None = None
     p2_chars = 0
+    ollama.take_stats()
 
     def stage(name: str, t0: float) -> float:
         t[name] = time.perf_counter() - t0
@@ -232,18 +269,27 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
             t0 = stage("cluster", t0)
 
             junk = not created and _is_junk_join(conn, art, story_id)
+            if not (created or revived or junk):
+                copy = _copy_of(conn, art, vec, story_id)
             assessment: dict[str, Any] = {}
             if junk:
                 log.info("junk-skip article=%s story=%s", art["id"], story_id)
+            elif copy is not None:
+                log.info("copy-skip article=%s story=%s copy_of=%s", art["id"], story_id, copy["id"])
+                assessment = {"quality": copy["quality"]}
             else:
                 try:
                     assessment = harness.assess_article(art.get("title") or "", art.get("content_raw") or art.get("title") or "")
+                except (httpx.TimeoutException, *ollama.UNAVAILABLE_ERRORS):
+                    raise
                 except Exception:  # noqa: BLE001 - quality stays NULL, story still updates
                     log.exception("harness failed for article %s", art["id"])
             conn.execute("UPDATE Article SET quality = ? WHERE id = ?", (assessment.get("quality"), art["id"]))
             t0 = stage("harness", t0)
 
-            if not junk:
+            if copy is not None:
+                story.refresh_quality(conn, story_id)
+            elif not junk:
                 p2_chars = story.update_story(
                     conn, story_id, breaking=bool(assessment.get("breaking")),
                     article_id=art["id"], force_full=revived,
@@ -256,7 +302,8 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
 
             wall = time.perf_counter() - wall0
             conn.execute(
-                "UPDATE Article SET pipeline_failures = 0, processed_at = datetime('now'), "
+                "UPDATE Article SET pipeline_failures = 0, pipeline_timeouts = 0, retry_after = NULL, "
+                "processed_at = datetime('now'), "
                 "t_embed_s = ?, t_cluster_s = ?, t_harness_s = ?, t_story_s = ?, t_wall_s = ? "
                 "WHERE id = ?",
                 (t["embed"], t["cluster"], t["harness"], t["story"], wall, art["id"]),
@@ -264,16 +311,27 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
             s = conn.execute("SELECT metrics FROM Story WHERE id = ?", (story_id,)).fetchone()
     except Exception as e:  # noqa: BLE001 - one bad article must not stall the queue
         unavailable = isinstance(e, ollama.UNAVAILABLE_ERRORS)
+        timed_out = not unavailable and isinstance(e, httpx.TimeoutException)
         if unavailable:
             log.warning("ollama unreachable while processing article %s: %s", art.get("id"), e)
+        elif timed_out:
+            log.warning("ollama timed out on article %s; retrying later", art.get("id"))
         else:
             log.exception("pipeline error for article %s", art.get("id"))
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE Article SET story_id = NULL, quality = NULL, "
                 "pipeline_failures = COALESCE(pipeline_failures, 0) + ? WHERE id = ?",
-                (0 if unavailable else 1, art["id"]),
+                (0 if unavailable or timed_out else 1, art["id"]),
             )
+            if timed_out:
+                n = conn.execute("UPDATE Article SET pipeline_timeouts = COALESCE(pipeline_timeouts, 0) + 1 "
+                                 "WHERE id = ? RETURNING pipeline_timeouts", (art["id"],)).fetchone()[0]
+                delay = min(config.PIPELINE_TIMEOUT_BACKOFF_MINUTES * 2 ** (n - 1), 24 * 60)
+                conn.execute("UPDATE Article SET retry_after = datetime('now', ?), "
+                             "pipeline_failures = CASE WHEN ? THEN ? ELSE pipeline_failures END WHERE id = ?",
+                             (f"+{int(delay)} minutes", n >= config.PIPELINE_MAX_TIMEOUTS,
+                              config.PIPELINE_MAX_FAILURES, art["id"]))
             if created and story_id is not None:
                 conn.execute("DELETE FROM Story WHERE id = ?", (story_id,))
             failures = conn.execute(
@@ -281,13 +339,16 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
             ).fetchone()[0]
         if failures >= config.PIPELINE_MAX_FAILURES:
             log.error("dead-letter article %s after %d failures", art["id"], failures)
-        return "unavailable" if unavailable else "failed"
+        return "unavailable" if unavailable else "timeout" if timed_out else "failed"
 
+    llm = ollama.take_stats()
     log.info(
         "perf article=%s story=%s created=%s wall=%.1fs cpu=%.1fs embed=%.2fs knn=%.2fs "
-        "harness=%.2fs p2=%.2fs p2chars=%d junk_skip=%d",
+        "harness=%.2fs p2=%.2fs p2chars=%d junk_skip=%d copy_skip=%d "
+        "llm_calls=%d load=%.1fs in=%dtok/%.1fs out=%dtok/%.1fs",
         art["id"], story_id, created, time.perf_counter() - wall0, time.process_time() - cpu0,
-        t["embed"], t["cluster"], t["harness"], t["story"], p2_chars, int(junk),
+        t["embed"], t["cluster"], t["harness"], t["story"], p2_chars, int(junk), int(copy is not None),
+        llm["calls"], llm["load_s"], llm["in_tok"], llm["in_s"], llm["out_tok"], llm["out_s"],
     )
     metrics = db.json_dict(s["metrics"]) if s is not None else {}
     if emit and metrics.get("status") == "Breaking" and (metrics.get("urgency_level") or 0) >= 8:
@@ -374,3 +435,5 @@ def _drain(result: dict[str, int], tried: set[int], emit: Callable[[dict], None]
             if outcome == "unavailable":
                 return
             result["processed" if outcome == "ok" else "failed"] += 1
+            if outcome == "timeout":  # Ollama is overloaded: pause until the next wake-up
+                return

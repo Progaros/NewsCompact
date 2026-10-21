@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any
 
-from . import bus, config, db, ingest, merge, pipeline, retention
+from . import bus, config, db, ingest, merge, pipeline, retention, split
 
 log = logging.getLogger("news.worker")
 
@@ -36,6 +36,10 @@ status: dict[str, Any] = {
     "merge_last_checked": None,
     "merge_last_merged": None,
     "merge_last_seconds": None,
+    "split_last_finished": None,
+    "split_last_checked": None,
+    "split_last_split": None,
+    "split_last_seconds": None,
     "retention_last_run": None,
     "retention_last_deleted_articles": None,
     "retention_last_deleted_stories": None,
@@ -92,12 +96,13 @@ def run_pipeline() -> dict[str, int]:
         status.update(pipeline_last_finished=db.utcnow(), pipeline_last_processed=result["processed"],
                       pipeline_last_seconds=round(secs, 1))
         merged = _run_merge()
+        splits = _run_split()
         status["pipeline_running"] = False
         if result["processed"] or result["failed"]:
             log.info("pipeline run: %d processed, %d failed in %.1fs (cpu %.1fs)",
                      result["processed"], result["failed"], secs, time.process_time() - cpu0)
-        if result["processed"] or result["failed"] or merged:
-            bus.publish({"type": "cycle_done", **result, "merged": merged})
+        if result["processed"] or result["failed"] or merged or splits:
+            bus.publish({"type": "cycle_done", **result, "merged": merged, "split": splits})
         return result
 
 
@@ -113,6 +118,20 @@ def _run_merge() -> int:
     status.update(merge_last_finished=db.utcnow(), merge_last_checked=result["checked"],
                   merge_last_merged=result["merged"], merge_last_seconds=round(time.perf_counter() - t0, 1))
     return result["merged"]
+
+
+def _run_split() -> int:
+    if _stop.is_set():
+        return 0
+    t0 = time.perf_counter()
+    try:
+        result = split.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("split pass failed")
+        return 0
+    status.update(split_last_finished=db.utcnow(), split_last_checked=result["checked"],
+                  split_last_split=result["split"], split_last_seconds=round(time.perf_counter() - t0, 1))
+    return result["split"]
 
 
 def refresh() -> dict[str, Any]:

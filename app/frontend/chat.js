@@ -68,7 +68,7 @@ const Chat = (() => {
     return html;
   }
 
-  const STEP_ICONS = { thinking: "\u{1F4AD}", search: "\u{1F50D}", read: "\u{1F4C4}", error: "\u26A0" };
+  const STEP_ICONS = { thinking: "\u{1F4AD}", search: "\u{1F50D}", read: "\u{1F4C4}", error: "\u26A0", stopped: "\u23F9" };
 
   // Agent steps are collapsed one-liners; text goes in via textContent (model/web content).
   function upsertStep(container, step) {
@@ -105,9 +105,14 @@ const Chat = (() => {
     }
     div.innerHTML = `<span class="chat-who">${who}</span><div class="chat-steps"></div><span class="chat-body"></span>`;
     const box = div.querySelector(".chat-steps");
-    for (const s of steps || []) upsertStep(box, s);
+    const stoppedStep = (steps || []).find((s) => s.kind === "stopped");
+    const errorStep = !text && !stoppedStep ? (steps || []).find((s) => s.kind === "error") : null;
+    for (const s of steps || []) if (s.kind !== "stopped") upsertStep(box, s);
     div.querySelector(".chat-body").innerHTML = working
-      ? `<span class="chat-thinking">Working\u2026</span>` : mdToHtml(text);
+      ? `<span class="chat-thinking">Working\u2026</span>`
+      : mdToHtml(text)
+        + (stoppedStep ? `<p class="chat-cancelled">${esc(stoppedStep.title)}</p>` : "")
+        + (errorStep ? `<p class="chat-error">${esc(errorStep.detail || errorStep.title)}</p>` : "");
     return div;
   }
 
@@ -194,7 +199,7 @@ const Chat = (() => {
   }
 
   function stopSend() {
-    streams.get(currentStory)?.abort(); // the only abort path
+    streams.get(currentStory)?.controller.abort(); // the only abort path
   }
 
   function loadHistory(storyId, input) {
@@ -205,13 +210,27 @@ const Chat = (() => {
       })
       .then((d) => {
         const box = document.getElementById("chat-messages");
-        if (!d || !box) return; // popup closed meanwhile
+        if (!d || !box || currentStory !== storyId) return; // popup closed or switched meanwhile
         renderMessages(d.messages);
-        if (streams.has(storyId)) {
-          // This story's stream was started before the close: add a
-          // "Working…" placeholder; the stream's terminal refresh() re-renders.
-          box.appendChild(msgEl("assistant", "", [], true));
+        const st = streams.get(storyId);
+        if (st) {
+          // This story's stream was started before the close: rebind a live
+          // reply element with all steps/text gathered so far so streaming continues.
+          box.querySelector(".chat-empty")?.remove();
+          if (!d.messages.length || d.messages[d.messages.length - 1].role !== "user") {
+            box.appendChild(msgEl("user", st.question));
+          }
+          const reply = msgEl("assistant", st.answer, st.steps, !st.answer);
+          if (!st.answer) {
+            const t = reply.querySelector(".chat-thinking");
+            if (t) t.textContent = st.status;
+          }
+          box.appendChild(reply);
+          st.reply = reply;
+          renderQueue();
+          box.scrollTop = box.scrollHeight;
         }
+        syncSendBtn();
         input.focus();
       })
       .catch(() => { /* history is non-critical; the input still works */ });
@@ -224,13 +243,21 @@ const Chat = (() => {
     box.innerHTML = "";
     if (!messages.length) {
       box.innerHTML = `<div class="chat-empty">Ask a question about this story.</div>`;
+      renderQueue();
       return;
     }
     for (const m of messages) {
       const el = msgEl(m.role, m.content, m.steps);
+      if (m.id != null) el.dataset.id = m.id;
       if (m.role === "user") addMsgTools(el, m);
       else if (m.content) addAnswerTools(el, m);
       box.appendChild(el);
+    }
+    if (!busyFor(currentStory) && messages.length) {
+      const last = messages[messages.length - 1];
+      const retryable = last.role === "user"
+        || (last.role === "assistant" && (!last.content || (last.steps || []).some((s) => s.kind === "stopped" || s.kind === "error")));
+      if (retryable) attachRetry(currentStory, messages);
     }
     renderQueue();
     box.scrollTop = box.scrollHeight;
@@ -247,8 +274,8 @@ const Chat = (() => {
     const div = document.createElement("div");
     div.className = "chat-queue";
     div.appendChild(document.createTextNode(`⏳ ${q.length} queued · `));
-    // inserted in reverse so the items end up in queue order
-    for (let i = q.length - 1; i >= 0; i--) {
+    for (let i = 0; i < q.length; i++) {
+      if (i > 0) div.appendChild(document.createTextNode(" · "));
       const p = q[i];
       const t = p.text || "";
       const item = document.createElement("span");
@@ -259,9 +286,8 @@ const Chat = (() => {
       x.className = "chat-queue-x";
       x.title = "Remove queued message";
       x.textContent = "\u00D7";
-      x.onclick = () => { q.splice(i, 1); renderQueue(); };
+      x.onclick = () => { q.splice(i, 1); renderQueue(); syncSendBtn(); };
       item.appendChild(x);
-      div.appendChild(document.createTextNode(" · "));
       div.appendChild(item);
     }
     box.appendChild(div);
@@ -361,11 +387,11 @@ const Chat = (() => {
     } catch { return null; }
   }
 
-  // "Retry" pill under a stopped answer: resends the question as a new
-  // version (edit_of) rather than a fresh duplicate.
+  // "Retry" pill under a stopped or failed answer: resends the question as
+  // a new version (edit_of) rather than a fresh duplicate.
   function attachRetry(storyId, messages) {
     const box = document.getElementById("chat-messages");
-    if (currentStory !== storyId || !box) return;
+    if (currentStory !== storyId || !box || box.querySelector(".chat-retry")) return;
     let qi = -1;
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { qi = i; break; }
     const els = box.querySelectorAll(".chat-msg");
@@ -387,7 +413,7 @@ const Chat = (() => {
   function send(edited = null, editOf = null, editEl = null) {
     const storyId = currentStory;
     const input = document.getElementById("chat-input");
-    const text = (edited ?? input.value ?? "").trim();
+    const text = (edited ?? input?.value ?? "").trim();
     if (!text || !storyId) return;
     if (busyFor(storyId)) {
       let q = queues.get(storyId);
@@ -404,42 +430,58 @@ const Chat = (() => {
   // A stream belongs to a story, not to the popup: it's registered in
   // `streams` synchronously (before the first await) and may outlive this
   // box — closing or switching stories detaches the DOM, from then on
-  // writes are no-ops, but the fetch keeps going. On every stream end,
-  // history is re-fetched (question and partial/full answer are already
-  // persisted server-side), so ✎ and version arrows always exist afterward.
+  // writes are no-ops (until reopened), while the fetch keeps going. On every
+  // stream end, history is re-fetched so ✎ and version arrows always exist.
   async function doSend(storyId, text, editOf = null, editEl = null, isNew = true) {
-    const input = document.getElementById("chat-input");
-    const box = document.getElementById("chat-messages");
-    box.querySelector(".chat-empty")?.remove();
-    if (editEl) {
-      while (editEl.nextSibling) editEl.nextSibling.remove();
-      editEl.remove();
+    const visible = () => currentStory === storyId;
+    const input = visible() ? document.getElementById("chat-input") : null;
+    const box = visible() ? document.getElementById("chat-messages") : null;
+    let reply = null;
+    if (box) {
+      box.querySelector(".chat-empty")?.remove();
+      box.querySelector(".chat-retry")?.remove();
+      const target = (editOf != null ? box.querySelector(`.chat-msg[data-id="${Number(editOf)}"]`) : null) || editEl;
+      if (target && box.contains(target)) {
+        while (target.nextSibling) target.nextSibling.remove();
+        target.remove();
+      }
+      reply = msgEl("assistant", "", [], true);
+      box.appendChild(msgEl("user", text));
+      box.appendChild(reply);
+      renderQueue();
+      if (isNew && input) input.value = "";
+      box.scrollTop = box.scrollHeight;
     }
-    const reply = msgEl("assistant", "", [], true);
-    if (!editEl) box.appendChild(msgEl("user", text));
-    box.appendChild(reply);
-    if (isNew) input.value = "";
-    box.scrollTop = box.scrollHeight;
     const controller = new AbortController();
-    streams.set(storyId, controller); // before any awaits: Stop button effective immediately
-    syncSendBtn();
+    const st = {
+      controller,
+      question: text,
+      steps: [],
+      answer: "",
+      status: "Working\u2026",
+      reply,
+    };
+    streams.set(storyId, st); // before any awaits: Stop button effective immediately
+    if (visible()) syncSendBtn();
 
-    const stepsBox = reply.querySelector(".chat-steps");
-    const bodyEl = reply.querySelector(".chat-body");
-    let answer = "";
     let rendered = 0;
     let failed = "";
     let cancelled = false;
-    let unauth = false;
-    const setStatus = (s) => { const t = bodyEl.querySelector(".chat-thinking"); if (t) t.textContent = s; };
+    const setStatus = (s) => {
+      st.status = s;
+      const t = st.reply?.querySelector(".chat-thinking");
+      if (t) t.textContent = s;
+    };
     const render = () => {
-      rendered = answer.length;
-      if (!reply.isConnected) return; // box got unmounted meanwhile (popup closed)
-      bodyEl.innerHTML = mdToHtml(answer)
-        + (cancelled ? `<p class="chat-cancelled">Stopped — answer interrupted${answer ? " (partial)" : ""}</p>` : "")
+      rendered = st.answer.length;
+      const r = st.reply;
+      const b = visible() ? document.getElementById("chat-messages") : null;
+      if (!r || !r.isConnected || !b) return;
+      r.querySelector(".chat-body").innerHTML = mdToHtml(st.answer)
+        + (cancelled ? `<p class="chat-cancelled">Stopped — answer interrupted${st.answer ? " (partial)" : ""}</p>` : "")
         + (failed ? `<p class="chat-error">${esc(failed)}</p>` : "");
-      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-      if (nearBottom) box.scrollTop = box.scrollHeight;
+      const nearBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+      if (nearBottom) b.scrollTop = b.scrollHeight;
     };
     try {
       const res = await fetch(`/api/stories/${storyId}/chat`, {
@@ -449,7 +491,7 @@ const Chat = (() => {
         signal: controller.signal,
       });
       if (Auth.unauth(res)) {
-        reply.remove();
+        st.reply?.remove();
         return; // finally: streams.delete() runs; Send state stays consistent (unauth → streams.has() false)
       }
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -467,16 +509,24 @@ const Chat = (() => {
           if (!line) continue;
           const ev = JSON.parse(line);
           if (ev.type === "step") {
-            upsertStep(stepsBox, ev.step);
-            if (!answer) setStatus(ev.step.status === "running" ? ev.step.title : "Working\u2026");
-          } else if (ev.type === "thinking") appendThinking(stepsBox, ev.text);
-          else if (ev.type === "delta") answer += ev.text;
+            const idx = st.steps.findIndex((s) => s.id === ev.step.id);
+            if (idx >= 0) st.steps[idx] = { ...st.steps[idx], ...ev.step };
+            else st.steps.push({ ...ev.step });
+            const sb = st.reply?.querySelector(".chat-steps");
+            if (sb && ev.step.kind !== "stopped") upsertStep(sb, ev.step);
+            if (!st.answer) setStatus(ev.step.status === "running" ? ev.step.title : "Working\u2026");
+          } else if (ev.type === "thinking") {
+            const run = st.steps.find((s) => s.kind === "thinking" && s.status === "running");
+            if (run) run.detail = (run.detail || "") + ev.text;
+            const sb = st.reply?.querySelector(".chat-steps");
+            if (sb) appendThinking(sb, ev.text);
+          } else if (ev.type === "delta") st.answer += ev.text;
           else if (ev.type === "error") failed = ev.text;
           // "done" carries no payload; the end of the stream is the signal.
         }
-        if (answer.length > rendered) render();
+        if (st.answer.length > rendered) render();
       }
-      if (!answer && !failed && !cancelled) failed = "No answer.";
+      if (!st.answer && !failed && !cancelled) failed = "No answer.";
       render();
     } catch (err) {
       cancelled = !!(controller.signal.aborted || (err && err.name === "AbortError"));
@@ -486,18 +536,29 @@ const Chat = (() => {
       streams.delete(storyId);
     }
     // Normalize: re-fetch → re-render (ids + versions → ✎, version arrows),
-    // plus add a "Retry" pill when the user interrupted the answer.
+    // plus add a "Retry" pill when the answer was interrupted or failed.
     const messages = await refresh(storyId);
-    if (cancelled && messages) attachRetry(storyId, messages);
-    syncSendBtn();
+    if (cancelled && messages && visible()) {
+      // If the server generator is still unwinding its current call, synthesize
+      // the interrupted reply locally so the partial answer and Stop marker stay visible.
+      const last = messages[messages.length - 1];
+      if (!last || last.role === "user") {
+        const steps = st.steps.map((s) => (s.status === "running"
+          ? { ...s, status: s.kind === "thinking" ? "ok" : "warn", title: s.kind === "thinking" ? "Thought (interrupted)" : `${s.title} (stopped)` }
+          : s));
+        steps.push({ id: steps.length, kind: "stopped", title: `Stopped — answer interrupted${st.answer ? " (partial)" : ""}`, status: "warn" });
+        renderMessages([...messages, { role: "assistant", content: st.answer, steps }]);
+      }
+    }
+    if (visible()) syncSendBtn();
     drain(storyId);
   }
 
   function drain(storyId) {
     const q = queues.get(storyId);
-    if (storyId !== currentStory || busyFor(storyId) || !q || !q.length) return;
+    if (busyFor(storyId) || !q || !q.length) return;
     const next = q.shift();
-    renderQueue();
+    if (storyId === currentStory) renderQueue();
     doSend(storyId, next.text, next.editOf, next.editEl, next.isNew);
   }
 

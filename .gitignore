@@ -17,8 +17,7 @@ wheels/
 news.pid
 *.log
 *.log.*.gz
-server.out
-monitor.out
+*.out
 false_negatives.md
 .env
 

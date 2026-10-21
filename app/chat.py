@@ -44,7 +44,7 @@ def story_system_prompt(story: dict, about: str = "") -> str:
     tags = story.get("tags") or []
     arts = story.get("articles") or []
     lines = []
-    for a in arts:
+    for a in arts[: config.CHAT_STORY_MAX_ARTICLES]:
         src = " / ".join(p for p in (a.get("feed"), a.get("author")) if p)
         url = a.get("url") or ""
         line = f"- {a.get('title') or '(untitled)'}"
@@ -53,6 +53,8 @@ def story_system_prompt(story: dict, about: str = "") -> str:
         if url:
             line += f" [{url}]"
         lines.append(line)
+    if len(arts) > config.CHAT_STORY_MAX_ARTICLES:
+        lines.append(f"- … and {len(arts) - config.CHAT_STORY_MAX_ARTICLES} older articles")
     parts = [
         "STORY CONTEXT",
         f"Headline: {story.get('headline') or '(unknown)'}",
@@ -132,8 +134,16 @@ def _gather_context(story: dict, user_question: str,
     """Let the agent run search+scrape turns until it is satisfied (or hits the safety cap)."""
     context = ""
     seen_queries: set[str] = set()
+    deadline = time.monotonic() + config.CHAT_SEARCH_MAX_SECONDS
+
+    def out_of_time() -> bool:
+        return time.monotonic() >= deadline
+
     for turn in range(config.CHAT_SEARCH_MAX_TURNS):
         if len(context) >= config.CHAT_CONTEXT_MAX:
+            break
+        if out_of_time():
+            yield "step", add_step(steps, "search", "Search time limit reached", status="warn")
             break
         step = add_step(steps, "search", "Planning web search…")
         yield "step", step
@@ -167,7 +177,7 @@ def _gather_context(story: dict, user_question: str,
         yield "step", step
         added = False
         for res in results:
-            if len(context) >= config.CHAT_CONTEXT_MAX:
+            if len(context) >= config.CHAT_CONTEXT_MAX or out_of_time():
                 break
             name = res.get("title") or res["url"]
             read = add_step(steps, "read", f"Reading {name}", detail=res["url"])

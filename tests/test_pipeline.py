@@ -54,6 +54,91 @@ def test_stale_story_is_revived(feed_id, llm):
     assert _story_of(first) == _story_of(second)
 
 
+def test_ollama_timeouts_back_off_instead_of_dead_lettering(feed_id, llm, monkeypatch):
+    import httpx
+
+    from app import ollama
+
+    real = llm.structured
+
+    def slow(schema, messages, **kw):
+        if "breaking" in schema["properties"]:
+            raise httpx.ReadTimeout("timed out")
+        return real(schema, messages, **kw)
+
+    monkeypatch.setattr(ollama, "structured", slow)
+    aid = add_article(feed_id, "Flood hits town")
+    add_article(feed_id, "Market rallies")
+    assert pipeline.process_pending() == {"processed": 0, "failed": 1}  # paused after the first timeout
+    with db.get_conn() as conn:
+        a = conn.execute("SELECT * FROM Article WHERE id = ?", (aid + 1,)).fetchone()  # newest goes first
+        assert conn.execute("SELECT count(*) FROM Story").fetchone()[0] == 0
+    assert a["pipeline_failures"] == 0 and a["pipeline_timeouts"] == 1 and a["retry_after"]
+    assert pipeline.process_pending() == {"processed": 0, "failed": 1}  # the other article, then pause
+    assert pipeline.process_pending() == {"processed": 0, "failed": 0}  # both waiting out their backoff
+
+    for _ in range(config.PIPELINE_MAX_TIMEOUTS - 1):
+        with db.get_conn() as conn:
+            conn.execute("UPDATE Article SET retry_after = NULL WHERE id = ?", (aid,))
+        pipeline.process_pending()
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT pipeline_failures FROM Article WHERE id = ?", (aid,)).fetchone()[0] == \
+            config.PIPELINE_MAX_FAILURES  # parked after PIPELINE_MAX_TIMEOUTS in a row
+
+    monkeypatch.setattr(ollama, "structured", real)
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Article SET retry_after = NULL WHERE id = ?", (aid + 1,))
+    assert pipeline.process_pending() == {"processed": 1, "failed": 0}
+    with db.get_conn() as conn:
+        ok = conn.execute("SELECT pipeline_timeouts, retry_after FROM Article WHERE id = ?", (aid + 1,)).fetchone()
+    assert tuple(ok) == (0, None)
+
+
+def test_verifier_timeout_retries_the_article_instead_of_a_new_story(feed_id, llm, monkeypatch):
+    import httpx
+
+    from app import ollama
+
+    add_article(feed_id, "Flood hits town")
+    pipeline.process_pending()
+    real = llm.structured
+
+    def slow_verify(schema, messages, **kw):
+        if "classifications" in schema["properties"]:
+            raise httpx.ReadTimeout("timed out")
+        return real(schema, messages, **kw)
+
+    monkeypatch.setattr(ollama, "structured", slow_verify)
+    second = add_article(feed_id, "Flood update")
+    assert pipeline.process_pending() == {"processed": 0, "failed": 1}
+    assert _story_of(second) is None
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT count(*) FROM Story").fetchone()[0] == 1
+
+
+def test_long_summary_is_shortened_then_clipped(feed_id, llm, monkeypatch):
+    from app import ollama, story
+
+    monkeypatch.setattr(config, "SUMMARY_MAX_CHARS", 120)
+    real, asks = llm.structured, []
+
+    def wordy(schema, messages, **kw):
+        out = real(schema, messages, **kw)
+        if "summary" in schema["properties"]:
+            asks.append(messages[-1]["content"])
+            out["summary"] = "A fact about the flood. " * (12 if len(asks) == 1 else 6)
+        return out
+
+    monkeypatch.setattr(ollama, "structured", wordy)
+    aid = add_article(feed_id, "Flood hits town")
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        summary = conn.execute("SELECT summary FROM Story WHERE id = ?", (_story_of(aid),)).fetchone()[0]
+    assert len(asks) == 2 and "the limit is 120" in asks[1]
+    assert len(summary) <= 120 and summary.endswith("flood.")
+    assert story.clip_summary("word " * 40).endswith("…")
+
+
 def test_boilerplate_bodies_are_reextracted_and_stories_rewritten(feed_id, llm, monkeypatch):
     from app import ingest
 
@@ -227,3 +312,38 @@ def test_junk_join_skips_llm_calls(feed_id, llm):
     pipeline.process_pending()
     assert _story_of(first) == _story_of(second)
     assert llm.calls == ["verify"]
+
+
+def test_word_for_word_copy_skips_harness_and_prompt2(feed_id, llm):
+    body = "Flood waters rose in the town overnight. " * 40
+    first = add_article(feed_id, "Flood hits town", body=body)
+    pipeline.process_pending()
+    with db.get_conn() as conn:
+        summary = conn.execute("SELECT summary FROM Story").fetchone()[0]
+    llm.calls.clear()
+    copy = add_article(feed_id, "Flood hits the town", body=body[: len(body) // 2])  # reprint, shortened
+    pipeline.process_pending()
+    assert _story_of(copy) == _story_of(first)
+    assert llm.calls == ["verify"]
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT quality FROM Article WHERE id = ?", (copy,)).fetchone()[0] == 7
+        assert conn.execute("SELECT summary FROM Story").fetchone()[0] == summary
+
+    llm.calls.clear()
+    update = add_article(feed_id, "Flood hits town", body=body + "Two people died.",
+                         url="https://example.org/flood-update")
+    pipeline.process_pending()
+    assert _story_of(update) == _story_of(first)
+    assert llm.calls == ["verify", "harness", "story"]  # one new word is a possible new fact
+
+
+def test_ollama_timings_are_collected_per_thread():
+    from app import ollama
+
+    ollama.take_stats()
+    ollama._record({"load_duration": 2e9, "prompt_eval_count": 900, "prompt_eval_duration": 5e8,
+                    "eval_count": 300, "eval_duration": 6e9})
+    ollama._record({"prompt_eval_count": 100, "prompt_eval_duration": 1e8, "eval_count": 20, "eval_duration": 4e8})
+    assert ollama.take_stats() == {"calls": 2, "load_s": 2.0, "in_tok": 1000, "in_s": 0.6,
+                                   "out_tok": 320, "out_s": 6.4}
+    assert ollama.take_stats()["calls"] == 0

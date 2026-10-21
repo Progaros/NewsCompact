@@ -124,3 +124,32 @@ def test_fetch_error_is_recorded(feed_id, monkeypatch):
     assert ingest.ingest_feed(feed) == 0
     with db.get_conn() as conn:
         assert "refused" in conn.execute("SELECT last_error FROM Feed").fetchone()[0]
+
+
+def test_failing_feed_backs_off_and_recovers(feed_id, monkeypatch):
+    calls = []
+
+    def boom(url, *_a):
+        calls.append(url)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(ingest, "fetch", boom)
+    ingest.ingest_all()
+    ingest.ingest_all()  # still inside the backoff window
+    assert len(calls) == 1
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT fetch_failures FROM Feed").fetchone()[0] == 1
+        conn.execute("UPDATE Feed SET next_fetch_at = datetime('now', '-1 second')")
+    ingest.ingest_all()
+    with db.get_conn() as conn:
+        failures, wait = conn.execute("SELECT fetch_failures, (julianday(next_fetch_at) - julianday('now')) * 86400 "
+                                      "FROM Feed").fetchone()
+    assert failures == 2 and wait > config.WORKER_INTERVAL_SECONDS * 1.5  # doubled
+
+    monkeypatch.setattr(ingest, "fetch", lambda url, *_a: _response(RSS))
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Feed SET next_fetch_at = datetime('now', '-1 second')")
+    ingest.ingest_all()
+    with db.get_conn() as conn:
+        assert tuple(conn.execute("SELECT fetch_failures, next_fetch_at, last_error FROM Feed").fetchone()) == (
+            0, None, None)

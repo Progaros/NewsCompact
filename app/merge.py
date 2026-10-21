@@ -21,6 +21,8 @@ import sqlite3
 import time
 from typing import Callable
 
+import httpx
+
 from . import clustering, config, db, harness, ollama, story
 
 log = logging.getLogger("news.merge")
@@ -79,7 +81,10 @@ def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
     """Move everything from story ``drop`` into ``keep`` and delete ``drop``."""
     moved = [r[0] for r in conn.execute("SELECT id FROM Article WHERE story_id = ?", (drop,))]
     conn.execute("UPDATE Article SET story_id = ? WHERE story_id = ?", (keep, drop))
+    conn.execute("DELETE FROM FeedbackLog WHERE story_id = ? AND user_id IN "
+                 "(SELECT user_id FROM FeedbackLog WHERE story_id = ?)", (drop, keep))
     conn.execute("UPDATE FeedbackLog SET story_id = ? WHERE story_id = ?", (keep, drop))
+    conn.execute("UPDATE OR IGNORE StoryRead SET story_id = ? WHERE story_id = ?", (keep, drop))
     conn.execute("UPDATE StoryUpdate SET story_id = ? WHERE story_id = ?", (keep, drop))
     conn.execute("UPDATE ChatSession SET story_id = ? WHERE story_id = ? AND user_id NOT IN "
                  "(SELECT user_id FROM ChatSession WHERE story_id = ?)", (keep, drop, keep))
@@ -156,7 +161,11 @@ def run(should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
             if s is None:  # absorbed earlier in this run
                 continue
             result["checked"] += 1
-            verified, keep, drop = _check(conn, s, candidates_since, index, anchors)
+            try:
+                verified, keep, drop = _check(conn, s, candidates_since, index, anchors)
+            except (httpx.TimeoutException, *ollama.UNAVAILABLE_ERRORS) as e:
+                log.warning("merge pass paused at story %s: %s", s["id"], type(e).__name__)
+                break
             result["verified"] += int(verified)
             conn.execute("UPDATE Story SET merge_checked_at = datetime('now') WHERE id = ?", (s["id"],))
             if keep is None:

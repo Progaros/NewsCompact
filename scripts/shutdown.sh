@@ -11,7 +11,8 @@ PID_FILE="${NEWS_PID_FILE:-news.pid}"
 
 is_ours() {  # guards against a stale PID file pointing at a reused PID
   [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null \
-    && tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q "main.py"
+    && tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null \
+    | grep -qE "main\.py|uvicorn.*app\.api"
 }
 
 pid=""

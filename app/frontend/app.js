@@ -21,8 +21,21 @@ let lastPoll = 0;
 // Expanded parts survive live re-renders: details (tags, metrics) and the source list.
 const openIds = new Set();
 const sourcesOpenIds = new Set();
-// Marked read during this page visit: stay visible (faded) until the next reload.
+// Marked read during this page visit: stay visible (faded) with their "New since you read it"
+// delta until the next manual refresh or reload pill.
 const sessionReadIds = new Set();
+const sessionChanges = new Map();
+let touchActiveId = null;
+
+function setTouchActive(card) {
+  const nextId = card?._data?.id ?? null;
+  if (touchActiveId === nextId && (!card || card.classList.contains("touch-active"))) return;
+  touchActiveId = nextId;
+  document.querySelectorAll("story-card.touch-active").forEach((el) => {
+    if (el !== card) el.classList.remove("touch-active");
+  });
+  if (card) card.classList.add("touch-active");
+}
 const state = {
   stories: [],
   shown: 0,
@@ -93,8 +106,10 @@ class StoryCard extends HTMLElement {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ story_id: this._data.id, kind: next }),
-    }).then((res) => {
+    }).then(async (res) => {
       if (Auth.unauth(res) || !res.ok) return;
+      const body = await res.json().catch(() => null);
+      if (body?.profile?.tag_weights) Auth.setTagWeights(body.profile.tag_weights);
       this._data.vote = next;
       this.querySelectorAll(".fb[data-kind]").forEach((b) => {
         const on = b.dataset.kind === next;
@@ -106,20 +121,63 @@ class StoryCard extends HTMLElement {
     });
   }
 
+  _rememberChanges() {
+    const d = this._data;
+    if (d.changes?.length && !sessionChanges.has(d.id)) {
+      sessionChanges.set(d.id, { changes: d.changes, read_at: d.prev_read_at || d.read_at });
+    }
+    if (d.read_at && !d.prev_read_at) d.prev_read_at = d.read_at;
+  }
+
+  _syncReadDom() {
+    const d = this._data;
+    const isRead = d.read === "read";
+    const updated = d.read === "updated";
+    const showChanges = (updated || (isRead && sessionReadIds.has(d.id))) && d.changes?.length;
+    if ((showChanges && !this.querySelector(".changes")) || (updated && !this.querySelector(".badge-updated"))) {
+      this.render();
+      return;
+    }
+    this.classList.toggle("is-read", isRead);
+    this.classList.toggle("is-updated", updated);
+    const readTitle = { read: "Read — click to mark as unread", updated: "Updated since you read it — click to mark as read again" }[d.read]
+      || "Mark as read";
+    const readBtn = this.querySelector(".read-btn");
+    if (readBtn) {
+      readBtn.setAttribute("aria-pressed", isRead);
+      readBtn.title = readTitle;
+      readBtn.setAttribute("aria-label", readTitle);
+      readBtn.innerHTML = updated ? ICON_UPDATED : ICON_CHECK;
+    }
+    if (!updated) this.querySelector(".badge-updated")?.remove();
+    if (!showChanges) {
+      this.querySelector(".changes")?.remove();
+      this.querySelectorAll(".new-badge").forEach((el) => el.remove());
+    }
+  }
+
   async _toggleRead() {
     const d = this._data;
+    const prevRead = d.read, prevReadAt = d.read_at, prevPrevReadAt = d.prev_read_at;
+    const hadSessionRead = sessionReadIds.has(d.id);
     const markRead = d.read !== "read";
-    const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE" });
-    if (Auth.unauth(res) || !res.ok) return;
     if (markRead) {
       // Keep d.changes for the rest of the page visit: the "New since you
       // read it" block stays under the freshly-marked story until a refresh.
+      this._rememberChanges();
       Object.assign(d, { read: "read", read_at: utcNowDb() });
       sessionReadIds.add(d.id);
     } else {
       d.read = null;
+      sessionReadIds.delete(d.id);
     }
-    this.render();
+    this._syncReadDom();
+    const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE" });
+    if (Auth.unauth(res) || !res.ok) {
+      Object.assign(d, { read: prevRead, read_at: prevReadAt, prev_read_at: prevPrevReadAt });
+      if (hadSessionRead) sessionReadIds.add(d.id); else sessionReadIds.delete(d.id);
+      this._syncReadDom();
+    }
   }
 
   render() {
@@ -135,10 +193,12 @@ class StoryCard extends HTMLElement {
     const location = m.location && !/^global\b/i.test(m.location) ? `<span>📍 ${esc(m.location)}</span>` : "";
     const tags = (d.tags || []).map((t) => tagButton(t)).join("");
     const updated = d.read === "updated";
+    const showChanges = (updated || (d.read === "read" && sessionReadIds.has(d.id))) && d.changes?.length;
+    const sinceAt = d.prev_read_at || d.read_at;
     const articleRows = articles.map((a) => {
       const src = [a.feed || hostname(a.url), a.author].filter(Boolean).join(" · ");
       const when = a.published_date ? ` · ${esc(timeAgo(a.published_date))}` : "";
-      const isNew = updated && d.read_at && (a.created_at || "") > d.read_at;
+      const isNew = (updated || showChanges) && sinceAt && (a.created_at || "") > sinceAt;
       return `<li class="article">
           ${isNew ? `<span class="new-badge">new</span>` : ""}<a href="${esc(safeUrl(a.url))}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>
           <div class="src">${esc(src)}${when}</div>
@@ -147,7 +207,6 @@ class StoryCard extends HTMLElement {
     const newCount = updated ? articles.filter((a) => (a.created_at || "") > (d.read_at || "")).length : 0;
     // Freshly-marked (this session) stories keep showing the delta until a
     // page reload / refresh replaces this state.
-    const showChanges = (updated || (d.read === "read" && sessionReadIds.has(d.id))) && d.changes?.length;
     const changes = showChanges
       ? `<div class="changes"><span class="changes-label">New since you read it</span><ul>${d.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></div>` : "";
     const related = (d.related || []).map((r) =>
@@ -160,7 +219,7 @@ class StoryCard extends HTMLElement {
     const summary = clampSummary(fullSummary);
 
     this.className = [urgencyClass(m.urgency_level), breaking ? "breaking" : "", open ? "open" : "", srcOpen ? "src-open" : "",
-      d.read === "read" ? "is-read" : "", updated ? "is-updated" : ""].filter(Boolean).join(" ");
+      d.read === "read" ? "is-read" : "", updated ? "is-updated" : "", touchActiveId === d.id ? "touch-active" : ""].filter(Boolean).join(" ");
     this.innerHTML = `
       <button type="button" class="read-btn" aria-pressed="${d.read === "read"}" title="${readTitle}" aria-label="${readTitle}">
         ${updated ? ICON_UPDATED : ICON_CHECK}
@@ -219,13 +278,14 @@ class StoryCard extends HTMLElement {
       const openNow = toggleIn(openIds, d.id, this, "open");
       body.setAttribute("aria-expanded", openNow);
       setSummary(openNow);
+      return openNow;
     };
-    // Selecting summary text must not toggle the card. Clicking a story
-    // that you haven't read marks it read instead of expanding details.
+    // Selecting summary text must not toggle the card. Opening an unread or
+    // updated story also marks it read (signed in only).
     const onClick = () => {
       if (String(window.getSelection())) return;
-      if (!this._data.read) return this._toggleRead();
-      toggleDetails();
+      const openNow = toggleDetails();
+      if (openNow && Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
     };
     body.addEventListener("click", onClick);
     body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } });
@@ -251,7 +311,7 @@ tagMenuEl.className = "tag-menu";
 tagMenuEl.hidden = true;
 tagMenuEl.setAttribute("role", "menu");
 document.body.appendChild(tagMenuEl);
-let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0;
+let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0;
 
 function tagMenuRender() {
   const tag = tagMenuTag;
@@ -273,7 +333,6 @@ function tagMenuRender() {
       Auth.addTagWeight(tag, clamped).finally(() => {
         pending = false;
         refreshTagButtons();
-        if (tagMenuTag === tag) tagMenuRender();
       });
     };
     weight.addEventListener("click", (e) => e.stopPropagation());
@@ -295,7 +354,10 @@ function tagMenuRender() {
   tagMenuEl.querySelector("#tag-menu-filter").addEventListener("click", (e) => { e.stopPropagation(); closeTagMenu(); setTag(tag); });
 }
 
-function openTagMenu(tag, anchor) {
+function openTagMenu(tag, anchor, fromHover = false) {
+  clearTimeout(tagMenuHoverTimer);
+  clearTimeout(tagMenuCloseTimer);
+  if (fromHover) tagMenuHoverOpenedAt = Date.now();
   if (tagMenuTag !== tag) {
     tagMenuTag = tag;
     tagMenuRender();
@@ -324,23 +386,33 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".tag");
   if (btn) {
     if (!Auth.state.authenticated) { setTag(btn.dataset.tag); return; }
-    if (tagMenuTag === btn.dataset.tag) closeTagMenu();
-    else openTagMenu(btn.dataset.tag, btn);
+    if (tagMenuTag === btn.dataset.tag && Date.now() - tagMenuHoverOpenedAt >= 600) closeTagMenu();
+    else openTagMenu(btn.dataset.tag, btn, false);
     return;
   }
   if (!tagMenuEl.hidden && !tagMenuEl.contains(e.target)) closeTagMenu();
 });
+document.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse") {
+    if (touchActiveId !== null) setTouchActive(null);
+    return;
+  }
+  const card = e.target.closest?.("story-card");
+  if (card) setTouchActive(card);
+  else if (!e.target.closest?.(".tag-menu, #chat-popup")) setTouchActive(null);
+});
 document.addEventListener("pointerover", (e) => {
   if (e.pointerType !== "mouse") return; // touch = tap-toggle via click only
+  if (touchActiveId !== null) setTouchActive(null);
   clearTimeout(tagMenuCloseTimer);
   const btn = e.target.closest?.(".tag");
   if (btn) {
     clearTimeout(tagMenuHoverTimer);
     const b = btn;
-    tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b), 250);
+    tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b, true), 250);
     return;
   }
-  if (tagMenuEl.contains(e.target) || tagMenuEl.hidden || tagMenuTag === null) return;
+  if (tagMenuEl.contains(e.target) || tagMenuEl.contains(document.activeElement) || tagMenuEl.hidden || tagMenuTag === null) return;
   clearTimeout(tagMenuHoverTimer);
   tagMenuCloseTimer = setTimeout(closeTagMenu, 400);
 });
@@ -409,35 +481,42 @@ async function fetchStories(limit) {
   const res = await fetch(storiesUrl(limit));
   if (!res.ok) return false;
   const data = await res.json();
+  for (const s of data.stories) {
+    if (s.changes?.length) {
+      sessionChanges.set(s.id, { changes: s.changes, read_at: s.read_at });
+    } else if (sessionReadIds.has(s.id) && sessionChanges.has(s.id)) {
+      const saved = sessionChanges.get(s.id);
+      s.changes = saved.changes;
+      s.prev_read_at = saved.read_at;
+    }
+  }
   Object.assign(state, {
     stories: data.stories, total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0,
-    activeDays: data.active_days, loadedTotal: data.count,
+    activeDays: data.active_days,
     newestAt: data.stories.reduce((m, s) => (s.news_at > m ? s.news_at : m), ""),
   });
   newBtn.hidden = true;
   return true;
 }
 
-// Background check: refresh the counters, offer a reload when stories are new or updated.
+// Background check (cheap: no ranking): offer a reload when stories got news since the page loaded.
 async function poll() {
-  if (document.hidden || state.loading) return;
+  if (document.hidden || state.loading || !state.newestAt || state.scope === "archive") return;
   lastPoll = Date.now();
-  const url = storiesUrl(PAGE);
+  const since = state.newestAt;
   let data;
   try {
-    const res = await fetch(url);
+    const res = await fetch(`/api/stories/pulse?since=${encodeURIComponent(since)}`);
     if (!res.ok) return;
     data = await res.json();
   } catch {
     return;
   }
-  if (state.loading || url !== storiesUrl(PAGE)) return; // filters changed meanwhile
-  Object.assign(state, { total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0 });
+  if (state.loading || since !== state.newestAt) return; // reloaded meanwhile
+  state.pending = data.pending;
   updateStatus();
-  const fresh = data.stories.filter((s) => s.news_at > state.newestAt).length;
-  const n = Math.max(fresh, data.count - state.loadedTotal);
-  if (n > 0) {
-    newBtn.textContent = `↑ ${n} new ${n === 1 ? "update" : "updates"}`;
+  if (data.new > 0) {
+    newBtn.textContent = `↑ ${data.new} new ${data.new === 1 ? "update" : "updates"}`;
     newBtn.hidden = false;
   }
 }
@@ -478,10 +557,16 @@ function setTag(tag) {
   reload();
 }
 
+function syncShowReadBtn() {
+  const forceShow = state.scope === "archive" || state.view === "default";
+  showReadBtn.disabled = forceShow;
+  showReadBtn.setAttribute("aria-pressed", forceShow || state.showRead);
+}
+
 function setScope(scope) {
   state.scope = scope;
   for (const [k, b] of Object.entries(scopeBtns)) b.classList.toggle("active", k === scope);
-  showReadBtn.disabled = scope === "archive" || state.view === "default";
+  syncShowReadBtn();
   scopeBtns.archive.title = state.activeDays ? `Stories without updates for ${state.activeDays}+ days` : "";
   reload();
 }
@@ -503,8 +588,7 @@ function setView(view) {
     b.classList.toggle("active", k === view);
     b.setAttribute("aria-pressed", k === view);
   }
-  showReadBtn.disabled = state.scope === "archive" || view === "default";
-  showReadBtn.setAttribute("aria-pressed", view === "default" || state.showRead);
+  syncShowReadBtn();
 }
 for (const [k, b] of Object.entries(viewBtns)) b.addEventListener("click", () => { setView(k); reload(); loadHeadsUp(); });
 setView(state.view);
@@ -559,6 +643,8 @@ async function refreshAll() {
   refreshBtn.disabled = true;
   refreshBtn.classList.add("busy");
   sessionReadIds.clear();
+  sessionChanges.clear();
+  setTouchActive(null);
   try {
     await Promise.all([refreshFeed(), loadHeadsUp()]);
     state.loadedAt = Date.now();

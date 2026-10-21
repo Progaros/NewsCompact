@@ -50,6 +50,16 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
     }
 
 
+@router.get("/api/stories/pulse")
+def stories_pulse(since: str = Query("", max_length=32)):
+    """Cheap poll target: how many stories got news after ``since`` (a news_at value) and the queue size."""
+    with db.get_conn() as conn:
+        new, latest = conn.execute("SELECT count(*), MAX(news_at) FROM Story WHERE headline IS NOT NULL "
+                                   "AND news_at > ?", (since,)).fetchone() if since else (0, None)
+        pending = pipeline.pending_count(conn)
+    return {"new": new, "latest": latest, "pending": pending}
+
+
 @router.get("/api/stories/{story_id}")
 def get_story(story_id: int, request: Request, view: Literal["personal", "default"] = "personal"):
     user = current_user(request)
