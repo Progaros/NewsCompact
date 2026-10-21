@@ -493,7 +493,7 @@ async function fetchStories(limit) {
   Object.assign(state, {
     stories: data.stories, total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0,
     activeDays: data.active_days,
-    newestAt: data.stories.reduce((m, s) => (s.news_at > m ? s.news_at : m), ""),
+    newestAt: data.latest || data.stories.reduce((m, s) => (s.news_at > m ? s.news_at : m), ""),
   });
   newBtn.hidden = true;
   return true;
@@ -518,6 +518,8 @@ async function poll() {
   if (data.new > 0) {
     newBtn.textContent = `↑ ${data.new} new ${data.new === 1 ? "update" : "updates"}`;
     newBtn.hidden = false;
+  } else {
+    newBtn.hidden = true;
   }
 }
 

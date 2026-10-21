@@ -43,6 +43,7 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
         "hidden_read": hidden,
         "pending": totals["pending"],
         "last_article": totals["last_article"],
+        "latest": totals["latest_news"],
         "active_days": config.STORY_ACTIVE_DAYS,
         "view": "personal" if personal else "default",
         "stories": [private(stories.story_payload(i, arts[i["story"]["id"]], related[i["story"]["id"]]),

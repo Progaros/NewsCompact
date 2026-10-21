@@ -340,13 +340,21 @@ def test_extract_json_rejects_inner_array_of_truncated_object():
 
 
 def test_stories_pulse_counts_news_since(client, story):
-    news_at = client.get("/api/stories").json()["stories"][0]["news_at"]
+    data = client.get("/api/stories").json()
+    news_at = data["latest"]
+    assert news_at == data["stories"][0]["news_at"]
     assert client.get("/api/stories/pulse", params={"since": news_at}).json() == {
         "new": 0, "latest": None, "pending": 0}
     with db.get_conn() as conn:
         conn.execute("UPDATE Story SET news_at = datetime('now', '+1 minute')")
     pulse = client.get("/api/stories/pulse", params={"since": news_at}).json()
     assert pulse["new"] == 1 and pulse["latest"] > news_at
+    # Even when the newest story is hidden (read / below page limit), /api/stories
+    # returns the DB-wide latest news_at so pulse doesn't re-count hidden stories.
+    client.post(f"/api/stories/{story}/read")
+    hidden = client.get("/api/stories", params={"hide_read": "true"}).json()
+    assert hidden["stories"] == [] and hidden["latest"] == pulse["latest"]
+    assert client.get("/api/stories/pulse", params={"since": hidden["latest"]}).json()["new"] == 0
     client.post("/api/auth/logout")
     assert client.get("/api/stories/pulse").json()["new"] == 0  # public, like the story list
 

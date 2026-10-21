@@ -111,11 +111,12 @@ def counts(conn: sqlite3.Connection) -> dict[str, Any]:
     row = conn.execute(
         "SELECT (SELECT count(*) FROM Article), (SELECT count(*) FROM Story), "
         "(SELECT count(*) FROM Article WHERE story_id IS NULL AND COALESCE(pipeline_failures, 0) >= ?), "
-        "(SELECT MAX(created_at) FROM Article)",
+        "(SELECT MAX(created_at) FROM Article), "
+        "(SELECT MAX(news_at) FROM Story WHERE headline IS NOT NULL)",
         (config.PIPELINE_MAX_FAILURES,),
     ).fetchone()
     return {"articles": row[0], "stories": row[1], "pending": pending_count(conn), "dead_letter": row[2],
-            "last_article": row[3]}
+            "last_article": row[3], "latest_news": row[4]}
 
 
 # --- self-healing (run before every batch) ---------------------------------
