@@ -279,6 +279,8 @@ class StoryCard extends HTMLElement {
       `<li><a href="/s/${Number(r.id)}" target="_blank" rel="noopener">${esc(r.headline)}</a></li>`).join("");
     const readTitle = { read: "Read — click to mark as unread", updated: "Updated since you read it — click to mark as read again" }[d.read]
       || "Mark as read";
+    // Read stories start collapsed; only ones read during this visit stay open.
+    if (d.read === "read" && !sessionReadIds.has(d.id)) openIds.delete(d.id);
     const open = openIds.has(d.id);
     const srcOpen = sourcesOpenIds.has(d.id);
     const fullSummary = d.summary || "";
@@ -290,7 +292,7 @@ class StoryCard extends HTMLElement {
       <button type="button" class="read-btn" aria-pressed="${d.read === "read"}" title="${readTitle}" aria-label="${readTitle}">
         ${updated ? ICON_UPDATED : ICON_CHECK}
       </button>
-      <div class="card-body" role="button" tabindex="0" aria-expanded="${open}" title="Show tags and details">
+      <div class="card-body" role="button" tabindex="0" aria-expanded="${open}">
         <div class="kicker">
           ${updated ? `<span class="badge-updated" title="Significant update since you marked it read">Updated since you read${newCount ? ` · ${newCount} new` : ""}</span>` : ""}
           ${breaking ? `<span class="badge-breaking">Breaking</span>` : ""}
@@ -346,8 +348,10 @@ class StoryCard extends HTMLElement {
     // is scoped to its summary/kicker area only.
     const onClick = () => {
       if (String(window.getSelection())) return;
-      const openNow = toggleDetails();
-      if (openNow && Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
+      const unread = Auth.state.authenticated && this._data.read !== "read";
+      // An open unread card stays open: the click just marks it read.
+      const openNow = unread && this.classList.contains("open") ? true : toggleDetails();
+      if (openNow && unread) this._toggleRead();
     };
     summaryEl.addEventListener("click", onClick);
     this.querySelector(".headline-link").addEventListener("click", (e) => {
@@ -387,7 +391,7 @@ tagMenuEl.className = "tag-menu";
 tagMenuEl.hidden = true;
 tagMenuEl.setAttribute("role", "menu");
 document.body.appendChild(tagMenuEl);
-let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0;
+let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0, tagMenuClosedAt = 0;
 
 // One click sets the weight: −10 mutes the tag in "For you", 10 = must see.
 const TAG_PRESETS = [[-10, "Mute", "Hide stories with this tag from “For you”"], [-3, "−3", "Less of this"],
@@ -467,6 +471,7 @@ function openTagMenu(tag, anchor, fromHover = false) {
 }
 
 function closeTagMenu() {
+  if (tagMenuTag !== null) tagMenuClosedAt = Date.now();
   tagMenuEl.hidden = true;
   tagMenuTag = null;
   clearTimeout(tagMenuHoverTimer);
@@ -475,8 +480,9 @@ function closeTagMenu() {
 
 /* Delegated handlers — story-cards render tags dynamically, so there is no
  * per-button binding. Signed out: click filters directly (no personal list).
- * Signed in: mouse pointer-over opens after 250 ms, closes 400 ms after it
- * leaves the tag/menu; touch or click toggles immediately. */
+ * Signed in: mouse pointer-over opens after 400 ms, or instantly while a menu is
+ * open / just closed ("warm"); closes 400 ms after it leaves the tag/menu;
+ * touch or click toggles immediately. */
 document.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".tag");
   if (btn) {
@@ -503,8 +509,11 @@ document.addEventListener("pointerover", (e) => {
   const btn = e.target.closest?.(".tag");
   if (btn && Auth.state.authenticated) {
     clearTimeout(tagMenuHoverTimer);
+    if (tagMenuTag === btn.dataset.tag) return;
     const b = btn;
-    tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b, true), 250);
+    const warm = tagMenuTag !== null || Date.now() - tagMenuClosedAt < 300;
+    if (warm) openTagMenu(b.dataset.tag, b, true);
+    else tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b, true), 400);
     return;
   }
   if (tagMenuEl.contains(e.target) || tagMenuEl.contains(document.activeElement) || tagMenuEl.hidden || tagMenuTag === null) return;

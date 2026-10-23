@@ -331,7 +331,6 @@ story-card.is-read.touch-active, story-card.is-read:has(:focus-visible) { opacit
 story-card.is-read.touch-active .headline, story-card.is-read:has(:focus-visible) .headline { font-weight: 650; }
 @media (hover: hover) {
   story-card.is-read:hover { opacity: 1; }
-  story-card.is-read:hover .headline { font-weight: 650; }
 }
 story-card.is-updated { border-color: rgba(79,155,255,.35); }
 
