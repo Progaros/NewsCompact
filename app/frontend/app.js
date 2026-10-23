@@ -382,8 +382,9 @@ function tagLabel(t) {
 }
 
 function tagButton(t) {
-  const title = Auth.state.authenticated ? "Weight this tag · filter by tag" : "Filter by tag";
-  return `<button type="button" class="${tagClass(t)}" data-tag="${esc(t)}" title="${title}">${tagLabel(t)}</button>`;
+  // Signed in, the hover menu replaces the native title tooltip.
+  const attr = Auth.state.authenticated ? `aria-haspopup="menu"` : `title="Filter by tag"`;
+  return `<button type="button" class="${tagClass(t)}" data-tag="${esc(t)}" ${attr}>${tagLabel(t)}</button>`;
 }
 
 const tagMenuEl = document.createElement("div");
@@ -391,7 +392,7 @@ tagMenuEl.className = "tag-menu";
 tagMenuEl.hidden = true;
 tagMenuEl.setAttribute("role", "menu");
 document.body.appendChild(tagMenuEl);
-let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0, tagMenuClosedAt = 0;
+let tagMenuTag = null, tagMenuAnchor = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0, tagMenuClosedAt = 0;
 
 // One click sets the weight: −10 mutes the tag in "For you", 10 = must see.
 const TAG_PRESETS = [[-10, "Mute", "Hide stories with this tag from “For you”"], [-3, "−3", "Less of this"],
@@ -457,6 +458,7 @@ function openTagMenu(tag, anchor, fromHover = false) {
   clearTimeout(tagMenuHoverTimer);
   clearTimeout(tagMenuCloseTimer);
   if (fromHover) tagMenuHoverOpenedAt = Date.now();
+  tagMenuAnchor = anchor;
   if (tagMenuTag !== tag) {
     tagMenuTag = tag;
     tagMenuRender();
@@ -474,6 +476,7 @@ function closeTagMenu() {
   if (tagMenuTag !== null) tagMenuClosedAt = Date.now();
   tagMenuEl.hidden = true;
   tagMenuTag = null;
+  tagMenuAnchor = null;
   clearTimeout(tagMenuHoverTimer);
   clearTimeout(tagMenuCloseTimer);
 }
@@ -505,19 +508,24 @@ document.addEventListener("pointerdown", (e) => {
 document.addEventListener("pointerover", (e) => {
   if (e.pointerType !== "mouse") return; // touch = tap-toggle via click only
   if (touchActiveId !== null) setTouchActive(null);
-  clearTimeout(tagMenuCloseTimer);
+  if (tagMenuEl.contains(e.target)) { clearTimeout(tagMenuCloseTimer); return; }
   const btn = e.target.closest?.(".tag");
-  if (btn && Auth.state.authenticated) {
-    clearTimeout(tagMenuHoverTimer);
-    if (tagMenuTag === btn.dataset.tag) return;
-    const b = btn;
-    const warm = tagMenuTag !== null || Date.now() - tagMenuClosedAt < 300;
-    if (warm) openTagMenu(b.dataset.tag, b, true);
-    else tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b, true), 400);
-    return;
-  }
-  if (tagMenuEl.contains(e.target) || tagMenuEl.contains(document.activeElement) || tagMenuEl.hidden || tagMenuTag === null) return;
+  if (!btn || !Auth.state.authenticated) return;
+  clearTimeout(tagMenuCloseTimer);
   clearTimeout(tagMenuHoverTimer);
+  if (tagMenuAnchor === btn) return;
+  const warm = tagMenuTag !== null || Date.now() - tagMenuClosedAt < 300;
+  if (warm) openTagMenu(btn.dataset.tag, btn, true);
+  // Re-check on fire: the pointer may have left or the card re-rendered meanwhile.
+  else tagMenuHoverTimer = setTimeout(() => { if (btn.matches(":hover")) openTagMenu(btn.dataset.tag, btn, true); }, 400);
+});
+document.addEventListener("pointerout", (e) => {
+  if (e.pointerType !== "mouse") return;
+  const from = e.target.closest?.(".tag, .tag-menu");
+  if (!from || from.contains(e.relatedTarget)) return; // still inside the same tag/menu
+  clearTimeout(tagMenuHoverTimer);
+  if (tagMenuTag === null || tagMenuEl.contains(document.activeElement)) return;
+  clearTimeout(tagMenuCloseTimer);
   tagMenuCloseTimer = setTimeout(closeTagMenu, 400);
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeTagMenu(); });
