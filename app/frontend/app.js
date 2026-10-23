@@ -71,6 +71,73 @@ function urgencyClass(u) {
   return "";
 }
 
+function urgencyWord(u) {
+  if (u >= 8) return "Critical";
+  if (u >= 6) return "High";
+  if (u >= 4) return "Medium";
+  return "Low";
+}
+
+const signed = (w) => `${w > 0 ? "+" : ""}${w}`;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// Expanded card: plain-language facts about the story (both views).
+function factsHtml(d) {
+  const m = d.metrics || {};
+  const rel = d.relevance || {};
+  const outlets = d.outlet_count ?? d.source_count ?? 0;
+  return [
+    `<span class="fact" title="Urgency ${m.urgency_level ?? "–"}/10 (AI-rated)">${urgencyWord(m.urgency_level ?? 5)} urgency</span>`,
+    m.impact_scale ? `<span class="fact" title="Who is affected">${esc(m.impact_scale)} impact</span>` : "",
+    `<span class="fact" title="Trust-weighted median quality of the source articles (1–10)">Quality <b class="${qualityClass(d.quality_score)}">${Number(d.quality_score).toFixed(1)}</b></span>`,
+    `<span class="fact" title="Independent outlets reporting it">${plural(outlets, "outlet", "outlets")}</span>`,
+    rel.updates_24h ? `<span class="fact" title="Updates with new facts in the last 24 hours">${plural(rel.updates_24h, "update", "updates")} today</span>` : "",
+  ].filter(Boolean).join("");
+}
+
+// "Why it is in your feed", built only from the score breakdown (no guessing).
+function whyHtml(d) {
+  const rel = d.relevance || {};
+  const m = d.metrics || {};
+  const pick = (source, positive) => (rel.matches || [])
+    .filter((x) => x.source === source && (x.signal > 0) === positive && Math.abs(x.signal) >= 0.05)
+    .map((x) => `<b>#${esc(x.tag)}</b>`).join(", ");
+  const lines = [];
+  const mine = pick("list", true), avoided = pick("list", false);
+  const liked = pick("learned", true), disliked = pick("learned", false);
+  if (mine) lines.push(`On your tag list: ${mine}`);
+  if (avoided) lines.push(`Turned down in your tag list: ${avoided}`);
+  if (liked) lines.push(`Like stories you liked or asked about: ${liked}`);
+  if (disliked) lines.push(`Like stories you voted down: ${disliked}`);
+  const place = m.location ? ` (${esc(m.location)})` : "";
+  const geo = { city: `Near your home${place}`, country: `In your country${place}`, language: "In your language",
+    region: `Your regions: ${esc((rel.regions || []).join(", "))}` }[rel.geo_reason];
+  if (geo) lines.push(geo);
+  if (d.read === "updated") lines.push("New facts since you read it");
+  if (!lines.length) return "";
+  return `<div class="why"><span class="why-label">Why it is in your feed</span><ul>${lines.map((l) => `<li>${l}</li>`).join("")}</ul></div>`;
+}
+
+const PART_LABELS = { quality: "Reporting quality", coverage: "Source coverage", urgency: "Urgency", impact: "Impact",
+  velocity: "Development", status: "Status", tags: "Your tags", geo: "Location", news: "Latest new facts" };
+
+// Collapsed by default: the exact points behind the priority for the curious.
+function inspectorHtml(d) {
+  const rel = d.relevance || {};
+  if (!rel.parts) return "";
+  const detail = { quality: `${rel.quality}/10`, coverage: plural(d.outlet_count ?? 0, "outlet", "outlets"),
+    urgency: `${rel.urgency}/10`, impact: rel.impact || "–", velocity: `${rel.updates_24h || 0} updates / 24 h`,
+    status: rel.status || "–", tags: rel.affinity ? `affinity ${signed(rel.affinity)}` : "", geo: rel.geo_reason || "", news: "" };
+  const rows = Object.entries(rel.parts).map(([k, v]) => `<tr><td>${esc(PART_LABELS[k] || k)}</td>
+    <td class="muted">${esc(detail[k] ?? "")}</td><td class="num">${esc(signed(v.toFixed(1)))}</td></tr>`).join("");
+  return `<details class="score-inspector"><summary>Priority <b>${Math.round(d.display_score)}</b>/100 · how it is computed</summary>
+    <table>${rows}
+      <tr class="sum"><td>Value</td><td class="muted">sum, bent towards 100 above 80</td><td class="num">${rel.value}</td></tr>
+      <tr><td>Freshness</td><td class="muted">${rel.age_h} h since news, half-life ${rel.half_life_h} h</td><td class="num">×${rel.freshness}</td></tr>
+      <tr class="sum"><td>Priority</td><td></td><td class="num">${d.display_score}</td></tr>
+    </table></details>`;
+}
+
 // "tagesschau.de - die erste Adresse für …" → "tagesschau.de"
 function shortFeed(name) {
   const s = (name || "").split(/\s+[-–|>:]\s+/)[0].trim();
@@ -187,7 +254,6 @@ class StoryCard extends HTMLElement {
     const articles = d.articles || [];
     const srcCount = d.outlet_count ?? d.source_count ?? articles.length;
     const feedCount = d.source_count ?? articles.length;
-    const rel = d.relevance || {};
     const feeds = [...new Set(articles.map((a) => shortFeed(a.feed || hostname(a.url))).filter(Boolean))];
     const feedPreview = feeds.slice(0, 3).map(esc).join(" · ") + (feeds.length > 3 ? ` +${feeds.length - 3}` : "");
     const location = m.location && !/^global\b/i.test(m.location) ? `<span>📍 ${esc(m.location)}</span>` : "";
@@ -232,21 +298,15 @@ class StoryCard extends HTMLElement {
           ${location}
           <span title="Last news ${esc(fmtUtc(d.news_at))}">${esc(timeAgo(d.news_at))}</span>
         </div>
-        <h2 class="headline">${esc(d.headline)}</h2>
+        <h2 class="headline"><a class="headline-link" href="/s/${Number(d.id)}">${esc(d.headline)}</a></h2>
         <p class="summary">${esc(summary)}</p>
         ${changes}
       </div>
       <div class="collapse details"><div>
         <div class="tags">${tags || `<span class="muted">no tags</span>`}</div>
-        <div class="metrics">
-          <span class="metric" title="urgency 1-10">Urgency <b>${m.urgency_level ?? "–"}</b></span>
-          ${m.impact_scale ? `<span class="metric">Impact <b>${esc(m.impact_scale)}</b></span>` : ""}
-          <span class="metric" title="Story quality (trust-weighted median of article quality)">Quality <b class="${qualityClass(d.quality_score)}">${Number(d.quality_score).toFixed(1)}</b></span>
-          <span class="metric" title="relevance = quality·0.40 + credibility·0.35 + impact·0.25 (0–10); display = relevance + urgency + interest + distance − time decay">
-            Score <b>${d.display_score}</b>
-            <span class="rel-break">rel ${rel.base ?? "–"} · q ${rel.quality ?? "–"} · cred ${rel.credibility ?? "–"} · impact ${rel.user_impact ?? "–"} · interest ${rel.user_interest_points ?? "–"} · dist ${rel.distance_points ?? "–"}</span>
-          </span>
-        </div>
+        <div class="facts">${factsHtml(d)}</div>
+        ${state.view === "personal" && Auth.state.authenticated ? whyHtml(d) : ""}
+        ${inspectorHtml(d)}
         ${related ? `<div class="related"><span class="muted">Related stories</span><ul>${related}</ul></div>` : ""}
       </div></div>
       <div class="card-foot">
@@ -281,13 +341,19 @@ class StoryCard extends HTMLElement {
       return openNow;
     };
     // Selecting summary text must not toggle the card. Opening an unread or
-    // updated story also marks it read (signed in only).
+    // updated story also marks it read (signed in only). The headline
+    // navigates to the public link instead, so the card-body click handler
+    // is scoped to its summary/kicker area only.
     const onClick = () => {
       if (String(window.getSelection())) return;
       const openNow = toggleDetails();
       if (openNow && Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
     };
-    body.addEventListener("click", onClick);
+    summaryEl.addEventListener("click", onClick);
+    this.querySelector(".headline-link").addEventListener("click", (e) => {
+      e.stopPropagation(); // don't toggle the card or clear the text selection
+      onClick(); // headline taps/keys count as touching the story
+    });
     body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } });
     const srcBtn = this.querySelector(".src-toggle");
     srcBtn.addEventListener("click", () => srcBtn.setAttribute("aria-expanded", toggleIn(sourcesOpenIds, d.id, this, "src-open")));
@@ -300,10 +366,20 @@ class StoryCard extends HTMLElement {
 customElements.define("story-card", StoryCard);
 
 // --- tag popup menu: hover/click a tag → "add to my tag list" / filter ---
+function tagClass(t) {
+  if (!Auth.state.authenticated || !Auth.hasTagWeight(t)) return "tag";
+  const w = Auth.tagWeight(t);
+  return w <= -10 ? "tag tag-muted" : w < 0 ? "tag tag-neg" : "tag tag-weighted";
+}
+
+function tagLabel(t) {
+  const has = Auth.state.authenticated && Auth.hasTagWeight(t);
+  return `#${esc(t)}${has ? ` <span class="tag-w" title="Your weight">${esc(signed(Auth.tagWeight(t)))}</span>` : ""}`;
+}
+
 function tagButton(t) {
-  const weighted = Auth.state.authenticated && Auth.hasTagWeight(t);
-  const title = Auth.state.authenticated ? "My tag list · filter by tag" : "Filter by tag";
-  return `<button type="button" class="tag${weighted ? " tag-weighted" : ""}" data-tag="${esc(t)}" title="${title}">#${esc(t)}${weighted ? " <span class=\"tag-weighted-dot\" title=\"In your tag list\"></span>" : ""}</button>`;
+  const title = Auth.state.authenticated ? "Weight this tag · filter by tag" : "Filter by tag";
+  return `<button type="button" class="${tagClass(t)}" data-tag="${esc(t)}" title="${title}">${tagLabel(t)}</button>`;
 }
 
 const tagMenuEl = document.createElement("div");
@@ -313,44 +389,63 @@ tagMenuEl.setAttribute("role", "menu");
 document.body.appendChild(tagMenuEl);
 let tagMenuTag = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0;
 
+// One click sets the weight: −10 mutes the tag in "For you", 10 = must see.
+const TAG_PRESETS = [[-10, "Mute", "Hide stories with this tag from “For you”"], [-3, "−3", "Less of this"],
+  [1, "+1", "A bit more"], [3, "+3", "More of this"], [10, "+10", "Must see"]];
+
+function setTagWeight(tag, weight) {
+  const had = Auth.hasTagWeight(tag);
+  const prev = Auth.tagWeight(tag);
+  return Auth.addTagWeight(tag, weight).then((ok) => {
+    if (tagMenuTag === tag) tagMenuRender();
+    refreshTagButtons();
+    if (!ok) return Auth.toast("Saving the tag failed.");
+    const what = weight === null ? `#${tag} removed from your tag list`
+      : weight <= -10 ? `#${tag} muted in “For you”` : `#${tag} set to ${signed(weight)}`;
+    Auth.toast(`${what} — the feed re-ranks on the next refresh.`, {
+      label: "Undo",
+      onClick: () => Auth.addTagWeight(tag, had ? prev : null).then(() => {
+        if (tagMenuTag === tag) tagMenuRender();
+        refreshTagButtons();
+      }),
+    });
+  });
+}
+
 function tagMenuRender() {
   const tag = tagMenuTag;
   const inList = Auth.state.authenticated && Auth.hasTagWeight(tag);
   const w = Auth.tagWeight(tag);
-  tagMenuEl.innerHTML = `${inList ? `<span class="tag-menu-badge">your tag · weight <input type="number" id="tag-menu-weight" class="tag-weight-input" min="-10" max="10" step="0.5" value="${w ?? 1}" /></span>` : ""}
-  <button type="button" class="tag-menu-opt" id="tag-menu-add">${inList ? "Remove from my tag list" : "Add to my tag list"}</button>
-  <button type="button" class="tag-menu-opt" id="tag-menu-filter">Filter feed by this tag</button>`;
-  const weight = tagMenuEl.querySelector("#tag-menu-weight");
-  if (weight) {
-    let pending = false;
-    const commit = () => {
-      if (pending || !weight.value) return;
-      const v = parseFloat(weight.value);
-      if (Number.isNaN(v)) return;
-      pending = true;
-      const clamped = Math.max(-10, Math.min(10, v));
-      weight.value = clamped;
-      Auth.addTagWeight(tag, clamped).finally(() => {
-        pending = false;
-        refreshTagButtons();
-      });
-    };
-    weight.addEventListener("click", (e) => e.stopPropagation());
-    weight.addEventListener("change", commit);
-    weight.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); commit(); }
-    });
-  }
-  const add = tagMenuEl.querySelector("#tag-menu-add");
-  add.addEventListener("click", (e) => {
+  tagMenuEl.innerHTML = `
+    <div class="tag-menu-head">#${esc(tag)} <span class="muted">${inList ? `· your weight ${esc(signed(w))}` : "· not on your tag list"}</span></div>
+    <div class="tag-presets" role="group" aria-label="Weight for #${esc(tag)}">${TAG_PRESETS.map(([v, label, title]) =>
+      `<button type="button" class="tag-preset${v < 0 ? " neg" : ""}${inList && w === v ? " active" : ""}" data-w="${v}" title="${esc(title)}" aria-pressed="${inList && w === v}">${label}</button>`).join("")}</div>
+    <div class="tag-menu-row">
+      <label>Exact <input type="number" id="tag-menu-weight" class="tag-weight-input" min="-10" max="10" step="0.5" value="${inList ? esc(w) : ""}" placeholder="0" aria-label="Exact weight" /></label>
+      ${inList ? `<button type="button" class="link" id="tag-menu-remove">Remove</button>` : ""}
+    </div>
+    <button type="button" class="tag-menu-opt" id="tag-menu-filter">Filter feed by this tag</button>`;
+  tagMenuEl.querySelectorAll(".tag-preset").forEach((b) => b.addEventListener("click", (e) => {
     e.stopPropagation();
-    add.disabled = true;
-    Auth.addTagWeight(tag, inList ? null : 1).finally(() => {
-      add.disabled = false;
-      if (tagMenuTag === tag) tagMenuRender();
-      refreshTagButtons();
-    });
+    const v = Number(b.dataset.w);
+    setTagWeight(tag, inList && w === v ? null : v); // clicking the active preset removes the tag
+  }));
+  const weight = tagMenuEl.querySelector("#tag-menu-weight");
+  let pending = false;
+  const commit = () => {
+    const v = parseFloat(weight.value);
+    if (pending || Number.isNaN(v)) return;
+    const clamped = Math.max(-10, Math.min(10, v));
+    if (inList && clamped === w) return;
+    pending = true;
+    setTagWeight(tag, clamped).finally(() => { pending = false; });
+  };
+  weight.addEventListener("click", (e) => e.stopPropagation());
+  weight.addEventListener("change", commit);
+  weight.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
   });
+  tagMenuEl.querySelector("#tag-menu-remove")?.addEventListener("click", (e) => { e.stopPropagation(); setTagWeight(tag, null); });
   tagMenuEl.querySelector("#tag-menu-filter").addEventListener("click", (e) => { e.stopPropagation(); closeTagMenu(); setTag(tag); });
 }
 
@@ -406,7 +501,7 @@ document.addEventListener("pointerover", (e) => {
   if (touchActiveId !== null) setTouchActive(null);
   clearTimeout(tagMenuCloseTimer);
   const btn = e.target.closest?.(".tag");
-  if (btn) {
+  if (btn && Auth.state.authenticated) {
     clearTimeout(tagMenuHoverTimer);
     const b = btn;
     tagMenuHoverTimer = setTimeout(() => openTagMenu(b.dataset.tag, b, true), 250);
@@ -422,9 +517,9 @@ document.addEventListener("scroll", () => { if (!tagMenuEl.hidden) closeTagMenu(
 /* Re-render the weighted state of every open card's tag buttons. */
 function refreshTagButtons() {
   document.querySelectorAll("story-card .tag").forEach((b) => {
-    const tag = b.dataset.tag, weighted = Auth.state.authenticated && Auth.hasTagWeight(tag);
-    b.classList.toggle("tag-weighted", weighted);
-    b.innerHTML = `#${esc(tag)}${weighted ? " <span class=\"tag-weighted-dot\" title=\"In your tag list\"></span>" : ""}`;
+    const tag = b.dataset.tag;
+    b.className = tagClass(tag);
+    b.innerHTML = tagLabel(tag);
   });
 }
 Auth.onTagWeights(refreshTagButtons);

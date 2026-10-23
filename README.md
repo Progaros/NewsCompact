@@ -173,8 +173,11 @@ flowchart TD
 | `NEWS_BOILERPLATE_MIN_TITLES` | `3` | One feed's identical body under this many titles = extracted site chrome; re-extracted (else title-only) and re-processed |
 | `NEWS_SOURCE_TRUST` / `NEWS_SOURCE_TRUST_DEFAULT` | `Reddit=0.3,Hacker News=0.5,Reviews=0.5` / `1.0` | Default category trust weights |
 | `NEWS_OUTLET_GROUPS` | `deutschlandfunkkultur.de=deutschlandfunk.de,act.eff.org=eff.org,wid.cert-bund.de=bsi.bund.de` | Hosts of one organization counted as one outlet (credibility, source count) |
-| `NEWS_W1` / `NEWS_W3` / `NEWS_INTEREST_CAP` / `NEWS_W_DISTANCE` | `1.0` / `1.5` / `10` / `2.0` | Display score weights (urgency, interest, cap, distance) |
-| `NEWS_DECAY_HALF_LIFE_HOURS` / `NEWS_DECAY_MAX` / `NEWS_FEEDBACK_ALPHA` | `18` / `10` / `0.1` | Time decay (from `news_at`) and 👍/👎 learning rate |
+| `NEWS_W_PUB_QUALITY` / `_COVERAGE` / `_URGENCY` / `_IMPACT` / `_VELOCITY` / `_STATUS` | `0.30` / `0.22` / `0.16` / `0.12` / `0.12` / `0.08` | Ranking v2 public value weights (sum to 1; see `docs/algorithms.md`) |
+| `NEWS_FRESHNESS_HALF_LIFE_HOURS` | `Breaking=12,Ongoing=30,Resolved=12` | Multiplicative freshness half-life per status (from `news_at`) |
+| `NEWS_W_AFFINITY` / `NEWS_W_GEO` / `NEWS_TAG_WEIGHT_SCALE` / `NEWS_TAG_MUTE_WEIGHT` | `0.30` / `0.08` / `4` / `-10` | "For you": tag affinity and location weight, tanh scale of tag weights, mute threshold |
+| `NEWS_VOTE_WEIGHT` / `NEWS_CHAT_WEIGHT` / `NEWS_VOTE_HALF_LIFE_DAYS` | `2` / `1` / `up=60,down=90,chat=90` | Learned (inferred) tag weights from 👍/👎 and story chats |
+| `NEWS_TAG_MERGE_ENABLED` / `NEWS_TAG_MERGE_REVIEW_SIM` / `NEWS_TAG_MERGE_AUTO_SIM` / `NEWS_TAG_MERGE_MAX_VERIFY` | `1` / `0.80` / `0.90` / `30` | Daily tag synonym pass (`scripts/merge_tags.py`): review / auto-merge cosine, LLM calls per run |
 | `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
 | `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `5` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint & fallback schedule |
 | `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` / `NEWS_CHAT_SEARCH_MAX_SECONDS` | `https://searx.example.org/` / `8` / `120` | SearXNG URL and safety caps on autonomous chat search (turns, time) |

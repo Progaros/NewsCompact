@@ -140,16 +140,16 @@ def test_personal_ranking_needs_a_session(exposed):
 
     scoring.update_profile({"locations": ["munich"]}, tag_weights={"ai": 10})
     anon = exposed.get("/api/stories", params={"view": "personal"}).json()
-    assert anon["view"] == "default" and anon["stories"][0]["relevance"]["user_interest"] == 0
-    assert anon["stories"][0]["relevance"]["distance_points"] == 0
+    assert anon["view"] == "default" and anon["stories"][0]["relevance"]["affinity"] == 0
+    assert "geo" not in anon["stories"][0]["relevance"]["parts"]
     _login(exposed)
     mine = exposed.get("/api/stories").json()
-    assert mine["view"] == "personal" and mine["stories"][0]["relevance"]["user_interest"] == 10
+    assert mine["view"] == "personal" and mine["stories"][0]["relevance"]["affinity"] > 0.9
     assert mine["stories"][0]["display_score"] > anon["stories"][0]["display_score"]
     default = exposed.get("/api/stories", params={"view": "default"}).json()
     assert default["view"] == "default" and default["stories"][0]["display_score"] == anon["stories"][0]["display_score"]
     sid = mine["stories"][0]["id"]
-    assert exposed.get(f"/api/stories/{sid}", params={"view": "default"}).json()["relevance"]["user_interest"] == 0
+    assert exposed.get(f"/api/stories/{sid}", params={"view": "default"}).json()["relevance"]["affinity"] == 0
     assert exposed.get("/api/stories", params={"view": "bogus"}).status_code == 422
 
 
@@ -177,7 +177,7 @@ def test_users_have_separate_state_and_only_admins_manage(exposed):
     exposed.post("/api/feedback", json={"story_id": sid, "kind": "up"})
     exposed.post(f"/api/stories/{sid}/chat", json={"message": "Anna asks"})
     anna = exposed.get("/api/profile").json()
-    assert anna["tag_weights"] and "ntfy" not in anna and anna["user"]["is_admin"] is False
+    assert anna["inferred_weights"] and anna["tag_weights"] == {} and "ntfy" not in anna and anna["user"]["is_admin"] is False
     for method, path in [("GET", "/api/feeds"), ("POST", "/api/refresh"), ("GET", "/api/reports/brief"),
                          ("DELETE", "/api/feeds/1")]:
         assert exposed.request(method, path).status_code == 403, path

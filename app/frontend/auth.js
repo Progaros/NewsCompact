@@ -37,8 +37,17 @@ const Auth = (() => {
   function loadTagWeights() {
     return fetch("/api/profile")
       .then((res) => (res.ok ? res.json() : null))
-      .then((p) => { if (p) setTagWeights(p.tag_weights); })
+      .then((p) => {
+        if (!p) return;
+        setTagWeights(p.tag_weights);
+        applyPrefs(p.preferences);
+      })
       .catch(() => {});
+  }
+
+  /* Preferences that change the page itself: 👍/👎 can be hidden (show_votes). */
+  function applyPrefs(prefs) {
+    document.body.classList.toggle("hide-votes", (prefs || {}).show_votes === false);
   }
 
   function _tagsNotify() {
@@ -118,6 +127,7 @@ const Auth = (() => {
     state.user = null;
     for (const k of Object.keys(tagWeights)) delete tagWeights[k];
     _tagsNotify();
+    applyPrefs({});
     applyDom();
     _notify();
   }
@@ -166,6 +176,7 @@ const Auth = (() => {
         renderTrust(box, p.source_trust || {}, p.feed_trust || [], feedOverrides, excluded);
         if (ntfy) renderReports(box, reports, ntfy);
         renderWeights(box, weights);
+        renderLearned(box, p.inferred_weights || {}, weights);
         renderPassword(box);
         renderShares(box);
       })
@@ -191,6 +202,7 @@ const Auth = (() => {
             home_city: form.elements.home_city.value.trim(),
             home_country: form.elements.home_country.value.trim(),
             language: form.elements.language.value.trim().toLowerCase(),
+            show_votes: form.elements.show_votes.checked,
           },
           tag_weights: weights,
           source_weights: sourceWeights,
@@ -200,7 +212,10 @@ const Auth = (() => {
       if (unauth(res)) return;
       if (!res.ok) return toast(`saving failed: ${res.status}`);
       const saved = await res.json().catch(() => null);
-      if (saved) setTagWeights(saved.tag_weights);
+      if (saved) {
+        setTagWeights(saved.tag_weights);
+        applyPrefs(saved.preferences);
+      }
       close();
       toast("Preferences saved.");
       _notify();
@@ -226,6 +241,8 @@ const Auth = (() => {
         <input name="locations" value="${esc(join(prefs.locations))}" placeholder="munich" /></label>
       <label class="field">Minimum story quality <span class="hint">0 = show everything</span>
         <input name="min_quality" type="number" min="0" max="10" step="0.5" value="${esc(prefs.min_quality ?? 0)}" /></label>
+      <label class="check pref-check"><input type="checkbox" name="show_votes" ${prefs.show_votes === false ? "" : "checked"} />
+        Show \u{1F44D}/\u{1F44E} on stories <span class="hint">votes teach "For you" a little; your tag list below is never changed by them</span></label>
       <div class="user-section">
         <div class="user-section-label">Source trust</div>
         <p class="hint">How much a source counts as independent confirmation (credibility) and how much its articles weigh in story quality. 0 = ignore, 1 = full. Expand a category to set single sources; ⊘ hides a source from your “For you” feed.</p>
@@ -237,9 +254,14 @@ const Auth = (() => {
         <div id="reports"></div>
       </div>` : ""}
       <div class="user-section">
-        <div class="user-section-label">Tag weights <button type="button" class="link" id="reset-weights">reset all</button></div>
-        <p class="hint">Learned from 👍/👎; edit any value (−10 … 10) or add tags. Positive = more like this.</p>
+        <div class="user-section-label">Tag list <button type="button" class="link" id="reset-weights">reset all</button></div>
+        <p class="hint">Your own weights (\u221210 \u2026 10): 1 = a bit, 3 = clearly, 10 = must see; \u221210 mutes a tag in \u201cFor you\u201d. Set them here or by clicking a tag on a story.</p>
         <div id="weights"></div>
+      </div>
+      <div class="user-section">
+        <div class="user-section-label">Learned interests</div>
+        <p class="hint">From your \u{1F44D}/\u{1F44E} and story chats; they fade over weeks and count less for common tags. Click one to put it on your tag list.</p>
+        <div id="learned"></div>
       </div>`;
   }
 
@@ -449,7 +471,7 @@ const Auth = (() => {
           <span class="w-tag">#${esc(t)}</span>
           <button type="button" class="w-val ${w >= 0 ? "pos" : "neg"}" data-tag="${esc(t)}" title="Adjust weight" aria-label="Weight of #${esc(t)}: ${w}">${w}</button>
           <button type="button" class="w-x" data-del="${esc(t)}" title="Forget this tag" aria-label="Remove #${esc(t)}">\u00d7</button></div>`).join("") + `</div>`
-        : `<div class="muted">No tag weights yet \u2014 use \u{1F44D}/\u{1F44E} on stories or add one above.</div>`);
+        : `<div class="muted">No tags yet \u2014 click a tag on a story or add one above.</div>`);
     el.querySelectorAll(".w-val").forEach((b) => b.addEventListener("click", () => {
       const tag = b.dataset.tag;
       const input = document.createElement("input");
@@ -491,6 +513,23 @@ const Auth = (() => {
       for (const k of Object.keys(weights)) delete weights[k];
       renderWeights(box, weights);
     };
+  }
+
+  /* Read-only learned weights; a click copies one (rounded) into the editable tag list. */
+  function renderLearned(box, learned, weights) {
+    const el = box.querySelector("#learned");
+    const entries = Object.entries(learned).filter(([t]) => !(t in weights))
+      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 24);
+    el.innerHTML = entries.length
+      ? `<div class="weight-chips">` + entries.map(([t, w]) => `<button type="button" class="weight-chip learned" data-tag="${esc(t)}" title="Add #${esc(t)} to your tag list">
+          <span class="w-tag">#${esc(t)}</span><span class="w-val ${w >= 0 ? "pos" : "neg"}">${w >= 0 ? "+" : ""}${w.toFixed(1)}</span></button>`).join("") + `</div>`
+      : `<div class="muted">Nothing learned yet.</div>`;
+    el.querySelectorAll("button[data-tag]").forEach((b) => b.addEventListener("click", () => {
+      const w = learned[b.dataset.tag];
+      weights[b.dataset.tag] = Math.max(-10, Math.min(10, Math.round(w) || Math.sign(w)));
+      renderWeights(box, weights);
+      renderLearned(box, learned, weights);
+    }));
   }
 
   function showLoginModal() {
@@ -596,6 +635,7 @@ const Auth = (() => {
     setTagWeights,
     unauth,
     toast,
+    applyPrefs,
     showLoginModal,
     get state() {
       return state;

@@ -35,6 +35,7 @@ class Preferences(BaseModel):
     home_city: str | None = Field(None, max_length=80)
     home_country: str | None = Field(None, max_length=80)
     language: str | None = Field(None, pattern=r"^\s*([A-Za-z]{2,3})?\s*$")
+    show_votes: bool | None = None  # 👍/👎 buttons on story cards
 
 
 class ProfileUpdate(BaseModel):

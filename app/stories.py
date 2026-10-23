@@ -32,13 +32,13 @@ def story_payload(item: dict[str, Any], articles: list[dict],
         "id": s["id"],
         "headline": s["headline"],
         "summary": s["summary"],
-        "tags": db.json_list(s["tags"]),
+        "tags": scoring.story_tags(s),
         "metrics": db.json_dict(s["metrics"]),
         "quality_score": item.get("quality", s["quality_score"]),
         "source_count": item["source_count"],
         "outlet_count": item["outlet_count"],
         "relevance": item["relevance"],
-        "display_score": round(item["display"], 3),
+        "display_score": round(item["display"], 1),
         "created_at": s["created_at"],
         "updated_at": s["updated_at"],
         "news_at": scoring.news_time(s),
@@ -61,9 +61,11 @@ def load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = No
     profile = scoring.get_user_profile(conn, user_id) if personal else scoring.DEFAULT_PROFILE
     exclude = scoring.excluded_feeds(profile)
     st = scoring.source_stats(conn, scoring.feed_trust(conn, profile), story_id, exclude).get(
-        story_id, {"feeds": 0, "outlets": 0, "trust": 0.0, "quality": None})
+        story_id, {"feeds": 0, "outlets": 0, "trust": 0.0, "quality": None, "heat": 0.0})
     quality = st["quality"] if st["quality"] is not None else s["quality_score"]
-    relevance, display = scoring.score_story(s, st["feeds"], profile, st["trust"], quality, personal)
+    freq = scoring.tag_frequencies(conn) if personal and profile.get("inferred_weights") else None
+    relevance, display = scoring.score_story(s, st, profile, personal=personal, freq=freq,
+                                             dynamics=scoring.story_dynamics(conn, story_id).get(story_id))
     item = {"story": s, "source_count": st["feeds"], "outlet_count": st["outlets"], "quality": quality,
             "relevance": relevance, "display": display, "vote": scoring.vote_states(conn, user_id).get(story_id),
             **scoring.read_states(conn, user_id).get(story_id, {"read": None})}

@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any
 
-from . import bus, config, db, ingest, merge, pipeline, retention, split
+from . import bus, config, db, ingest, merge, ollama, pipeline, retention, split, tag_merge
 
 log = logging.getLogger("news.worker")
 
@@ -43,8 +43,11 @@ status: dict[str, Any] = {
     "retention_last_run": None,
     "retention_last_deleted_articles": None,
     "retention_last_deleted_stories": None,
+    "tag_merge_last_run": None,
+    "tag_merge_last_result": None,
 }
 _retention_due = 0.0  # monotonic time of the next retention run
+_tag_merge_due = 0.0
 
 
 def wake_pipeline() -> None:
@@ -97,6 +100,7 @@ def run_pipeline() -> dict[str, int]:
                       pipeline_last_seconds=round(secs, 1))
         merged = _run_merge()
         splits = _run_split()
+        _run_tag_merge()
         status["pipeline_running"] = False
         if result["processed"] or result["failed"]:
             log.info("pipeline run: %d processed, %d failed in %.1fs (cpu %.1fs)",
@@ -132,6 +136,24 @@ def _run_split() -> int:
     status.update(split_last_finished=db.utcnow(), split_last_checked=result["checked"],
                   split_last_split=result["split"], split_last_seconds=round(time.perf_counter() - t0, 1))
     return result["split"]
+
+
+def _run_tag_merge() -> None:
+    """Tag synonym pass (embeddings + LLM verifier), at most once per TAG_MERGE_INTERVAL_HOURS."""
+    global _tag_merge_due
+    if not config.TAG_MERGE_ENABLED or _stop.is_set() or time.monotonic() < _tag_merge_due:
+        return
+    if not ollama.available():
+        return
+    _tag_merge_due = time.monotonic() + config.TAG_MERGE_INTERVAL_HOURS * 3600
+    try:
+        result = tag_merge.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("tag merge pass failed")
+        return
+    summary = {k: result[k] for k in ("candidates", "pairs", "approved", "pending", "rejected")}
+    status.update(tag_merge_last_run=db.utcnow(), tag_merge_last_result=summary)
+    log.info("tag merge: %s", summary)
 
 
 def refresh() -> dict[str, Any]:

@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS AuthSession (
 CREATE INDEX IF NOT EXISTS idx_authsession_user ON AuthSession(user_id);
 
 -- One row per user (id = AppUser.id), created on first use.
+-- tag_weights = the user's explicit tag list (−10..10); 👍/👎 and chats only feed the
+-- inferred weights derived from FeedbackLog / ChatSession at ranking time.
 CREATE TABLE IF NOT EXISTS UserProfile (
     id             INTEGER PRIMARY KEY,
     tag_weights    TEXT DEFAULT '{}',
@@ -201,3 +203,26 @@ CREATE TABLE IF NOT EXISTS StoryLink (
     CHECK (a < b)
 );
 CREATE INDEX IF NOT EXISTS idx_storylink_b ON StoryLink(b);
+
+-- Tag synonyms beyond the static table in app/tags.py (app/tag_merge.py): embedding
+-- neighbours judged by the LLM. Only 'approved' rows are applied; 'pending' ones wait for
+-- review (scripts/merge_tags.py), 'rejected' ones keep the pair from being proposed again.
+-- Both columns hold normalized tags.
+CREATE TABLE IF NOT EXISTS TagAlias (
+    alias       TEXT NOT NULL,
+    canonical   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    similarity  REAL,                              -- embedding cosine
+    relation    TEXT,                              -- verifier verdict (SAME_CONCEPT, BROADER, ...)
+    confidence  REAL,
+    method      TEXT NOT NULL,                     -- embedding+llm | manual
+    created_at  TEXT DEFAULT (datetime('now')),
+    reviewed_at TEXT,
+    PRIMARY KEY (alias, canonical)
+);
+
+-- Embedding cache of normalized tags for app/tag_merge.py (float32 blobs).
+CREATE TABLE IF NOT EXISTS TagVector (
+    tag       TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL
+);

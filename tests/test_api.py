@@ -75,26 +75,28 @@ def test_profile_put_validates(client, story):
     assert client.put("/api/profile", json={"preferences": {"min_quality": 99}}).status_code == 422
     assert client.put("/api/profile", json={"preferences": {"locations": ["x" * 200]}}).status_code == 422
 
-    # Feedback vote + undo via API
+    # Feedback vote + undo via API: the tag list stays as the user set it, the vote is learned
     r = client.post("/api/feedback", json={"story_id": story, "kind": "up"}).json()
-    assert r["vote"] == "up" and r["profile"]["tag_weights"]["ai"] == 3.0
+    assert r["vote"] == "up" and r["profile"]["tag_weights"] == {"ai": 2.0}
+    assert r["profile"]["inferred_weights"]["ai"] > 0
     assert client.get(f"/api/stories/{story}").json()["vote"] == "up"
     r2 = client.post("/api/feedback", json={"story_id": story, "kind": None}).json()
-    assert r2["vote"] is None and r2["profile"]["tag_weights"]["ai"] == 2.0
+    assert r2["vote"] is None and r2["profile"]["inferred_weights"] == {}
     assert client.get(f"/api/stories/{story}").json()["vote"] is None
+    assert client.put("/api/profile", json={"preferences": {"show_votes": False}}).json()["preferences"]["show_votes"] is False
 
 
 def test_home_location_is_per_user(client, story):
-    before = client.get("/api/stories").json()["stories"][0]["relevance"]["distance"]
+    before = client.get("/api/stories").json()["stories"][0]["relevance"]["geo"]
     body = client.put("/api/profile", json={"preferences": {
         "home_city": " Vienna ", "home_country": "Austria", "language": "EN"}}).json()
     assert {k: body["preferences"][k] for k in ("home_city", "home_country", "language")} == {
         "home_city": "Vienna", "home_country": "Austria", "language": "en"}
     assert body["home_defaults"]["home_city"] == config.USER_CITY
-    assert before == 10.0 and client.get("/api/stories").json()["stories"][0]["relevance"]["distance"] == 0.0
+    assert before == 1.0 and client.get("/api/stories").json()["stories"][0]["relevance"]["geo"] == 0.0
     assert client.put("/api/profile", json={"preferences": {"language": "german"}}).status_code == 422
     client.put("/api/profile", json={"preferences": {"home_city": "", "home_country": "", "language": ""}})
-    assert client.get("/api/stories").json()["stories"][0]["relevance"]["distance"] == before  # server default
+    assert client.get("/api/stories").json()["stories"][0]["relevance"]["geo"] == before  # server default
 
 
 def test_profile_reports_and_source_trust(client, feed_id):
@@ -119,13 +121,13 @@ def test_profile_reports_and_source_trust(client, feed_id):
 def test_single_source_trust_overrides_its_category(client, story, feed_id):
     p = client.get("/api/profile").json()
     assert p["feed_trust"] == [{"id": feed_id, "title": "Feed", "category": "News", "trust": 1.0, "custom": False}]
-    before = client.get(f"/api/stories/{story}").json()["relevance"]["credibility"]
+    before = client.get(f"/api/stories/{story}").json()["relevance"]["coverage"]
     body = client.put("/api/profile", json={"source_weights": {"News": 1.0},
                                             "feed_weights": {str(feed_id): 0.2, "999": 1}}).json()
     assert body["feed_weights"] == {str(feed_id): 0.2}  # unknown feeds are dropped
     assert body["feed_trust"][0]["trust"] == 0.2 and body["feed_trust"][0]["custom"] is True
     assert body["source_trust"] == {"News": 1.0}
-    assert client.get(f"/api/stories/{story}").json()["relevance"]["credibility"] < before
+    assert client.get(f"/api/stories/{story}").json()["relevance"]["coverage"] < before
     assert client.put("/api/profile", json={"feed_weights": {str(feed_id): 1.5}}).status_code == 422
     assert client.put("/api/profile", json={"feed_weights": {}}).json()["feed_trust"][0]["custom"] is False
 

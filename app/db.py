@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 import sqlite_vec
 
-from . import config, dedup
+from . import config, dedup, tags
 from .content_quality import classify as classify_content
 from .content_quality import clean_body
 
@@ -188,10 +188,31 @@ def _drop_read_summary(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE StoryRead DROP COLUMN summary")
 
 
+def _explicit_tag_weights(conn: sqlite3.Connection) -> None:
+    """v8: 👍/👎 stop writing the tag list (ranking derives inferred weights from FeedbackLog).
+
+    A stored weight that equals exactly what the user's votes added (±1 per tag and vote) was
+    made by votes alone and is dropped; anything the user set or changed by hand stays.
+    """
+    for uid, raw in conn.execute("SELECT id, tag_weights FROM UserProfile").fetchall():
+        weights = json_dict(raw)
+        votes: dict[str, float] = {}
+        for kind, story_tags in conn.execute("SELECT kind, tags FROM FeedbackLog WHERE user_id = ?", (uid,)):
+            for tag in tags.normalize_tags([t for t in json_list(story_tags) if isinstance(t, str)]):
+                votes[tag] = votes.get(tag, 0.0) + (1.0 if kind == "up" else -1.0 if kind == "down" else 0.0)
+        keep = {}
+        for tag, w in weights.items():
+            vote_sum = votes.get(tags.normalize_tag(tag), 0.0)
+            if not (vote_sum and isinstance(w, (int, float)) and abs(w - vote_sum) < 1e-6):
+                keep[tag] = w
+        if keep != weights:
+            conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = ?", (json.dumps(keep), uid))
+
+
 # (user_version, migration) — each runs once, inside a transaction (foreign keys off,
 # so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
-                    (5, _news_at), (6, _per_user), (7, _drop_read_summary))
+                    (5, _news_at), (6, _per_user), (7, _drop_read_summary), (8, _explicit_tag_weights))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -222,6 +243,7 @@ def init_db() -> None:
                     conn.execute("ROLLBACK")
                     raise
         conn.execute("PRAGMA foreign_keys=ON")
+        tags.load_aliases(conn)
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS article_vector_delete AFTER DELETE ON Article "
             f"BEGIN DELETE FROM {VECTOR_TABLE} WHERE article_id = OLD.id; END"

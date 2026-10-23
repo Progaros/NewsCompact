@@ -163,15 +163,49 @@ SUMMARY_MAX_CHARS = _int("NEWS_SUMMARY_MAX_CHARS", 800)
 # Stories without an update for this many days drop out of the ranked feed into
 # the archive (until retention deletes them; a revived story comes back).
 STORY_ACTIVE_DAYS = _float("NEWS_STORY_ACTIVE_DAYS", 7)
-# display = base + urgency*W1 + clamp(interest*W3, ±INTEREST_CAP) + distance*W_DISTANCE - decay
-W1_URGENCY = _float("NEWS_W1", 1.0)
-W3_INTEREST = _float("NEWS_W3", 1.5)
-INTEREST_CAP = _float("NEWS_INTEREST_CAP", 10.0)
-W_DISTANCE = _float("NEWS_W_DISTANCE", 2.0)
-# Relevance base weights (sum to 1 so the base stays 0-10).
-W_RELEVANCE_QUALITY = _float("NEWS_W_REL_QUALITY", 0.40)
-W_RELEVANCE_CREDIBILITY = _float("NEWS_W_REL_CREDIBILITY", 0.35)
-W_RELEVANCE_IMPACT = _float("NEWS_W_REL_IMPACT", 0.25)
+# --- Ranking v2 (app/scoring.py docstring). All features are 0..1; the weights are starting
+# hypotheses to calibrate, not validated constants.
+# public = Σ W_PUB_* · feature (weights sum to 1); score = 100 · freshness · soft_cap(value + update_boost)
+W_PUB_QUALITY = _float("NEWS_W_PUB_QUALITY", 0.30)
+W_PUB_COVERAGE = _float("NEWS_W_PUB_COVERAGE", 0.22)
+W_PUB_URGENCY = _float("NEWS_W_PUB_URGENCY", 0.16)
+W_PUB_IMPACT = _float("NEWS_W_PUB_IMPACT", 0.12)
+W_PUB_VELOCITY = _float("NEWS_W_PUB_VELOCITY", 0.12)
+W_PUB_STATUS = _float("NEWS_W_PUB_STATUS", 0.08)
+IMPACT_SCORE = _weights("NEWS_IMPACT_SCORE", "Local=0.25,Regional=0.45,National=0.7,Global=1.0")
+STATUS_SCORE = _weights("NEWS_STATUS_SCORE", "Breaking=1.0,Ongoing=0.6,Resolved=0.15")
+# Freshness half-life (hours since the last news) per status; unknown status uses Ongoing.
+FRESHNESS_HALF_LIFE_HOURS = _weights("NEWS_FRESHNESS_HALF_LIFE_HOURS", "Breaking=12,Ongoing=30,Resolved=12")
+# Coverage = 1 − e^(−outlet_trust / k): the 2nd independent outlet adds more than the 6th.
+COVERAGE_SATURATION = _float("NEWS_COVERAGE_SATURATION", 2.0)
+RESOLVED_URGENCY_CAP = _float("NEWS_RESOLVED_URGENCY_CAP", 0.65)
+VELOCITY_UPDATE_HALF_LIFE_HOURS = _float("NEWS_VELOCITY_UPDATE_HALF_LIFE_HOURS", 8)
+VELOCITY_OUTLET_HALF_LIFE_HOURS = _float("NEWS_VELOCITY_OUTLET_HALF_LIFE_HOURS", 6)
+UPDATE_BOOST = _float("NEWS_UPDATE_BOOST", 0.08)
+# Personal: value = public + W_AFFINITY·tag_affinity (−1..1) + W_GEO·geo (0..1)
+W_AFFINITY = _float("NEWS_W_AFFINITY", 0.30)
+W_GEO = _float("NEWS_W_GEO", 0.08)
+# tanh(weight / k): weight 1 ≈ 0.25, 3 ≈ 0.64, 10 ≈ 0.99
+TAG_WEIGHT_SCALE = _float("NEWS_TAG_WEIGHT_SCALE", 4.0)
+# A tag at or below this explicit weight hides its stories from "For you" (mute).
+TAG_MUTE_WEIGHT = _float("NEWS_TAG_MUTE_WEIGHT", -10.0)
+# 👍/👎 and story chats no longer edit the tag list; they form decaying inferred weights.
+VOTE_WEIGHT = _float("NEWS_VOTE_WEIGHT", 2.0)
+CHAT_WEIGHT = _float("NEWS_CHAT_WEIGHT", 1.0)
+VOTE_HALF_LIFE_DAYS = _weights("NEWS_VOTE_HALF_LIFE_DAYS", "up=60,down=90,chat=90")
+# Inferred weights of tags carried by this share of active stories or more count ~nothing.
+INFERRED_MIN_SPECIFICITY = _float("NEWS_INFERRED_MIN_SPECIFICITY", 0.2)
+# Tag synonym merging (app/tag_merge.py): tags on ≥ TAG_MERGE_MIN_STORIES stories (or on a tag
+# list) are embedded; neighbours ≥ REVIEW_SIM go to the LLM verifier. A SAME_CONCEPT verdict
+# merges automatically only at ≥ AUTO_SIM and ≥ AUTO_CONFIDENCE, else it waits for review.
+# Thresholds are uncalibrated starting points: check `scripts/merge_tags.py list` first.
+TAG_MERGE_ENABLED = _env("NEWS_TAG_MERGE_ENABLED", "1") == "1"
+TAG_MERGE_INTERVAL_HOURS = _float("NEWS_TAG_MERGE_INTERVAL_HOURS", 24)
+TAG_MERGE_MIN_STORIES = _int("NEWS_TAG_MERGE_MIN_STORIES", 3)
+TAG_MERGE_REVIEW_SIM = _float("NEWS_TAG_MERGE_REVIEW_SIM", 0.80)
+TAG_MERGE_AUTO_SIM = _float("NEWS_TAG_MERGE_AUTO_SIM", 0.90)
+TAG_MERGE_AUTO_CONFIDENCE = _float("NEWS_TAG_MERGE_AUTO_CONFIDENCE", 0.9)
+TAG_MERGE_MAX_VERIFY = _int("NEWS_TAG_MERGE_MAX_VERIFY", 30)  # LLM calls per run
 # Trust (0..1) of a feed category in the credibility term; ⚙ Preferences overrides per category.
 SOURCE_TRUST = _weights("NEWS_SOURCE_TRUST", "Reddit=0.3,Hacker News=0.5,Reviews=0.5")
 SOURCE_TRUST_DEFAULT = _float("NEWS_SOURCE_TRUST_DEFAULT", 1.0)
@@ -179,15 +213,12 @@ SOURCE_TRUST_DEFAULT = _float("NEWS_SOURCE_TRUST_DEFAULT", 1.0)
 OUTLET_GROUPS = {k.strip(): v.strip() for k, _, v in (p.partition("=") for p in _list(
     "NEWS_OUTLET_GROUPS",
     "deutschlandfunkkultur.de=deutschlandfunk.de,act.eff.org=eff.org,wid.cert-bund.de=bsi.bund.de")) if v.strip()}
-TIME_DECAY_HALF_LIFE_HOURS = _float("NEWS_DECAY_HALF_LIFE_HOURS", 18)
-TIME_DECAY_MAX = _float("NEWS_DECAY_MAX", 10.0)
-FEEDBACK_ALPHA = _float("NEWS_FEEDBACK_ALPHA", 0.1)
 USER_CITY = _env("NEWS_USER_CITY", "Munich")
 USER_COUNTRY = _env("NEWS_USER_COUNTRY", "Germany")
 USER_LANGUAGE = _env("NEWS_USER_LANGUAGE", "de")
 
 # --- Heads-up brief + scheduled ntfy reports ---------------------------------
-HEADS_UP_TTL_MINUTES = _int("NEWS_HEADS_UP_TTL_MINUTES", 5)
+HEADS_UP_TTL_MINUTES = _int("NEWS_HEADS_UP_TTL_MINUTES", 11)
 HEADS_UP_NTFY_URL = _env("NEWS_HEADS_UP_NTFY_URL", "https://ntfy.sh/your-topic")  # empty disables all pushes
 HEADS_UP_NTFY_TITLE = _env("NEWS_HEADS_UP_NTFY_TITLE", "News Heads Up")
 # Daily brief times (server-local HH:MM) until schedules are saved in ⚙ Preferences.

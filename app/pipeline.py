@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import httpx
 
-from . import clustering, config, content_quality, db, dedup, harness, ingest, ollama, story
+from . import clustering, config, content_quality, db, dedup, harness, ingest, ollama, story, tags
 
 log = logging.getLogger("news.pipeline")
 
@@ -374,6 +374,7 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
         dedup.attach_duplicates(conn)
         if not pending_count(conn):
             return result
+        tags.load_aliases(conn)  # new stories store canonical tags
     if not ollama.available():
         log.warning("ollama at %s unreachable; pipeline paused", config.OLLAMA_BASE_URL)
         return result

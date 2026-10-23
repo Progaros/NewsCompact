@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import sqlite_vec
@@ -37,6 +38,8 @@ def _legacy_db(path):
         CREATE TABLE StoryRead (story_id INTEGER PRIMARY KEY REFERENCES Story(id) ON DELETE CASCADE,
                                 read_at TEXT NOT NULL DEFAULT (datetime('now')), summary TEXT);
         INSERT INTO StoryRead (story_id, summary) VALUES (5, 'old summary');
+        CREATE TABLE UserProfile (id INTEGER PRIMARY KEY, tag_weights TEXT, source_weights TEXT, preferences TEXT);
+        INSERT INTO UserProfile VALUES (1, '{"ai": 1.0, "climate": 3.0, "KI": 2}', '{}', '{}');
     """)
     conn.execute(f"CREATE VIRTUAL TABLE Experiment_Embeddings USING vec0(article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])")
     conn.execute(f"CREATE VIRTUAL TABLE Article_Embeddings USING vec0(article_id INTEGER, embedding FLOAT[{config.EMBED_DIM}])")
@@ -56,7 +59,10 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        # v8: the weight the 👍 alone made leaves the tag list; hand-set ones stay
+        assert json.loads(conn.execute("SELECT tag_weights FROM UserProfile").fetchone()[0]) == {
+            "climate": 3.0, "KI": 2}
         assert tuple(conn.execute("SELECT user_id, story_id FROM ChatSession").fetchone()) == (1, 5)
         assert tuple(conn.execute("SELECT user_id, story_id FROM StoryRead").fetchone()) == (1, 5)
         assert "summary" not in {r[1] for r in conn.execute("PRAGMA table_info(StoryRead)")}

@@ -22,6 +22,7 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "HEADS_UP_NTFY_TIMES", [])
     monkeypatch.setattr(config, "HEADS_UP_NTFY_URL", "")
     monkeypatch.setattr(config, "AUTH_PASSWORD", TEST_PASSWORD)
+    monkeypatch.setattr(config, "TAG_MERGE_ENABLED", False)
     db.init_db()
     return config.DB_PATH
 
