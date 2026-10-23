@@ -22,8 +22,9 @@ MAX_BODY_CHARS = 100_000
 MAX_COMMENT_CHARS = 1_000
 COMMENTS_HEADER = "Top comments:"
 
-# Signals of a non-article page, checked in the opening window only so an
-# article that merely mentions "captcha" mid-body is not flagged.
+# Signals of a non-article page. Only a page that opens with one is checked further, so an
+# article that merely mentions "captcha" mid-body is not flagged; it is broken when the
+# signals then appear >= 3 times anywhere in the body (social feed / bot wall, not one chrome line).
 BLOCK_SIGS = (
     "post permalink",
     "top comments",

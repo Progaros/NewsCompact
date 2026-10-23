@@ -91,13 +91,15 @@ flowchart LR
    - **Cluster**: `vec0` KNN retrieves candidates scored by max cosine similarity to non-broken member anchors (`AnchorCache`). The 27B verifier classifies top candidates (`≥ 0.55` within 48 h, or `≥ 0.62` stale revival); `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` join, `SAME_TOPIC_DISTINCT_EVENT` is saved in `StoryLink` as a related story.
    - **Harness**: scores article quality (1–10, capped at `NEWS_TITLE_QUALITY_MAX` for non-`ok` bodies) and `breaking` in one schema-constrained call. Thin articles joining a junk story skip Harness & Prompt 2, and so do word-for-word copies (`≥ NEWS_COPY_SKIP_SIM` = 0.9 cosine to a full-text member that already contains every word; one new word means a possible new fact, so the article runs normally). Copies take the member's quality.
    - **Prompt 2**: generates/updates headline, 2–4 sentence summary, tags, `location`, `language`, and anchored `metrics` (`urgency_level`, `impact_scale`, `status`), retrying once on malformed JSON; a summary over `NEWS_SUMMARY_MAX_CHARS` is sent back once for shortening, then cut at a sentence end. Story quality is the **trust-weighted median** of member articles. Incremental rewrites rate `update_significance` (0–3): `≥ 1` advances `news_at` (recency), `≥ 2` (or urgency jump / Breaking) advances `material_at` (resurfaces read stories).
-3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine to stories updated within 96 h, or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges; non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
-   - **Split** (`app/split.py`): article-level `CONTINUING_DEVELOPMENT` joins can still chain a saga into one catch-all story. A story with `≥ 30` articles of which `≥ 10 %` of the pairs are unrelated (cosine `< 0.4`; coherent stories stay under 5 %) is regrouped by embedding (centroid cosine `≥ 0.6`, groups `< 3` fold in, parts `≥ 0.8` alike rejoin). The largest part keeps the story (votes, chat, links); the others become new stories that inherit read marks, are linked as related, and get a full Prompt 2 rewrite (one story per run). Preview with `uv run python scripts/split_stories.py`.
-4. **Ranking** (`app/scoring.py`):
-   $$\text{relevance} = 10 \cdot (0.40\,\text{quality} + 0.35\,\text{credibility} + 0.25\,\text{impact})$$
-   $$\text{display} = \text{relevance} + \text{urgency}\cdot W_1 + \text{clamp}(\text{interest}\cdot W_3, \pm 10) + \text{distance}\cdot W_{\text{dist}} - \text{decay}(\text{news\_at})$$
-   - **Credibility**: summed trust of distinct outlets (`outlet_key` by hostname without `www.`/`feeds.`/`rss.` prefixes, merged via `NEWS_OUTLET_GROUPS`; multiple feeds from one publisher count once), using category/per-feed trust overrides. Cards show this outlet count as "N sources" (feed count in the tooltip).
-   - **Personalization** (`view=personal`): whole-word region/location tag matches (`impact`), 👍/👎 tag weights (`interest`), home city/country/language (`distance`), excluded feeds (`⊘`), and hiding read stories. `view=default` (**Everyone**) uses `DEFAULT_PROFILE` with `distance = 0`, shows all stories (including read), and shares the same Quick Heads Up brief as signed-out visitors.
+3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine to stories updated within 96 h, or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges (the larger story keeps its id; a user who voted on both keeps the newer vote, and material updates of the absorbed story still resurface read stories); non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
+   - **Split** (`app/split.py`): article-level `CONTINUING_DEVELOPMENT` joins can still chain a saga into one catch-all story. A story with `≥ 30` articles of which `≥ 10 %` of the pairs are unrelated (cosine `< 0.4`; coherent stories stay under 5 %) is regrouped by embedding (centroid cosine `≥ 0.6`, groups `< 3` fold in, parts `≥ 0.8` alike rejoin). The largest part keeps the story (votes, chat, links); the others become new stories that inherit read marks, are linked as related (`StoryLink` source `split`, which the merge pass never re-verifies), and get a full Prompt 2 rewrite (one story per run). Preview with `uv run python scripts/split_stories.py`.
+4. **Ranking v2** (`app/scoring.py`, details and rationale in [docs/algorithms.md](docs/algorithms.md)): all features are 0..1, freshness multiplies.
+   $$\text{public} = 0.30\,\text{quality} + 0.22\,\text{coverage} + 0.16\,\text{urgency} + 0.12\,\text{impact} + 0.12\,\text{velocity} + 0.08\,\text{status}$$
+   $$\text{personal} = \text{public} + 0.30\,\text{tag\_affinity} + 0.08\,\text{geo}$$
+   $$\text{score} = 100 \cdot \text{freshness}(\text{news\_at}) \cdot \text{soft\_cap}(\text{value} + \text{update\_boost})$$
+   - **Quality**: trust-weighted median of member article qualities (cross-feed copies of one article count once). **Coverage**: $1 - e^{-\text{outlet\_trust}/2}$ over the summed trust of distinct outlets (`outlet_key` by hostname without `www.`/`feeds.`/`rss.` prefixes, merged via `NEWS_OUTLET_GROUPS`; multiple feeds from one publisher count once), using category/per-feed trust overrides. Cards show this outlet count as "N sources" (feed count in the tooltip).
+   - **Personalization** (`view=personal`): tag affinity from the explicit tag list (a tag at `≤ −10` mutes its stories) or learned weights (decayed 👍/👎 and story chats, scaled by tag specificity), `geo` from home city/country/language and region/location tag matches, excluded feeds (`⊘`), and hiding read stories. `view=default` (**Everyone**) uses `public` only, shows all stories (including read), and shares the same Quick Heads Up brief as signed-out visitors.
+   - **Tag synonyms** (`app/tags.py`, `app/tag_merge.py`): static EN/DE aliases plus approved `TagAlias` rows (daily embedding + LLM verifier pass; review with `scripts/merge_tags.py`), applied at read time.
 5. **Retention** (`app/retention.py`, hourly): deletes stories/articles older than `NEWS_RETENTION_DAYS` (30), records URL tombstones (30 d) so feeds don't re-import them, keeps `FeedbackLog` snapshots, and runs `incremental_vacuum`.
 
 ## Authentication, Access Control & Sharing
@@ -190,7 +192,7 @@ flowchart TD
 ## Database & Layout
 
 `news.db` (SQLite WAL, foreign keys, `sqlite-vec`, auto-migrated via `PRAGMA user_version` in `app/db.py`):
-- **Shared tables**: `Feed`, `Article` (timings, `content_class`, `quality`, `duplicate_of`), `Article_Vectors` (`vec0 FLOAT[1024]`), `Story` (`headline`, `summary`, `tags`, `metrics`, `quality_score`, `news_at`, `material_at`, `merge_checked_at`), `StoryLink` (pair verdicts for merge skip + related stories), `StoryUpdate` (new facts per rated update), `ArticleTombstone`.
+- **Shared tables**: `Feed`, `Article` (timings, `content_class`, `quality`, `duplicate_of`), `Article_Vectors` (`vec0 FLOAT[1024]`), `Story` (`headline`, `summary`, `tags`, `metrics`, `quality_score`, `news_at`, `material_at`, `merge_checked_at`), `StoryLink` (pair verdicts for merge skip + related stories), `StoryAlias` (merged-away ids → surviving story), `StoryUpdate` (new facts per rated update), `ArticleTombstone`, `TagAlias` + `TagVector` (tag synonyms and their embedding cache).
 - **Per-user tables**: `AppUser`, `AuthSession` (hashed tokens), `UserProfile` (weights, feed overrides, exclusions, `about`, `home_*`, ntfy schedules), `StoryRead`, `FeedbackLog`, `ChatSession` + `ChatMessage` (branching tree + agent `steps`), `ShareLink`.
 
 ```
@@ -202,10 +204,10 @@ app/
   stories.py, chat_history.py, share.py, feeds.py   Story payloads & read marks, chat tree, share links, feed management
   db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations, env config
   ingest.py, content_quality.py, dedup.py, retention.py
-  pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, tags.py
+  pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, tags.py, tag_merge.py
   heads_up.py, reports.py, chat.py, searchngx.py, worker.py
   frontend/                     vanilla JS/CSS UI (index, list, feeds, admin, share)
-scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, split_stories.py, rescore_metrics.py, benchmark/
-tests/                  pytest suite (130 tests: API, security, pipeline, merge, split, scoring, read, ingest, migrations, frontend JS syntax via tree-sitter)
+scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, split_stories.py, rescore_metrics.py, merge_tags.py, benchmark/
+tests/                  pytest suite (144 tests: API, security, pipeline, merge, split, scoring, read, ingest, migrations, frontend JS syntax via tree-sitter)
 docs/                   plan.md (changelog), todo.md, findings.md, future_ideas.md
 ```

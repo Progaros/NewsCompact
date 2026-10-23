@@ -58,6 +58,25 @@ def test_story_links_follow_merges_until_deletion(feed_id, llm, client):
     assert client.get(f"/api/stories/{ids[-1]}?view=default").status_code == 404
 
 
+def test_absorb_keeps_the_newer_vote_and_resurfaces_moved_updates(feed_id, llm):
+    from app import scoring
+
+    _make_two_stories(feed_id, llm)
+    with db.get_conn() as conn:
+        keep, drop = [r[0] for r in conn.execute("SELECT id FROM Story ORDER BY id")][:2]
+        conn.execute("INSERT INTO FeedbackLog (user_id, story_id, kind) VALUES (1, ?, 'up')", (keep,))
+        conn.execute("INSERT INTO FeedbackLog (user_id, story_id, kind) VALUES (1, ?, 'down')", (drop,))
+        conn.execute("INSERT INTO StoryRead (user_id, story_id, read_at) VALUES (1, ?, datetime('now', '-1 hours'))",
+                     (keep,))
+        conn.execute("UPDATE Story SET material_at = datetime('now', '-2 hours') WHERE id = ?", (keep,))
+        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts) VALUES (?, 2, '[\"Toll rises\"]')",
+                     (drop,))
+        merge._absorb(conn, keep, drop)
+        assert scoring.vote_states(conn, 1) == {keep: "down"}
+        state = scoring.read_states(conn, 1)[keep]
+    assert state["read"] == "updated" and state["changes"] == ["Toll rises"]
+
+
 def test_merge_reaches_stories_older_than_the_cluster_window(feed_id, llm):
     _make_two_stories(feed_id, llm)
     with db.get_conn() as conn:

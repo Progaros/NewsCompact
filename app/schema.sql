@@ -191,13 +191,14 @@ CREATE INDEX IF NOT EXISTS idx_chat_message_session ON ChatMessage(session_id);
 
 -- Verifier verdicts between two stories (a < b). source 'merge': story-vs-story check,
 -- re-verified only after either story changed; source 'article': an article of one story
--- was judged against the other. SAME_TOPIC_DISTINCT_EVENT / CONTINUING_DEVELOPMENT
+-- was judged against the other; source 'split': parts of a split story (never merged
+-- again, never overwritten). SAME_TOPIC_DISTINCT_EVENT / CONTINUING_DEVELOPMENT
 -- links are shown as related stories.
 CREATE TABLE IF NOT EXISTS StoryLink (
     a          INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     b          INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     relation   TEXT    NOT NULL,   -- verifier class
-    source     TEXT    NOT NULL,   -- merge | article
+    source     TEXT    NOT NULL,   -- merge | article | split
     checked_at TEXT    NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (a, b),
     CHECK (a < b)

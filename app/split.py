@@ -173,8 +173,8 @@ def apply(conn: sqlite3.Connection, story_id: int, groups: list[list[int]]) -> l
     parts = [story_id, *new_ids]
     for i, a in enumerate(parts):
         for b in parts[i + 1:]:
-            # Recorded as a settled merge verdict, so the merge pass doesn't re-verify the pair right away.
-            clustering.link_stories(conn, a, b, "CONTINUING_DEVELOPMENT", "merge")
+            # The merge pass never re-verifies split parts (a new article in one part would undo the split).
+            clustering.link_stories(conn, a, b, "CONTINUING_DEVELOPMENT", "split")
     if paused is not None:
         raise paused
     return new_ids

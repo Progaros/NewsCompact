@@ -81,11 +81,16 @@ def _absorb(conn: sqlite3.Connection, keep: int, drop: int) -> list[int]:
     """Move everything from story ``drop`` into ``keep`` and delete ``drop``."""
     moved = [r[0] for r in conn.execute("SELECT id FROM Article WHERE story_id = ?", (drop,))]
     conn.execute("UPDATE Article SET story_id = ? WHERE story_id = ?", (keep, drop))
-    conn.execute("DELETE FROM FeedbackLog WHERE story_id = ? AND user_id IN "
-                 "(SELECT user_id FROM FeedbackLog WHERE story_id = ?)", (drop, keep))
+    # A user who voted on both stories keeps the newer vote.
+    conn.execute("DELETE FROM FeedbackLog WHERE id IN (SELECT MIN(d.id, k.id) FROM FeedbackLog d "
+                 "JOIN FeedbackLog k ON k.user_id = d.user_id AND k.story_id = ? WHERE d.story_id = ?)", (keep, drop))
     conn.execute("UPDATE FeedbackLog SET story_id = ? WHERE story_id = ?", (keep, drop))
     conn.execute("UPDATE OR IGNORE StoryRead SET story_id = ? WHERE story_id = ?", (keep, drop))
     conn.execute("UPDATE StoryUpdate SET story_id = ? WHERE story_id = ?", (keep, drop))
+    # The merge rewrite is unrated; material updates moved over from ``drop`` still resurface read stories.
+    conn.execute("UPDATE Story SET material_at = (SELECT MAX(t) FROM (SELECT material_at AS t FROM Story WHERE id = ?1 "
+                 "UNION ALL SELECT created_at FROM StoryUpdate WHERE story_id = ?1 AND significance >= ?2)) WHERE id = ?1",
+                 (keep, config.READ_RESURFACE_SIGNIFICANCE))
     conn.execute("UPDATE ChatSession SET story_id = ? WHERE story_id = ? AND user_id NOT IN "
                  "(SELECT user_id FROM ChatSession WHERE story_id = ?)", (keep, drop, keep))
     conn.execute("UPDATE Story SET news_at = MAX(COALESCE(news_at, ''), "

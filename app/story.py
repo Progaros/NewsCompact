@@ -10,7 +10,6 @@ import json
 import logging
 import re
 import sqlite3
-import statistics
 from typing import Any
 
 import httpx
@@ -255,12 +254,10 @@ def _story_articles(conn: sqlite3.Connection, story_id: int) -> list[dict[str, A
 
 def _quality(arts: list[dict[str, Any]]) -> float | None:
     """Trust-weighted median: one bot-blocked fetch or a pile of low-trust reposts can't drag it down."""
-    quals = [(a["quality"], config.SOURCE_TRUST.get(a["feed_category"], config.SOURCE_TRUST_DEFAULT))
-             for a in arts if a.get("quality") is not None]
-    if not quals:
-        return None
-    quality = scoring.weighted_median(quals)
-    return round(float(quality if quality is not None else statistics.median(q for q, _ in quals)), 2)
+    quality = scoring.median_quality([
+        (a["id"], a.get("duplicate_of"), a.get("quality"),
+         config.SOURCE_TRUST.get(a["feed_category"], config.SOURCE_TRUST_DEFAULT)) for a in arts])
+    return None if quality is None else round(float(quality), 2)
 
 
 def refresh_quality(conn: sqlite3.Connection, story_id: int) -> None:

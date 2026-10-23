@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local-first RSS aggregator that clusters, summarizes and ranks news stories with a local Ollama LLM"
 requires-python = ">=3.14"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "fastapi>=0.143.0",
     "feedparser>=6.0.14",
     "httpx>=0.28.1",

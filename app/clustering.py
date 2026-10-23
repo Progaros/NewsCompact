@@ -166,25 +166,25 @@ RELATED_CLASSES = ("SAME_TOPIC_DISTINCT_EVENT", "CONTINUING_DEVELOPMENT")
 
 def link_stories(conn: sqlite3.Connection, x: int, y: int, relation: str, source: str,
                  checked_at: str | None = None) -> None:
-    """Remember a verifier verdict between two stories (StoryLink; latest verdict wins)."""
+    """Remember a verifier verdict between two stories (StoryLink; latest verdict wins, except over a split)."""
     if x == y:
         return
     a, b = sorted((x, y))
     conn.execute(
         "INSERT INTO StoryLink (a, b, relation, source, checked_at) VALUES (?, ?, ?, ?, COALESCE(?, datetime('now'))) "
         "ON CONFLICT (a, b) DO UPDATE SET relation = excluded.relation, source = excluded.source, "
-        "checked_at = excluded.checked_at",
+        "checked_at = excluded.checked_at WHERE StoryLink.source != 'split'",
         (a, b, relation, source, checked_at),
     )
 
 
 def merge_settled(conn: sqlite3.Connection, x: int, y: int) -> bool:
-    """True if a story-vs-story check of x and y happened at/after both last changed."""
+    """True if a story-vs-story check of x and y happened at/after both last changed, or they were split apart."""
     a, b = sorted((x, y))
     return conn.execute(
         "SELECT 1 FROM StoryLink l JOIN Story sa ON sa.id = l.a JOIN Story sb ON sb.id = l.b "
-        "WHERE l.a = ? AND l.b = ? AND l.source = 'merge' "
-        "AND sa.updated_at <= l.checked_at AND sb.updated_at <= l.checked_at", (a, b),
+        "WHERE l.a = ? AND l.b = ? AND (l.source = 'split' OR (l.source = 'merge' "
+        "AND sa.updated_at <= l.checked_at AND sb.updated_at <= l.checked_at))", (a, b),
     ).fetchone() is not None
 
 

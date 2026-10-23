@@ -235,7 +235,7 @@ const Auth = (() => {
         <label class="field">Language <span class="hint">code</span>
           <input name="language" maxlength="3" pattern="[A-Za-z]{2,3}" value="${esc(prefs.language || "")}" placeholder="${esc(home.language || "")}" /></label>
       </div>
-      <label class="field">Interest regions <span class="hint">comma-separated; matching story tags raise "impact"</span>
+      <label class="field">Interest regions <span class="hint">comma-separated; stories whose tags name one rank higher in “For you” (location score)</span>
         <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
       <label class="field">Locations <span class="hint">comma-separated, same effect</span>
         <input name="locations" value="${esc(join(prefs.locations))}" placeholder="munich" /></label>
@@ -459,6 +459,14 @@ const Auth = (() => {
     };
   }
 
+  // Same spelling rules as app/tags.py (_clean); the server adds its aliases on save.
+  const DIACRITICS = { "ä": "a", "ö": "o", "ü": "u", "ß": "ss", "é": "e", "è": "e", "ê": "e", "ë": "e",
+    "à": "a", "ù": "u", "ç": "c", "ñ": "n", "å": "a", "ø": "o", "æ": "ae" };
+  function normalizeTag(tag) {
+    return String(tag).trim().toLowerCase().replace(/[äöüßéèêëàùçñåøæ]/g, (c) => DIACRITICS[c])
+      .replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
   function renderWeights(box, weights) {
     const el = box.querySelector("#weights");
     const entries = Object.entries(weights).sort((a, b) => b[1] - a[1]);
@@ -498,7 +506,7 @@ const Auth = (() => {
     }));
     const add = el.querySelector(".add-weight");
     const addTag = () => {
-      const tag = add.querySelector(".tag-input").value.trim().replace(/^#/, "").toLowerCase();
+      const tag = normalizeTag(add.querySelector(".tag-input").value);
       const v = Math.max(-10, Math.min(10, parseFloat(add.querySelector(".weight-input").value)));
       if (!tag || isNaN(v)) return;
       weights[tag] = v;

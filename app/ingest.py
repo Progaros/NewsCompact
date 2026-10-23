@@ -342,6 +342,11 @@ def ingest_feed(feed: dict[str, Any]) -> int:
                      published, db.utcnow(), ukey, tkey, original),
                 )
                 new += cur.rowcount
+                if cur.rowcount and original is None:
+                    # Feeds are fetched concurrently: another feed may have stored the same copy meanwhile.
+                    first = dedup.find_original(conn, ukey, tkey)
+                    if first is not None and first != cur.lastrowid:
+                        conn.execute("UPDATE Article SET duplicate_of = ? WHERE id = ?", (first, cur.lastrowid))
         conn.execute(
             "UPDATE Feed SET last_fetched_at = ?, etag = ?, last_modified = ?, last_error = NULL, "
             "fetch_failures = 0, next_fetch_at = NULL WHERE id = ?",

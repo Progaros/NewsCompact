@@ -49,8 +49,14 @@ def test_incoherent_story_splits_into_linked_parts(feed_id, llm, client):
         assert rows[sid]["headline"].startswith("Headline") and rows[new_id]["headline"].startswith("Headline")
         assert rows[new_id]["split_checked_at"] is not None
         assert [tuple(r) for r in conn.execute("SELECT relation, source FROM StoryLink")] == [
-            ("CONTINUING_DEVELOPMENT", "merge")]
+            ("CONTINUING_DEVELOPMENT", "split")]
         assert [tuple(r) for r in conn.execute("SELECT story_id FROM FeedbackLog")] == [(sid,)]
+        # New articles in a part must not let the merge pass re-verify (and undo) the split.
+        conn.execute("UPDATE Story SET updated_at = datetime('now', '+1 minutes')")
+        assert clustering.merge_settled(conn, sid, new_id)
+        clustering.link_stories(conn, sid, new_id, "SAME_TOPIC_DISTINCT_EVENT", "article")
+        assert tuple(conn.execute("SELECT source FROM StoryLink").fetchone()) == ("split",)
+        conn.execute("UPDATE Story SET updated_at = datetime('now', '-1 minutes')")
     part = client.get(f"/api/stories/{new_id}").json()
     assert part["read"] == "read"  # read marks carry over
     assert [r["id"] for r in part["related"]] == [sid]

@@ -101,6 +101,34 @@ def test_cross_feed_copies_are_marked_duplicate(feed_id, monkeypatch):
     assert rows["https://b.example/short"]["duplicate_of"] is None  # title too short to trust
 
 
+def test_concurrently_stored_copies_collapse_to_one_original(feed_id, monkeypatch):
+    from app import dedup
+
+    with db.get_conn() as conn:
+        other = conn.execute("INSERT INTO Feed (title, xml_url) VALUES ('B', 'https://b/rss')").lastrowid
+    title = "Parliament passes the new climate law today"
+    current = {}
+    monkeypatch.setattr(ingest, "fetch", lambda url, *_a: _response(
+        _rss((title, f"https://{current['id']}.example/story", "text " * 150, None))))
+    current["id"] = feed_id
+    ingest.ingest_feed(_feed(feed_id))
+    real = dedup.find_original
+    missed = []
+
+    def racy(*a):  # the other feed's copy wasn't stored yet when this one checked
+        if not missed:
+            missed.append(1)
+            return None
+        return real(*a)
+
+    monkeypatch.setattr(dedup, "find_original", racy)
+    current["id"] = other
+    ingest.ingest_feed(_feed(other))
+    with db.get_conn() as conn:
+        rows = conn.execute("SELECT id, duplicate_of FROM Article ORDER BY id").fetchall()
+    assert [r["duplicate_of"] for r in rows] == [None, rows[0]["id"]]
+
+
 def test_tombstoned_and_too_old_entries_are_skipped(feed_id, monkeypatch):
     import datetime as dt
     import email.utils

@@ -144,6 +144,25 @@ def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
     return None
 
 
+def median_quality(articles: list[tuple[int, int | None, float | None, float]]) -> float | None:
+    """Trust-weighted median of ``(article_id, duplicate_of, quality, trust)``; None without scores.
+
+    Cross-feed copies (``duplicate_of``) count once with their original, at the best trust of
+    any copy. Plain median if all trust is 0.
+    """
+    best: dict[int, tuple[float, float]] = {}
+    for aid, dup, q, w in articles:
+        if q is None:
+            continue
+        root = dup or aid
+        prev = best.get(root)
+        best[root] = (prev[0] if prev else float(q), max(w, prev[1]) if prev else w)
+    if not best:
+        return None
+    quality = weighted_median(list(best.values()))
+    return quality if quality is not None else float(statistics.median(q for q, _ in best.values()))
+
+
 def about_user(profile: dict[str, Any]) -> str:
     """The user's self-description (preferences.about) for personal AI texts; "" if unset."""
     about = profile["preferences"].get("about")
@@ -167,13 +186,14 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
     """``{story_id: {feeds, outlets, trust, quality, heat}}`` per story (``story_id`` / ``story_ids`` limit it).
 
     ``trust`` = ``feed_trust()``; the result's ``trust`` sums the best feed trust of each distinct
-    outlet (``outlets`` = their count); ``quality`` is the trust-weighted median article quality
-    (plain median if all trust is 0, None without scores); ``heat`` sums each outlet's trust
-    faded by the age of its newest article (outlets reporting right now). Articles of
-    ``exclude`` feeds don't count (a story with only those is left out).
+    outlet (``outlets`` = their count); ``quality`` is ``median_quality`` of the articles; ``heat``
+    sums each outlet's trust faded by the age of its newest article (outlets reporting right now).
+    Articles of ``exclude`` feeds don't count (a story with only those is left out).
     """
-    sql = ("SELECT a.story_id, a.feed_id, a.quality, a.created_at, f.site_url, f.xml_url "
-           "FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE a.story_id IS NOT NULL")
+    outlet_of = {fid: outlet_key(site, xml) or f"feed:{fid}"
+                 for fid, site, xml in conn.execute("SELECT id, site_url, xml_url FROM Feed")}
+    sql = ("SELECT a.id, a.duplicate_of, a.story_id, a.feed_id, a.quality, a.created_at "
+           "FROM Article a WHERE a.story_id IS NOT NULL")
     if story_id is not None:
         rows = conn.execute(sql + " AND a.story_id = ?", (story_id,))
     elif story_ids is not None:
@@ -183,26 +203,22 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
     feeds: dict[int, set[int]] = {}
     outlets: dict[int, dict[str, float]] = {}
     newest: dict[int, dict[str, str]] = {}
-    quals: dict[int, list[tuple[float, float]]] = {}
+    quals: dict[int, list[tuple[int, int | None, float | None, float]]] = {}
     for r in rows:
         if r["feed_id"] in exclude:
             continue
         sid, w = r["story_id"], trust.get(r["feed_id"], config.SOURCE_TRUST_DEFAULT)
         feeds.setdefault(sid, set()).add(r["feed_id"])
-        key = outlet_key(r["site_url"], r["xml_url"]) or f"feed:{r['feed_id']}"
+        key = outlet_of.get(r["feed_id"]) or f"feed:{r['feed_id']}"
         best = outlets.setdefault(sid, {})
         best[key] = max(best.get(key, 0.0), w)
         latest = newest.setdefault(sid, {})
         latest[key] = max(latest.get(key, ""), r["created_at"] or "")
-        if r["quality"] is not None:
-            quals.setdefault(sid, []).append((float(r["quality"]), w))
+        quals.setdefault(sid, []).append((r["id"], r["duplicate_of"], r["quality"], w))
     now = _now()
     out = {}
     for sid, fids in feeds.items():
-        q = quals.get(sid, [])
-        quality = weighted_median(q)
-        if quality is None and q:
-            quality = float(statistics.median(v for v, _ in q))
+        quality = median_quality(quals.get(sid, []))
         heat = sum(w * _fade(_hours_since(newest[sid][k], now) or 0.0, config.VELOCITY_OUTLET_HALF_LIFE_HOURS)
                    for k, w in outlets[sid].items() if newest[sid][k])
         out[sid] = {"feeds": len(fids), "outlets": len(outlets[sid]), "trust": sum(outlets[sid].values()),

@@ -110,6 +110,24 @@ def test_low_trust_reposts_dont_water_down_quality(feed_id):
         assert [i["story"]["id"] for i in scoring.ranked_stories(conn)] == [sid]
 
 
+def test_cross_feed_copies_count_once_in_quality(feed_id):
+    from app import story
+
+    with db.get_conn() as conn:
+        sid = _story(conn)
+        wire = add_article(feed_id, "wire copy")
+        conn.execute("UPDATE Article SET story_id = ?, quality = 3 WHERE id = ?", (sid, wire))
+        for i in range(3):
+            aid = add_article(_feed(conn, f"c{i}", "News"), f"copy {i}")
+            conn.execute("UPDATE Article SET story_id = ?, quality = 3, duplicate_of = ? WHERE id = ?", (sid, wire, aid))
+        _attach(conn, sid, feed_id, "report one", 8)
+        _attach(conn, sid, feed_id, "report two", 8)
+        item = scoring.ranked_stories(conn)[0]
+        story.refresh_quality(conn, sid)
+        stored = conn.execute("SELECT quality_score FROM Story WHERE id = ?", (sid,)).fetchone()[0]
+    assert item["quality"] == 8 and stored == 8 and item["outlet_count"] == 4
+
+
 def test_feeds_of_one_outlet_count_once(feed_id):
     with db.get_conn() as conn:
         sid = _story(conn)

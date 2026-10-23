@@ -239,7 +239,7 @@ class StoryCard extends HTMLElement {
       sessionReadIds.delete(d.id);
     }
     this._syncReadDom();
-    const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE" });
+    const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE", keepalive: true });
     if (Auth.unauth(res) || !res.ok) {
       Object.assign(d, { read: prevRead, read_at: prevReadAt, prev_read_at: prevPrevReadAt });
       if (hadSessionRead) sessionReadIds.add(d.id); else sessionReadIds.delete(d.id);
@@ -355,8 +355,9 @@ class StoryCard extends HTMLElement {
     };
     summaryEl.addEventListener("click", onClick);
     this.querySelector(".headline-link").addEventListener("click", (e) => {
-      e.stopPropagation(); // don't toggle the card or clear the text selection
-      onClick(); // headline taps/keys count as touching the story
+      e.stopPropagation(); // don't clear the text selection
+      // Opening the story counts as reading it; the card itself is left as it is.
+      if (Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
     });
     body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } });
     const srcBtn = this.querySelector(".src-toggle");
@@ -468,8 +469,9 @@ function openTagMenu(tag, anchor, fromHover = false) {
   const w = tagMenuEl.offsetWidth, h = tagMenuEl.offsetHeight;
   const left = Math.max(8, Math.min(r.left, innerWidth - w - 8));
   const below = r.top - h - 6 < 4; // no room above → open below
+  const top = below ? r.bottom + 6 : r.top - h - 6;
   tagMenuEl.style.left = left + "px";
-  tagMenuEl.style.top = (below ? r.bottom + 6 : r.top - h - 6) + "px";
+  tagMenuEl.style.top = Math.max(4, Math.min(top, innerHeight - h - 4)) + "px";
 }
 
 function closeTagMenu() {
