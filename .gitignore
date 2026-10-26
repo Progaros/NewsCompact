@@ -12,6 +12,8 @@ wheels/
 # Runtime data & logs
 *.db
 *.db-*
+*.db.*
+*.bak
 *.sqlite*
 *.zip
 news.pid

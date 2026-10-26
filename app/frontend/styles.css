@@ -30,6 +30,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+button { font-family: inherit; }
+
 .topbar {
   display: flex;
   align-items: center;
@@ -48,11 +50,14 @@ body {
 }
 .nav a:hover { color: var(--text); background: var(--panel); }
 .nav a.active { color: var(--text); background: var(--panel-2); }
-body:not(.is-admin) .nav .admin-link { display: none; }
-.dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--accent-2); box-shadow: 0 0 0 4px rgba(63,185,132,.2);
+.nav-link { /* button styled as a nav link (user button) */
+  background: var(--panel-2); border: none; font-size: 14px; font-family: inherit;
+  color: var(--text); text-decoration: none;
+  padding: 6px 12px; border-radius: 8px; cursor: pointer;
 }
+.user-name { letter-spacing: .3px; font-size: 13px; }
+body:not(.is-admin) .nav .admin-link { display: none; }
+.logo { display: block; width: 28px; height: 28px; flex: none; }
 .controls { display: flex; align-items: center; gap: 14px; }
 .status { color: var(--muted); font-size: 13px; }
 .btn {

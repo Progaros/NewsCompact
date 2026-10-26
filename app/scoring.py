@@ -14,14 +14,17 @@ Every story gets a 0..100 score; all features are 0..1 so the weights are compar
 - impact        IMPACT_SCORE[impact_scale]; status = STATUS_SCORE[status]
 - velocity      saturating sum of recent StoryUpdate significance and of outlets reporting now
 - freshness     2^(−hours since news_at / FRESHNESS_HALF_LIFE_HOURS[status]): multiplicative,
-                so every story fades unless it gets new facts (news_at moves only then)
-- update_boost  UPDATE_BOOST · last update's significance / 3, fading like velocity
+                so every story fades unless it gets new facts; an update moves news_at only
+                FRESHNESS_REFRESH[significance] of the way to its publication time
+- update_boost  strongest recent update: UPDATE_BOOST · BOOST_SIG_WEIGHT[significance], fading like velocity
 - tag_affinity  noisy-OR of the positive and of the negative tag signals, tanh(weight / 4) each:
                 explicit tag list first, else inferred weights (decayed 👍/👎 and story chats)
                 scaled by tag specificity, so generic tags ("germany") count little
 - geo           home city 1.0 / country 0.6 / language 0.35 (preferences.home_*, else server
                 USER_*), or 0.5 per preferences.locations / interest_regions hit
 A tag at or below TAG_MUTE_WEIGHT on the tag list hides its stories from "For you".
+"For you" then multiplies by READER_FACTOR (read / updated since read), and the top of every
+active list is reranked for variety (app/diversity.py).
 """
 from __future__ import annotations
 
@@ -36,10 +39,10 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import config, db, tags as tagmod
+from . import config, db, diversity, tags as tagmod
 from .tags import normalize_tags
 
-SCORE_VERSION = "v2"
+SCORE_VERSION = "v2.1"
 _DEFAULT_PREFS = {"min_quality": 0.0, "summary_length": "medium"}
 # The "default" view (everyone, signed out): no learned interests, preferences or trust overrides.
 DEFAULT_PROFILE: dict[str, Any] = {"id": None, "tag_weights": {}, "inferred_weights": {}, "source_weights": {},
@@ -187,7 +190,8 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
 
     ``trust`` = ``feed_trust()``; the result's ``trust`` sums the best feed trust of each distinct
     outlet (``outlets`` = their count); ``quality`` is ``median_quality`` of the articles; ``heat``
-    sums each outlet's trust faded by the age of its newest article (outlets reporting right now).
+    sums each outlet's trust faded by the age of its newest original article (outlets reporting
+    right now; cross-feed copies don't count as new reporting).
     Articles of ``exclude`` feeds don't count (a story with only those is left out).
     """
     outlet_of = {fid: outlet_key(site, xml) or f"feed:{fid}"
@@ -213,14 +217,15 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
         best = outlets.setdefault(sid, {})
         best[key] = max(best.get(key, 0.0), w)
         latest = newest.setdefault(sid, {})
-        latest[key] = max(latest.get(key, ""), r["created_at"] or "")
+        if r["duplicate_of"] is None:
+            latest[key] = max(latest.get(key, ""), r["created_at"] or "")
         quals.setdefault(sid, []).append((r["id"], r["duplicate_of"], r["quality"], w))
     now = _now()
     out = {}
     for sid, fids in feeds.items():
         quality = median_quality(quals.get(sid, []))
         heat = sum(w * _fade(_hours_since(newest[sid][k], now) or 0.0, config.VELOCITY_OUTLET_HALF_LIFE_HOURS)
-                   for k, w in outlets[sid].items() if newest[sid][k])
+                   for k, w in outlets[sid].items() if newest[sid].get(k))
         out[sid] = {"feeds": len(fids), "outlets": len(outlets[sid]), "trust": sum(outlets[sid].values()),
                     "quality": quality, "heat": heat}
     return out
@@ -346,29 +351,55 @@ def muted_tag(tags: list[str], profile: dict[str, Any]) -> str | None:
 # --- story dynamics + score ----------------------------------------------------
 def story_dynamics(conn: sqlite3.Connection, story_id: int | None = None,
                    now: dt.datetime | None = None) -> dict[int, dict[str, float]]:
-    """``{story_id: {updates, updates_24h, boost}}`` from recent StoryUpdate rows.
+    """``{story_id: {updates, updates_24h, boost}}`` from recent StoryUpdate rows, timed by event_at.
 
-    ``updates`` = Σ significance/3 faded by age; ``boost`` = UPDATE_BOOST of the latest update.
+    ``updates`` = Σ VELOCITY_SIG_WEIGHT faded by age (one major update outweighs a run of minor
+    ones); ``boost`` = the strongest faded UPDATE_BOOST · BOOST_SIG_WEIGHT, so a later minor
+    update can't replace a major one.
     """
     now = now or _now()
     half_life = config.VELOCITY_UPDATE_HALF_LIFE_HOURS
     cutoff = (now - dt.timedelta(hours=max(24.0, 6 * half_life))).strftime("%Y-%m-%d %H:%M:%S")
-    sql = "SELECT story_id, significance, created_at FROM StoryUpdate WHERE created_at >= ?"
+    sql = ("SELECT story_id, significance, COALESCE(event_at, created_at) FROM StoryUpdate "
+           "WHERE COALESCE(event_at, created_at) >= ?")
     params: list[Any] = [cutoff]
     if story_id is not None:
         sql += " AND story_id = ?"
         params.append(story_id)
     out: dict[int, dict[str, float]] = {}
-    for sid, sig, created in conn.execute(sql + " ORDER BY id", params):
-        age = _hours_since(created, now)
+    for sid, sig, at in conn.execute(sql + " ORDER BY id", params):
+        age = _hours_since(at, now)
         if age is None:
             continue
         d = out.setdefault(sid, {"updates": 0.0, "updates_24h": 0, "boost": 0.0})
         fade = _fade(age, half_life)
-        d["updates"] += sig / 3.0 * fade
+        d["updates"] += config.VELOCITY_SIG_WEIGHT.get(str(sig), 0.0) * fade
         d["updates_24h"] += age <= 24
-        d["boost"] = config.UPDATE_BOOST * sig / 3.0 * fade
+        d["boost"] = max(d["boost"], config.UPDATE_BOOST * config.BOOST_SIG_WEIGHT.get(str(sig), 0.0) * fade)
     return out
+
+
+def refreshed_news_at(old: str | None, trigger: str, significance: int) -> str:
+    """``news_at`` after an update published at ``trigger``: the story's age shrinks by
+    FRESHNESS_REFRESH[significance], so a minor detail barely rejuvenates it; never moves back."""
+    o, t = db.parse_ts(old), db.parse_ts(trigger)
+    if o is None:
+        return trigger
+    if t is None or t <= o:
+        return old
+    share = _clamp01(config.FRESHNESS_REFRESH.get(str(significance), 0.0))
+    return (o + (t - o) * share).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def reader_factor(state: dict[str, Any] | None) -> float:
+    """"For you" factor by read state: what the reader already knows counts less."""
+    state = state or {}
+    factors = config.READER_FACTOR
+    if state.get("read") == "read":
+        return factors.get("read", 1.0)
+    if state.get("read") == "updated":
+        return factors.get("updated_major" if state.get("since_sig", 0) >= 3 else "updated", 1.0)
+    return 1.0
 
 
 def _float(value: Any, default: float) -> float:
@@ -470,10 +501,11 @@ CHANGES_MAX = 3
 
 
 def read_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, dict[str, Any]]:
-    """``{story_id: {read: "read"|"updated", read_at, changes}}`` for the user's read stories.
+    """``{story_id: {read: "read"|"updated", read_at, since_sig, changes}}`` for the user's read stories.
 
-    ``changes`` (updated stories only): up to CHANGES_MAX new facts reported since the
-    user read the story, most significant / newest first.
+    ``since_sig`` = the strongest update significance after ``read_at``; ``changes`` (updated
+    stories only): up to CHANGES_MAX new facts reported since the user read the story, most
+    significant / newest first.
     """
     if user_id is None:
         return {}
@@ -481,14 +513,15 @@ def read_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, dict
         "SELECT r.story_id, r.read_at, COALESCE(s.material_at, s.created_at) > r.read_at "
         "FROM StoryRead r JOIN Story s ON s.id = r.story_id WHERE r.user_id = ?", (user_id,)
     )
-    out = {sid: {"read": "updated" if newer else "read", "read_at": at, "changes": []}
+    out = {sid: {"read": "updated" if newer else "read", "read_at": at, "since_sig": 0, "changes": []}
            for sid, at, newer in rows}
     facts = conn.execute(
-        "SELECT u.story_id, u.facts FROM StoryUpdate u JOIN StoryRead r "
+        "SELECT u.story_id, u.significance, u.facts FROM StoryUpdate u JOIN StoryRead r "
         "ON r.story_id = u.story_id AND r.user_id = ? AND u.created_at > r.read_at "
         "ORDER BY u.significance DESC, u.id DESC", (user_id,)
     )
-    for sid, raw in facts:
+    for sid, sig, raw in facts:
+        out[sid]["since_sig"] = max(out[sid]["since_sig"], sig)
         changes = out[sid]["changes"]
         if out[sid]["read"] != "updated":
             continue
@@ -511,13 +544,16 @@ def vote_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, str]
 
 def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = None, *,
                    archived: bool = False, query: str = "", tag: str = "",
-                   personal: bool = True, user_id: int | None = 1) -> list[dict[str, Any]]:
+                   personal: bool = True, user_id: int | None = 1,
+                   keep: frozenset[int] | set[int] = frozenset(), diverse: bool = True) -> list[dict[str, Any]]:
     """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
     Active stories (news within STORY_ACTIVE_DAYS) are ranked by score (``display``,
     ``relevance`` = its breakdown); ``archived`` returns the older ones, newest first.
     Honors ``preferences.min_quality``, muted tags (personal) and optional text / tag filters.
-    ``read`` is None, "read" or "updated" (significant update since ``user_id`` read it).
+    ``read`` is None, "read" or "updated" (significant update since ``user_id`` read it); the
+    personal view scales the score by ``reader_factor`` except for ``keep`` ids (read during
+    this page visit, so they don't jump). ``diverse`` reranks the top for variety.
     ``personal=False`` ranks the default view (DEFAULT_PROFILE, no tags or location);
     otherwise ``profile`` defaults to the profile of ``user_id``.
     """
@@ -561,15 +597,26 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
                                          freq=freq, now=now)
         if relevance["muted"] and not wanted_tag:
             continue
+        state = reads.get(s["id"], {"read": None})
+        if personal and user_id is not None and s["id"] not in keep:
+            display = apply_reader_state(relevance, display, state)
         out.append({"story": s, "source_count": st["feeds"], "outlet_count": st["outlets"],
                     "quality": round(quality, 2),
-                    "relevance": relevance, "display": display, "vote": votes.get(s["id"]),
-                    **reads.get(s["id"], {"read": None})})
+                    "relevance": relevance, "display": display, "vote": votes.get(s["id"]), **state})
     if archived:
         out.sort(key=lambda x: news_time(x["story"]) or "", reverse=True)
     else:
         out.sort(key=lambda x: x["display"], reverse=True)
+        if diverse:
+            out = diversity.rerank(conn, out)
     return out
+
+
+def apply_reader_state(relevance: dict[str, Any], display: float, state: dict[str, Any] | None) -> float:
+    """Scale a personal score by ``reader_factor`` (recorded in the breakdown)."""
+    factor = reader_factor(state)
+    relevance["reader"] = factor
+    return display * factor
 
 
 # --- profile + feedback (per user; user 1 = the owner from the single-user era) ---

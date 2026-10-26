@@ -102,12 +102,12 @@ const Auth = (() => {
       el = document.createElement("button");
       el.id = "auth-btn";
       el.type = "button";
-      el.className = "btn";
+      el.className = "nav-link";
       controls.appendChild(el);
     }
     if (state.authenticated) {
       const name = state.user?.name || "Preferences";
-      el.innerHTML = `<span aria-hidden="true">\u2699</span> <span class="btn-label">${esc(name)}</span>`;
+      el.innerHTML = `<span class="btn-label user-name">${esc(name.charAt(0).toUpperCase() + name.slice(1))}</span>`;
       el.title = "Preferences & sign out";
       el.setAttribute("aria-label", "Preferences");
       el.onclick = () => showUserModal();

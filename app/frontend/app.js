@@ -134,7 +134,9 @@ function inspectorHtml(d) {
     <table>${rows}
       <tr class="sum"><td>Value</td><td class="muted">sum, bent towards 100 above 80</td><td class="num">${rel.value}</td></tr>
       <tr><td>Freshness</td><td class="muted">${rel.age_h} h since news, half-life ${rel.half_life_h} h</td><td class="num">×${rel.freshness}</td></tr>
+      ${rel.reader != null && rel.reader !== 1 ? `<tr><td>Already read</td><td class="muted">${d.read === "updated" ? "new facts since you read it" : "you read it"}</td><td class="num">×${rel.reader}</td></tr>` : ""}
       <tr class="sum"><td>Priority</td><td></td><td class="num">${d.display_score}</td></tr>
+      ${rel.similar_to ? `<tr><td>Variety</td><td class="muted" colspan="2">placed below a similar story: ${esc(rel.similar_to.headline)}</td></tr>` : ""}
     </table></details>`;
 }
 
@@ -301,8 +303,8 @@ class StoryCard extends HTMLElement {
           <span title="Last news ${esc(fmtUtc(d.news_at))}">${esc(timeAgo(d.news_at))}</span>
         </div>
         <h2 class="headline"><a class="headline-link" href="/s/${Number(d.id)}">${esc(d.headline)}</a></h2>
-        <p class="summary">${esc(summary)}</p>
         ${changes}
+        <p class="summary">${esc(summary)}</p>
       </div>
       <div class="collapse details"><div>
         <div class="tags">${tags || `<span class="muted">no tags</span>`}</div>
@@ -313,7 +315,7 @@ class StoryCard extends HTMLElement {
       </div></div>
       <div class="card-foot">
         <button type="button" class="src-toggle" aria-expanded="${srcOpen}" title="${srcCount} independent ${srcCount === 1 ? "outlet" : "outlets"} from ${feedCount} ${feedCount === 1 ? "feed" : "feeds"} — show all source articles">
-          <span class="src-count">${srcCount} ${srcCount === 1 ? "source" : "sources"}</span>
+          <span class="src-count">${srcCount} ${srcCount === 1 ? "source" : "sources"} · ${articles.length} ${articles.length === 1 ? "article" : "articles"}</span>
           <span class="src-names">${feedPreview}</span>
           <span class="chev" aria-hidden="true"></span>
         </button>

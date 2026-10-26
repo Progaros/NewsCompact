@@ -144,7 +144,8 @@ CREATE TABLE IF NOT EXISTS StoryUpdate (
     story_id     INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     significance INTEGER NOT NULL,
     facts        TEXT    NOT NULL,   -- JSON list of short sentences
-    created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    event_at     TEXT                -- publication time of the triggering article (ranking); NULL = created_at
 );
 CREATE INDEX IF NOT EXISTS idx_storyupdate_story ON StoryUpdate(story_id, created_at);
 

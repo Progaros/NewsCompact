@@ -24,7 +24,7 @@ def _admin_only(path: str) -> bool:
 def _is_public(request: Request) -> bool:
     """Read-only paths reachable without a session (chat history is not public)."""
     path = request.url.path
-    if path in ("/", "/list", "/api/auth/login", "/api/auth/session") or path.startswith("/static/"):
+    if path in ("/", "/list", "/favicon.ico", "/api/auth/login", "/api/auth/session") or path.startswith("/static/"):
         return True
     if request.method != "GET":
         return False

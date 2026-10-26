@@ -6,6 +6,8 @@
 # Usage: scripts/start.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# uv isn't on the default detached-shell PATH; keep the server startable
+export PATH="$HOME/.local/bin:$PATH"
 
 if [[ -f .env ]]; then
   set -a; source .env; set +a

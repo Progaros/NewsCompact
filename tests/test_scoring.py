@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import math
 
@@ -181,6 +182,100 @@ def test_new_facts_raise_velocity_and_boost(feed_id):
     assert r[busy]["relevance"]["velocity"] > r[calm]["relevance"]["velocity"]
     assert r[busy]["relevance"]["updates_24h"] == 3 and r[busy]["relevance"]["parts"]["news"] > 0
     assert r[busy]["display"] > r[calm]["display"]
+
+
+def test_minor_updates_barely_refresh_and_never_mask_major_ones(feed_id):
+    old, now = "2026-10-26 00:00:00", "2026-10-26 10:00:00"
+    assert scoring.refreshed_news_at(old, now, 1) == "2026-10-26 01:00:00"  # 10 % of the age back
+    assert scoring.refreshed_news_at(old, now, 2) == "2026-10-26 05:00:00"
+    assert scoring.refreshed_news_at(old, now, 3) == now
+    assert scoring.refreshed_news_at(now, old, 3) == now  # never moves back
+    assert scoring.refreshed_news_at(None, now, 0) == now
+    with db.get_conn() as conn:
+        major, chatter = _story(conn, "Major"), _story(conn, "Chatter")
+        for sid in (major, chatter):
+            conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (sid, add_article(feed_id, f"a{sid}")))
+        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts) VALUES (?, 3, '[\"x\"]')", (major,))
+        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts) VALUES (?, 1, '[\"y\"]')", (major,))
+        for _ in range(5):
+            conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts) VALUES (?, 1, '[\"z\"]')", (chatter,))
+        d = scoring.story_dynamics(conn)
+    assert d[major]["boost"] == pytest.approx(config.UPDATE_BOOST, rel=0.01)  # the later minor one doesn't lower it
+    assert d[major]["updates"] > d[chatter]["updates"]
+
+
+def test_trigger_time_uses_publication_not_processing():
+    from app import story
+
+    now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    fmt = lambda t: t.strftime("%Y-%m-%d %H:%M:%S")  # noqa: E731
+    seen = fmt(now - dt.timedelta(hours=1))
+    arts = [{"id": 1, "created_at": seen, "published_date": fmt(now - dt.timedelta(hours=5))},
+            {"id": 2, "created_at": seen, "published_date": fmt(now - dt.timedelta(days=9))},
+            {"id": 3, "created_at": seen, "published_date": fmt(now + dt.timedelta(days=1))},
+            {"id": 4, "created_at": seen, "published_date": None}]
+    assert story.trigger_time(arts, 1) == fmt(now - dt.timedelta(hours=5))
+    assert story.trigger_time(arts, 2) == fmt(now - dt.timedelta(hours=1 + config.TRIGGER_MAX_LAG_HOURS))
+    assert story.trigger_time(arts, 3) <= fmt(dt.datetime.now(dt.UTC).replace(tzinfo=None))
+    assert story.trigger_time(arts, 4) == seen
+
+
+def test_read_stories_rank_lower_in_for_you_only(feed_id):
+    from app import stories
+
+    with db.get_conn() as conn:
+        read, unread = _story(conn, "Read"), _story(conn, "Unread")
+        for sid in (read, unread):
+            conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (sid, add_article(feed_id, f"a{sid}")))
+        stories.mark_read(conn, 1, read)
+        mine = _ranked(conn, user_id=1)
+        everyone = _ranked(conn, personal=False, user_id=1)
+        kept = _ranked(conn, user_id=1, keep={read})
+    assert mine[read]["relevance"]["reader"] == config.READER_FACTOR["read"]
+    assert mine[read]["display"] == pytest.approx(mine[unread]["display"] * config.READER_FACTOR["read"], rel=0.01)
+    assert everyone[read]["display"] == pytest.approx(everyone[unread]["display"], rel=0.01)
+    assert kept[read]["display"] == pytest.approx(kept[unread]["display"], rel=0.01)  # read on this page: no jump
+
+
+def test_diversity_moves_linked_story_below_a_different_one(feed_id):
+    from app import diversity
+
+    with db.get_conn() as conn:
+        a, b, c = (_story(conn, h) for h in ("Quake hits", "Quake toll rises", "Election result"))
+        conn.execute("INSERT INTO StoryLink (a, b, relation, source) VALUES (?, ?, 'CONTINUING_DEVELOPMENT', 'merge')",
+                     (min(a, b), max(a, b)))
+        items = [{"story": {"id": sid, "headline": f"h{sid}"}, "display": score, "relevance": {}}
+                 for sid, score in ((a, 100), (b, 95), (c, 85))]
+        out = diversity.rerank(conn, items)
+    assert [i["story"]["id"] for i in out] == [a, c, b]
+    assert out[2]["relevance"]["similar_to"]["id"] == a
+
+
+def test_compare_rankings_script_demotes_minor_updates(feed_id):
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "compare_rankings.py"
+    spec = importlib.util.spec_from_file_location("compare_rankings", path)
+    cmp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cmp)
+    with db.get_conn() as conn:
+        minor, steady = _story(conn, "Minor quote"), _story(conn, "Steady news")
+        for sid in (minor, steady):
+            conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (sid, add_article(feed_id, f"a{sid}")))
+        conn.execute("UPDATE Story SET created_at = datetime('now', '-20 hours'), "
+                     "news_at = datetime('now', '-1 hours') WHERE id = ?", (minor,))
+        conn.execute("UPDATE Story SET created_at = datetime('now', '-3 hours'), "
+                     "news_at = datetime('now', '-3 hours') WHERE id = ?", (steady,))
+        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts, created_at) "
+                     "VALUES (?, 1, '[\"a quote\"]', datetime('now', '-1 hours'))", (minor,))
+        order = {name: [i["story"]["id"] for i in cmp.rank(conn, name, 1, False)] for name in cmp.VARIANTS}
+        before = cmp.summarize(conn, cmp.rank(conn, "before", 1, False), 1)
+        current = cmp.summarize(conn, cmp.rank(conn, "current", 1, False), 1, order["current"][:1])
+    assert order["before"] == [minor, steady]
+    assert order["current"] == order["strict"] == [steady, minor]
+    assert before["minor"] == 1 and current["minor"] == 0 and current["moved"] == 0
+    assert scoring.news_time({"news_at": "x", "updated_at": None}) == "x"  # override was undone
 
 
 def test_tag_affinity_is_bounded_and_specific():

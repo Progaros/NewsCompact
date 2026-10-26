@@ -66,9 +66,12 @@ def load_story(conn: sqlite3.Connection, story_id: int, user_id: int | None = No
     freq = scoring.tag_frequencies(conn) if personal and profile.get("inferred_weights") else None
     relevance, display = scoring.score_story(s, st, profile, personal=personal, freq=freq,
                                              dynamics=scoring.story_dynamics(conn, story_id).get(story_id))
+    state = scoring.read_states(conn, user_id).get(story_id, {"read": None})
+    if personal:
+        display = scoring.apply_reader_state(relevance, display, state)
     item = {"story": s, "source_count": st["feeds"], "outlet_count": st["outlets"], "quality": quality,
             "relevance": relevance, "display": display, "vote": scoring.vote_states(conn, user_id).get(story_id),
-            **scoring.read_states(conn, user_id).get(story_id, {"read": None})}
+            **state}
     return story_payload(item, articles_by_story(conn, [story_id], exclude)[story_id],
                          clustering.related_stories(conn, [story_id], exclude=exclude)[story_id])
 

@@ -98,7 +98,9 @@ def _background(key: str) -> None:
 def _generate(key: str, now: float) -> tuple[str | None, bool]:
     user_id = int(key.removeprefix("user:")) if key != DEFAULT else None
     with db.get_conn() as conn:
-        top = scoring.ranked_stories(conn, personal=user_id is not None, user_id=user_id)[:5]
+        ranked = scoring.ranked_stories(conn, personal=user_id is not None, user_id=user_id)
+        # Personal brief: unread, or updated with significant news since it was read.
+        top = [i for i in ranked if i["read"] != "read"][:5] if user_id is not None else ranked[:5]
         about = scoring.about_user(scoring.get_user_profile(conn, user_id)) if user_id else ""
     if not top:
         return None, False

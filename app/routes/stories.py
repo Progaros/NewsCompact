@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from .. import clustering, config, db, heads_up, pipeline, scoring, stories
+from .. import clustering, config, db, diversity, heads_up, pipeline, scoring, stories
 from ..web import current_user, private, require_uid
 
 router = APIRouter()
@@ -16,7 +16,8 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
                  q: str = Query("", max_length=100), tag: str = Query("", max_length=80),
                  hide_read: bool = False, keep: str = Query("", max_length=4000),
                  view: Literal["personal", "default"] = "personal"):
-    """``hide_read`` drops stories marked read (not those updated since); ``keep`` = ids exempt from it.
+    """``hide_read`` drops stories marked read (not those updated since); ``keep`` = ids read
+    during this page visit: exempt from it and from the read-state score factor.
 
     ``view=personal`` (signed-in only) ranks with the user's interests and settings.
     """
@@ -27,11 +28,13 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
     with db.get_conn() as conn:
         profile = scoring.get_user_profile(conn, uid) if personal else scoring.DEFAULT_PROFILE
         ranked = scoring.ranked_stories(conn, profile, archived=archived, query=q.strip(), tag=tag.strip(),
-                                        personal=personal, user_id=uid)
+                                        personal=personal, user_id=uid, keep=keep_ids, diverse=False)
         hidden = 0
         if hide_read and personal and not archived:
             visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
             hidden, ranked = len(ranked) - len(visible), visible
+        if not archived:
+            ranked = diversity.rerank(conn, ranked)
         page = ranked[:limit]
         exclude = scoring.excluded_feeds(profile)
         ids = [i["story"]["id"] for i in page]

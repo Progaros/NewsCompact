@@ -51,6 +51,7 @@ _MIGRATIONS = (
     ("ChatSession", "leaf_id", "INTEGER"),
     ("UserProfile", "feed_weights", "TEXT DEFAULT '{}'"),
     ("FeedbackLog", "user_id", "INTEGER NOT NULL DEFAULT 1"),
+    ("StoryUpdate", "event_at", "TEXT"),
 )
 # Indexes on migrated columns (schema.sql runs before the columns exist on old DBs).
 _INDEXES = (
@@ -219,15 +220,19 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone() is not None
 
 
+def _add_columns(conn: sqlite3.Connection) -> None:
+    for table, column, ddl in _MIGRATIONS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db() -> None:
     """Create/upgrade the schema (idempotent)."""
     config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-        for table, column, ddl in _MIGRATIONS:
-            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-            if column not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        _add_columns(conn)
         for ddl in _INDEXES:
             conn.execute(ddl)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -243,6 +248,7 @@ def init_db() -> None:
                     conn.execute("ROLLBACK")
                     raise
         conn.execute("PRAGMA foreign_keys=ON")
+        _add_columns(conn)  # table rebuilds above may predate later columns
         tags.load_aliases(conn)
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS article_vector_delete AFTER DELETE ON Article "

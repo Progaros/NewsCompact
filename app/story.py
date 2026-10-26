@@ -6,6 +6,7 @@ the new article (capped at 1,500 words).
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import re
@@ -44,7 +45,9 @@ _SYSTEM_FULL = (
     "location is the most specific place the news is about as 'City, Country' "
     "(e.g. 'Munich, Germany'), or 'Global' when it has no specific local setting. "
     "language is the two-letter code of the articles' main language (e.g. 'de', 'en'). "
-    "The headline names the story's single core event; never join separate events "
+    "The headline is your own neutral line for the story as a whole: its single core event "
+    "and where it stands now (e.g. 'Storm Kira makes landfall in Florida, 3 dead'), not one "
+    "article's title, angle or reaction; never join separate events "
     "with ';'. Summary is 2-4 factual sentences. Do not invent facts not present in the articles. "
     "Reader comments (a 'Top comments:' list) are opinions: never state them as facts; "
     "mention a notable view only as what commenters say."
@@ -55,7 +58,9 @@ _SIGNIFICANCE_GUIDE = (
     "that the Current Summary does not already state or imply (a new event, figure, "
     "decision or official statement), each as one short sentence in the summary's "
     "language; background, recaps, rewording, analysis, opinion "
-    "and reactions are not new facts. Return [] when there are none — most follow-up "
+    "and reactions are not new facts, and neither is anything about a different event or a "
+    "side topic the article also covers — only facts about this story's core event count. "
+    "Return [] when there are none — most follow-up "
     "articles add none. update_significance rates what the New Article adds for a reader "
     "who already knows the Current Summary: 0 = nothing new (repetition, rewording, "
     "background, commentary); 1 = minor detail, reaction or opinion; "
@@ -68,9 +73,12 @@ _SYSTEM_INCREMENTAL = (
     "New Article. If the New Article introduces material updates, rewrite the "
     "summary in 2-4 factual sentences to incorporate them while keeping the key "
     "facts already in it. If it adds no new "
-    "facts, return the Current Summary exactly as written. Preserve the story "
-    "headline: it names the story's core event, not the latest angle or reaction, "
-    "and never joins separate events with ';'. Return the same "
+    "facts, return the Current Summary exactly as written. Headline: return the Current "
+    "Headline unchanged unless the New Article is a notable or major development "
+    "(update_significance 2-3); then rewrite it so it names the story's core event and where "
+    "it stands now (e.g. 'Storm Kira makes landfall in Florida, 3 dead' instead of 'Storm Kira "
+    "forms') — neutral, in your own words, not the New Article's title, not a reaction or side "
+    "angle, and never joining separate events with ';'. Return the same "
     "JSON object schema as requested. location/language describe the story's "
     "setting — return them as-is unless the new article clearly changes it. "
     "Reader comments (a 'Top comments:' list) are opinions, not facts."
@@ -273,7 +281,7 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
     arts = _story_articles(conn, story_id)
     if not arts:
         return 0
-    story = conn.execute("SELECT headline, summary, metrics FROM Story WHERE id = ?", (story_id,)).fetchone()
+    story = conn.execute("SELECT headline, summary, metrics, news_at FROM Story WHERE id = ?", (story_id,)).fetchone()
     system, user = _build_prompt(story, arts, article_id, force_full)
     rated = system is not _SYSTEM_FULL
     prev_summary = (story["summary"] or "") if story is not None else ""
@@ -321,6 +329,9 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
             quality = 5.0
     headline = (out.get("headline") or "").strip() or arts[-1].get("title") or "Untitled"
     significance = update_significance(out, prev, metrics, rated, prev_summary)
+    headline = pick_headline(story["headline"] if story is not None else None, headline, rated, significance)
+    prev_news_at = story["news_at"] if story is not None else None
+    trigger = trigger_time(arts, article_id)
     if rated:
         facts = out.get("new_facts")
         log.info("story %s update significance=%d (model=%s new_facts=%s)", story_id, significance,
@@ -328,19 +339,44 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
 
     conn.execute(
         "UPDATE Story SET headline=?, summary=?, tags=?, metrics=?, quality_score=?, "
-        "updated_at=datetime('now'), "
-        "news_at=CASE WHEN ? THEN datetime('now') ELSE COALESCE(news_at, datetime('now')) END, "
+        "updated_at=datetime('now'), news_at=?, "
         "material_at=CASE WHEN ? THEN datetime('now') ELSE material_at END WHERE id=?",
         (headline, (out.get("summary") or "").strip(), json.dumps(tags),
-         json.dumps(metrics), quality, significance >= 1,
+         json.dumps(metrics), quality, scoring.refreshed_news_at(prev_news_at, trigger, significance),
          significance >= config.READ_RESURFACE_SIGNIFICANCE, story_id),
     )
     facts = [f.strip()[:_FACT_MAX_CHARS] for f in out.get("new_facts") or []
              if isinstance(f, str) and f.strip()][:_FACTS_PER_UPDATE] if rated else []
     if significance >= 1 and facts:
-        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts) VALUES (?, ?, ?)",
-                     (story_id, significance, json.dumps(facts, ensure_ascii=False)))
+        conn.execute("INSERT INTO StoryUpdate (story_id, significance, facts, event_at) VALUES (?, ?, ?, ?)",
+                     (story_id, significance, json.dumps(facts, ensure_ascii=False), trigger))
     return len(user)
+
+
+def pick_headline(current: str | None, proposed: str, rated: bool, significance: int) -> str:
+    """The model's headline, except that a rated update below HEADLINE_REFRESH_SIGNIFICANCE (or a
+    malformed proposal) keeps the current one: headlines follow real developments only."""
+    if not current:
+        return proposed
+    if rated and significance < config.HEADLINE_REFRESH_SIGNIFICANCE:
+        return current
+    if len(proposed) > 200 or ";" in proposed:
+        return current
+    return proposed
+
+
+def trigger_time(arts: list[dict[str, Any]], article_id: int | None) -> str:
+    """When the news of this rewrite came out: the triggering (else newest) article's publication
+    time, at most TRIGGER_MAX_LAG_HOURS before it was first seen and never in the future.
+
+    Processing time would make a backlog or retried articles look like fresh news.
+    """
+    art = next((a for a in arts if a.get("id") == article_id), arts[-1])
+    now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    seen = min(now, db.parse_ts(art.get("created_at")) or now)
+    published = db.parse_ts(art.get("published_date")) or seen
+    t = min(now, max(published, seen - dt.timedelta(hours=config.TRIGGER_MAX_LAG_HOURS)))
+    return t.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _shows_breaking(m: dict[str, Any]) -> bool:

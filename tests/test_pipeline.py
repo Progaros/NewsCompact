@@ -200,6 +200,31 @@ def test_only_updates_with_new_facts_make_a_story_recent(feed_id, llm):
     assert state()[0] > before[0] and state()[2] > before[2] + 1
 
 
+def test_headline_follows_notable_developments_only(feed_id, llm):
+    from app import story
+
+    def headline():
+        with db.get_conn() as conn:
+            return conn.execute("SELECT headline FROM Story").fetchone()[0]
+
+    add_article(feed_id, "Flood hits town")
+    pipeline.process_pending()
+    first = headline()
+    llm.significance = 1
+    add_article(feed_id, "Flood update minor")
+    pipeline.process_pending()
+    assert headline() == first
+    llm.significance = 2
+    add_article(feed_id, "Flood update notable")
+    pipeline.process_pending()
+    assert headline() != first and headline().startswith("Headline")
+
+    assert story.pick_headline(None, "New", True, 0) == "New"
+    assert story.pick_headline("Old", "New", False, 0) == "New"  # full rewrite (merge, rescore)
+    assert story.pick_headline("Old", "A; B", True, 3) == "Old"
+    assert story.pick_headline("Old", "x" * 201, True, 3) == "Old"
+
+
 def test_newest_articles_are_processed_first(feed_id, llm):
     old = add_article(feed_id, "Alpha old", age="-2 hours")
     new = add_article(feed_id, "Beta new")

@@ -28,7 +28,7 @@ PRIVATE = [
     ("GET", "/api/share"), ("DELETE", "/api/share/abcdefgh"),
 ]
 PUBLIC = ["/", "/list", "/api/stories", "/api/stories/1", "/api/articles", "/api/heads-up",
-          "/api/health", "/api/auth/session", "/static/app.js"]
+          "/api/health", "/api/auth/session", "/static/app.js", "/static/logo.svg", "/favicon.ico"]
 
 
 @pytest.fixture

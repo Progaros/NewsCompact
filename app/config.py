@@ -156,6 +156,8 @@ COPY_SKIP_SIM = _float("NEWS_COPY_SKIP_SIM", 0.9)
 CONTEXT_BUDGET_CHARS = _int("NEWS_CONTEXT_BUDGET_CHARS", 200_000)
 # Update significance (0 none … 3 major, story.py) at which a read story shows up again as updated.
 READ_RESURFACE_SIGNIFICANCE = _int("NEWS_READ_RESURFACE_SIGNIFICANCE", 2)
+# Update significance from which Prompt 2 may rewrite the headline (below it the headline stays).
+HEADLINE_REFRESH_SIGNIFICANCE = _int("NEWS_HEADLINE_REFRESH_SIGNIFICANCE", 2)
 # Longer Prompt 2 summaries are sent back once for shortening, then cut at a sentence end.
 SUMMARY_MAX_CHARS = _int("NEWS_SUMMARY_MAX_CHARS", 800)
 
@@ -182,6 +184,22 @@ RESOLVED_URGENCY_CAP = _float("NEWS_RESOLVED_URGENCY_CAP", 0.65)
 VELOCITY_UPDATE_HALF_LIFE_HOURS = _float("NEWS_VELOCITY_UPDATE_HALF_LIFE_HOURS", 8)
 VELOCITY_OUTLET_HALF_LIFE_HOURS = _float("NEWS_VELOCITY_OUTLET_HALF_LIFE_HOURS", 6)
 UPDATE_BOOST = _float("NEWS_UPDATE_BOOST", 0.08)
+# Per update significance (1 minor … 3 major): share of the story's age an update takes back
+# (news_at moves that far towards the update's time), its weight in velocity, and in the boost.
+FRESHNESS_REFRESH = _weights("NEWS_FRESHNESS_REFRESH", "1=0.1,2=0.5,3=1.0")
+VELOCITY_SIG_WEIGHT = _weights("NEWS_VELOCITY_SIG_WEIGHT", "1=0.05,2=0.35,3=1.0")
+BOOST_SIG_WEIGHT = _weights("NEWS_BOOST_SIG_WEIGHT", "1=0.1,2=0.45,3=1.0")
+# An article's publication time counts from at most this long before it was first seen.
+TRIGGER_MAX_LAG_HOURS = _float("NEWS_TRIGGER_MAX_LAG_HOURS", 24)
+# "For you" score factor by read state: read, updated since read (significance 2 / 3).
+READER_FACTOR = _weights("NEWS_READER_FACTOR", "read=0.2,updated=0.5,updated_major=0.85")
+# List-level MMR rerank of the first DIVERSITY_POOL stories: λ·score − (1−λ)·max similarity
+# to a story placed above; cosines below DIVERSITY_SIM_FLOOR count as unrelated.
+DIVERSITY_POOL = _int("NEWS_DIVERSITY_POOL", 50)
+DIVERSITY_LAMBDA = _float("NEWS_DIVERSITY_LAMBDA", 0.82)
+DIVERSITY_SIM_FLOOR = _float("NEWS_DIVERSITY_SIM_FLOOR", 0.5)
+DIVERSITY_LINK_SIM = _weights("NEWS_DIVERSITY_LINK_SIM",
+                              "CONTINUING_DEVELOPMENT=0.95,SAME_TOPIC_DISTINCT_EVENT=0.75")
 # Personal: value = public + W_AFFINITY·tag_affinity (−1..1) + W_GEO·geo (0..1)
 W_AFFINITY = _float("NEWS_W_AFFINITY", 0.30)
 W_GEO = _float("NEWS_W_GEO", 0.08)

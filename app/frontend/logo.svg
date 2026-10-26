@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>News</title>
+  <line x1="27" y1="12" x2="27" y2="6" stroke="#4f9bff" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="27" cy="5" r="3.5" fill="#3fb984"/>
+  <path d="M46 20h10a4 4 0 0 1 4 4v28a6 6 0 0 1-6 6H46z" fill="#8b949e"/>
+  <rect x="4" y="12" width="46" height="46" rx="6" fill="#e8edf3"/>
+  <rect x="9" y="17" width="36" height="13" rx="6.5" fill="#1b222c"/>
+  <circle cx="19" cy="23.5" r="3.2" fill="#4f9bff"/>
+  <circle cx="35" cy="23.5" r="3.2" fill="#4f9bff"/>
+  <rect x="9" y="35" width="15" height="17" rx="2.5" fill="#4f9bff" opacity=".45"/>
+  <rect x="28" y="35" width="17" height="3.5" rx="1.75" fill="#6e7781"/>
+  <rect x="28" y="41.5" width="17" height="3.5" rx="1.75" fill="#6e7781"/>
+  <rect x="28" y="48" width="11" height="3.5" rx="1.75" fill="#6e7781"/>
+</svg>

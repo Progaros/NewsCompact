@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi import Path as FastPath
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from ..web import NO_CACHE
 from .share import SHARE_TOKEN
@@ -22,6 +22,12 @@ def _page(name: str) -> FileResponse:
 @router.get("/")
 def index_page():
     return _page("index.html")
+
+
+# Browsers ask for /favicon.ico on pages without an icon link (raw JSON, images).
+@router.get("/favicon.ico")
+def favicon():
+    return RedirectResponse("/static/logo.svg", status_code=301)
 
 
 @router.get("/feeds")
