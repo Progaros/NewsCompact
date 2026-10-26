@@ -344,10 +344,9 @@ class StoryCard extends HTMLElement {
       setSummary(openNow);
       return openNow;
     };
-    // Selecting summary text must not toggle the card. Opening an unread or
-    // updated story also marks it read (signed in only). The headline
-    // navigates to the public link instead, so the card-body click handler
-    // is scoped to its summary/kicker area only.
+    // Selecting text must not toggle the card. Clicking the card body (kicker,
+    // "New since you read it", summary) toggles it; opening an unread or
+    // updated story also marks it read (signed in only).
     const onClick = () => {
       if (String(window.getSelection())) return;
       const unread = Auth.state.authenticated && this._data.read !== "read";
@@ -355,11 +354,20 @@ class StoryCard extends HTMLElement {
       const openNow = unread && this.classList.contains("open") ? true : toggleDetails();
       if (openNow && unread) this._toggleRead();
     };
-    summaryEl.addEventListener("click", onClick);
+    body.addEventListener("click", (e) => {
+      if (e.target.closest("a")) return; // headline link handles its own click
+      onClick();
+    });
+    // The headline link opens the public story page only when the card is
+    // already open; on a collapsed card it expands the story in place.
     this.querySelector(".headline-link").addEventListener("click", (e) => {
       e.stopPropagation(); // don't clear the text selection
-      // Opening the story counts as reading it; the card itself is left as it is.
-      if (Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
+      if (this.classList.contains("open")) { // open card: let it navigate
+        if (Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
+        return;
+      }
+      e.preventDefault();
+      onClick(); // expands the collapsed card
     });
     body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } });
     const srcBtn = this.querySelector(".src-toggle");
