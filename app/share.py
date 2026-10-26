@@ -40,13 +40,12 @@ def create(user_id: int, kind: str, payload: dict[str, Any], personal: bool) -> 
 
 
 def get(token: str) -> dict[str, Any] | None:
+    """The public snapshot (never names the user who shared it)."""
     with db.get_conn() as conn:
-        row = conn.execute("SELECT s.kind, s.payload, s.created_at, u.name FROM ShareLink s "
-                           "JOIN AppUser u ON u.id = s.user_id WHERE s.token = ?", (token,)).fetchone()
+        row = conn.execute("SELECT kind, payload, created_at FROM ShareLink WHERE token = ?", (token,)).fetchone()
     if row is None:
         return None
-    return {"kind": row["kind"], "shared_by": row["name"], "created_at": row["created_at"],
-            **db.json_dict(row["payload"])}
+    return {"kind": row["kind"], "created_at": row["created_at"], **db.json_dict(row["payload"])}
 
 
 def list_links(user_id: int) -> list[dict[str, Any]]:

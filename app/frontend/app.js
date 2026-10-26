@@ -559,7 +559,7 @@ function renderFeed() {
     el.story = s;
     feedEl.appendChild(el);
   }
-  moreBtn.hidden = state.shown >= state.total;
+  moreBtn.hidden = state.shown >= state.total || state.exhausted;
   renderChips();
   updateStatus();
 }
@@ -609,6 +609,7 @@ async function fetchStories(limit) {
   Object.assign(state, {
     stories: data.stories, total: data.count, pending: data.pending, hiddenRead: data.hidden_read || 0,
     activeDays: data.active_days,
+    exhausted: data.stories.length < limit, // signed out, the server caps the list
     newestAt: data.latest || data.stories.reduce((m, s) => (s.news_at > m ? s.news_at : m), ""),
   });
   newBtn.hidden = true;

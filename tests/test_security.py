@@ -25,9 +25,9 @@ PRIVATE = [
     ("POST", "/api/feeds/category"), ("PATCH", "/api/feeds/1"), ("DELETE", "/api/feeds/1"),
     ("GET", "/api/admin/users"), ("POST", "/api/admin/users"), ("PATCH", "/api/admin/users/2"),
     ("DELETE", "/api/admin/users/2"), ("POST", "/api/auth/password"), ("POST", "/api/share"),
-    ("GET", "/api/share"), ("DELETE", "/api/share/abcdefgh"),
+    ("GET", "/api/share"), ("DELETE", "/api/share/abcdefgh"), ("GET", "/api/events"), ("GET", "/api/articles"),
 ]
-PUBLIC = ["/", "/list", "/api/stories", "/api/stories/1", "/api/articles", "/api/heads-up",
+PUBLIC = ["/", "/api/stories", "/api/stories/1", "/api/heads-up",
           "/api/health", "/api/auth/session", "/static/app.js", "/static/logo.svg", "/favicon.ico"]
 
 
@@ -56,6 +56,8 @@ def test_anonymous_internet_client_gets_only_public_views(exposed):
     for path in PUBLIC:
         assert exposed.get(path).status_code == 200, path
     assert exposed.get("/feeds", follow_redirects=False).status_code == 303
+    assert exposed.get("/list", follow_redirects=False).status_code == 303
+    assert exposed.get("/api/health").json() == {"ok": True}  # no pipeline internals
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert exposed.get(path).status_code in (401, 404), path
     traversal = ("/static/../app/config.py", "/static/%2e%2e/api.py", "/static/..%2fconfig.py",
@@ -250,7 +252,7 @@ def test_share_links(exposed, monkeypatch):
     exposed.post("/api/auth/logout")
     assert exposed.get(public).status_code == 200
     snap = exposed.get("/api/share/" + private[3:]).json()
-    assert snap["text"] == "Brief for admin" and snap["shared_by"] == "admin" and snap["view"] == "personal"
+    assert snap["text"] == "Brief for admin" and "shared_by" not in snap and snap["view"] == "personal"
     chat_snap = exposed.get("/api/share/" + chat_url[3:]).json()
     assert chat_snap["question"] == "What happened?" and chat_snap["answer"] == "Short answer."
     assert exposed.get("/api/share/doesnotexist").status_code == 404
@@ -282,6 +284,7 @@ def test_password_hashes():
 
 
 def test_sse_connection_cap(exposed, monkeypatch):
+    _login(exposed)
     monkeypatch.setattr(bus, "subscriber_count", lambda: 10_000)
     assert exposed.get("/api/events").status_code == 503
 
@@ -412,3 +415,161 @@ def test_web_exposed_hardening_edges(exposed, monkeypatch):
     exposed.cookies.set(config.AUTH_COOKIE, s1)
     assert exposed.post("/api/auth/password", json={"current": PASSWORD, "new": "new-owner-pw-123"}).status_code == 200
     assert auth.is_authenticated(s1) and not auth.is_authenticated(s2)
+
+
+def test_feed_bodies_are_streamed_with_a_cap(monkeypatch):
+    import gzip
+
+    bodies = {"/big": b"x" * (ingest._MAX_PAGE_BYTES + 1), "/ok": RSS_BODY}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/gz":
+            return httpx.Response(200, content=gzip.compress(RSS_BODY), headers={"Content-Encoding": "gzip"})
+        return httpx.Response(200, content=bodies[req.url.path])
+
+    monkeypatch.setattr(ingest, "_client", httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(ValueError, match="size limit"):
+        ingest.fetch("https://feeds.example/big")
+    assert ingest.fetch("https://feeds.example/ok").content == RSS_BODY
+    gz = ingest.fetch("https://feeds.example/gz")
+    assert gz.content == RSS_BODY and "content-encoding" not in gz.headers
+
+
+RSS_BODY = b'<?xml version="1.0"?><rss version="2.0"><channel><title>T</title></channel></rss>'
+
+
+def test_newspaper_fallback_never_downloads_page_images(monkeypatch):
+    import newspaper.images
+    import trafilatura
+
+    fetched = []
+    monkeypatch.setattr(trafilatura, "extract", lambda *a, **k: None)  # force the newspaper3k fallback
+    monkeypatch.setattr(newspaper.images, "fetch_url", lambda url, *a, **k: fetched.append(url) or (None, None))
+    paras = "".join(f"<p>{'Sentence about the flood in town. ' * 12}</p>" for _ in range(6))
+    html = (f"<html><head><title>Flood</title></head><body><article><h1>Flood</h1>"
+            f"<img src='http://127.0.0.1:11434/a.png'>{paras}<img src='/b.png'></article></body></html>")
+    assert "flood" in ingest.extract_content(html, "https://news.example/a").lower()
+    assert fetched == []
+
+
+def test_null_origin_and_same_site_writes_are_rejected(exposed):
+    _login(exposed)
+    assert exposed.post("/api/stories/1/read", headers={"Origin": "null"}).status_code == 403
+    assert exposed.post("/api/stories/1/read", headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert exposed.post("/api/stories/1/read", headers={"Sec-Fetch-Site": "cross-site", "Origin": BASE}).status_code == 403
+    assert exposed.post("/api/stories/1/read", headers={"Sec-Fetch-Site": "same-origin", "Origin": BASE}).status_code == 200
+
+
+def test_https_request_gets_secure_cookie_without_public_base(exposed, monkeypatch):
+    monkeypatch.setattr(config, "PUBLIC_BASE", "http://127.0.0.1:8787")  # left at its default
+    r = _login(exposed)  # served over https (proxy X-Forwarded-Proto / TLS)
+    assert "secure" in r.headers["set-cookie"].lower() and "strict-transport-security" in r.headers
+    with TestClient(api.create_app(), base_url="http://localhost") as plain:
+        r = plain.post("/api/auth/login", json={"password": PASSWORD})
+        assert "secure" not in r.headers["set-cookie"].lower() and "strict-transport-security" not in r.headers
+
+
+def test_static_files_skip_the_session_lookup(exposed, monkeypatch):
+    _login(exposed)
+
+    def boom(_token):
+        raise AssertionError("session looked up for a static file")
+
+    monkeypatch.setattr(auth, "current_user", boom)
+    assert exposed.get("/static/app.js").status_code == 200
+    assert exposed.get("/favicon.ico", follow_redirects=False).status_code == 301
+
+
+def test_unknown_user_names_cost_one_scrypt(monkeypatch):
+    calls = []
+    real = auth.hashlib.scrypt
+    monkeypatch.setattr(auth.hashlib, "scrypt", lambda *a, **k: calls.append(1) or real(*a, **k))
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO AppUser (name, password_hash) VALUES ('anna', ?)", (auth.hash_password("pw-anna-1"),))
+    calls.clear()
+    assert auth.authenticate("anna", "wrong") is None
+    known = len(calls)
+    calls.clear()
+    assert auth.authenticate("nobody", "wrong") is None
+    assert len(calls) == known == 1
+
+
+def test_ip_throttle_table_stays_bounded(monkeypatch):
+    monkeypatch.setattr(auth, "_MAX_IPS", 5)
+    for i in range(50):
+        auth.record_failure(f"198.51.100.{i}")
+    assert len(auth._failures) <= 5
+    for _ in range(5):
+        auth.record_failure("203.0.113.1")
+    assert auth.login_throttled("203.0.113.1")  # the most recent IP is kept
+    monkeypatch.setattr(auth, "_MAX_ACCOUNTS", 5)
+    for i in range(50):
+        auth.record_account_failure(f"name{i}")
+    assert len(auth._accounts) <= 5
+
+
+def test_account_throttle_pauses_unknown_ips_but_never_known_ones(exposed, monkeypatch):
+    monkeypatch.setattr(auth, "_ACCOUNT_FREE_FAILS", 3)
+    with TestClient(api.create_app(), base_url=BASE, client=("127.0.0.1", 40000)) as proxied:
+        def login(ip, password, username=""):
+            return proxied.post("/api/auth/login", json={"username": username, "password": password},
+                                headers={"X-Forwarded-For": ip})
+
+        assert login("198.51.100.1", PASSWORD).status_code == 200  # the owner's usual IP
+        for i in range(3):  # each attacker IP stays under the per-IP limit
+            assert login(f"203.0.113.{i}", "guess").status_code == 401
+        for _ in range(4):
+            auth.record_account_failure("admin")  # more failures: a pause of several seconds
+        r = login("203.0.113.50", PASSWORD, "ADMIN")  # same account by name, fresh IP
+        assert r.status_code == 429 and int(r.headers["Retry-After"]) >= 1
+        assert login("203.0.113.51", PASSWORD).status_code == 429
+        assert login("198.51.100.1", PASSWORD).status_code == 200  # known IP: no pause
+        assert login("203.0.113.52", PASSWORD).status_code == 200  # success reset the account
+
+
+def test_anonymous_story_list_is_capped(exposed, feed_id, monkeypatch):
+    from app.routes import stories as story_routes
+
+    add_article(feed_id, "Storm warning issued")
+    pipeline.process_pending()
+    monkeypatch.setattr(story_routes, "_ANON_MAX_STORIES", 1)
+    stories = exposed.get("/api/stories").json()
+    assert (len(stories["stories"]), stories["count"]) == (1, 2)
+    _login(exposed)
+    assert len(exposed.get("/api/stories").json()["stories"]) == 2
+    health = exposed.get("/api/health").json()
+    assert health["articles"] == 2 and "worker" in health
+
+
+def test_failed_and_throttled_logins_are_logged(exposed, caplog):
+    caplog.set_level("INFO", logger="news.auth")
+    for _ in range(5):
+        exposed.post("/api/auth/login", json={"username": "mallory\nfake line", "password": "x"})
+    exposed.post("/api/auth/login", json={"password": PASSWORD})
+    lines = [r.getMessage() for r in caplog.records]
+    assert lines.count("login failed ip=203.0.113.7 user='mallory\\nfake line'") == 5  # newline can't forge a log line
+    assert "login throttled ip=203.0.113.7 reason=ip" in lines
+    assert not any(PASSWORD in line for line in lines)
+
+
+def test_refresh_runs_in_the_background(exposed, monkeypatch):
+    started, release, done = threading.Event(), threading.Event(), threading.Event()
+    monkeypatch.setattr(worker, "run_ingest", lambda: started.set() or release.wait(5))
+    monkeypatch.setattr(worker, "run_pipeline", lambda: done.set())
+
+    def finished():
+        for _ in range(500):
+            if not worker._refreshing:
+                return True
+            threading.Event().wait(0.01)
+        return False
+
+    _login(exposed)
+    assert exposed.post("/api/refresh").json() == {"started": True}
+    assert started.wait(5)
+    assert exposed.post("/api/refresh").json() == {"started": False}  # one at a time
+    release.set()
+    assert done.wait(5) and finished()
+    done.clear()
+    assert exposed.post("/api/refresh").json() == {"started": True}
+    assert done.wait(5) and finished()

@@ -6,9 +6,14 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from . import ingest
+from . import config, ingest
 
 NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+def is_https(request: Request) -> bool:
+    """Served over HTTPS: configured public base, or the request scheme (X-Forwarded-Proto via a trusted proxy)."""
+    return config.PUBLIC_BASE.startswith("https") or request.url.scheme == "https"
 
 
 def current_user(request: Request) -> dict[str, Any] | None:

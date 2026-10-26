@@ -145,6 +145,21 @@ _MAX_PAGE_BYTES = 5 * 1024 * 1024  # a stray video/image link must not be read i
 _MAX_REDIRECTS = 5
 
 
+def _read_capped(r: httpx.Response) -> bytes | None:
+    """The decoded body of a streamed response, or None once it exceeds _MAX_PAGE_BYTES."""
+    try:
+        if int(r.headers.get("content-length") or 0) > _MAX_PAGE_BYTES:
+            return None
+    except ValueError:
+        pass
+    body = bytearray()
+    for chunk in r.iter_bytes():
+        body += chunk
+        if len(body) > _MAX_PAGE_BYTES:
+            return None
+    return bytes(body)
+
+
 def fetch_page_text(url: str) -> str:
     """Fetch an article page and extract its text ("" for non-HTML, oversized or non-public targets).
 
@@ -163,18 +178,10 @@ def fetch_page_text(url: str) -> str:
             r.raise_for_status()
             if "html" not in r.headers.get("content-type", "html").lower():
                 return ""
-            try:
-                content_length = int(r.headers.get("content-length") or 0)
-            except ValueError:
-                content_length = 0
-            if content_length > _MAX_PAGE_BYTES:
+            body = _read_capped(r)
+            if body is None:
                 return ""
-            body = bytearray()
-            for chunk in r.iter_bytes():
-                body += chunk
-                if len(body) > _MAX_PAGE_BYTES:
-                    return ""
-            html = bytes(body).decode(r.encoding or "utf-8", errors="replace")
+            html = body.decode(r.encoding or "utf-8", errors="replace")
         return extract_content(html, url)
     return ""
 
@@ -185,12 +192,17 @@ def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -
         headers["If-None-Match"] = etag
     if last_modified:
         headers["If-Modified-Since"] = last_modified
-    r = http().get(url, headers=headers)
-    if r.status_code != 304:
-        r.raise_for_status()
-        if len(r.content) > _MAX_PAGE_BYTES:
-            raise ValueError("feed response exceeds size limit")
-    return r
+    with http().stream("GET", url, headers=headers) as r:
+        body = b""
+        if r.status_code != 304:
+            r.raise_for_status()
+            body = _read_capped(r)
+            if body is None:
+                raise ValueError("feed response exceeds size limit")
+    # The body is already decoded: drop the headers that described the wire encoding.
+    kept = [(k, v) for k, v in r.headers.multi_items()
+            if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+    return httpx.Response(r.status_code, headers=kept, content=body, request=r.request)
 
 
 # --- text extraction -------------------------------------------------------
@@ -218,7 +230,8 @@ def extract_content(html: str, url: str) -> str:
     try:
         from newspaper import Article
 
-        art = Article(url=url)
+        # fetch_images=False: parse() would download page images unpinned (LAN) and decode them with Pillow.
+        art = Article(url=url, fetch_images=False)
         art.set_html(html)
         art.parse()
         if _usable(art.text):

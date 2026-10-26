@@ -12,8 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, bus, config, db, reports, worker
 from .routes import ROUTERS
 from .routes.pages import FRONTEND
+from .web import is_https
 
 _ADMIN_PREFIXES = ("/feeds", "/api/feeds", "/api/refresh", "/api/reports", "/api/admin", "/admin")
+_SIGNED_IN_PAGES = ("/feeds", "/admin", "/list")  # browsers are sent to / instead of a JSON 401
 
 
 def _admin_only(path: str) -> bool:
@@ -24,11 +26,11 @@ def _admin_only(path: str) -> bool:
 def _is_public(request: Request) -> bool:
     """Read-only paths reachable without a session (chat history is not public)."""
     path = request.url.path
-    if path in ("/", "/list", "/favicon.ico", "/api/auth/login", "/api/auth/session") or path.startswith("/static/"):
+    if path in ("/", "/favicon.ico", "/api/auth/login", "/api/auth/session") or path.startswith("/static/"):
         return True
     if request.method != "GET":
         return False
-    if path in ("/api/stories", "/api/articles", "/api/heads-up", "/api/health", "/api/events"):
+    if path in ("/api/stories", "/api/heads-up", "/api/health"):
         return True
     if path.startswith(("/s/", "/p/", "/api/share/")):
         return True
@@ -53,7 +55,9 @@ def _same_origin(request: Request) -> bool:
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         return True
-    allowed = {request.headers.get("host", ""), urlsplit(config.PUBLIC_BASE).netloc}
+    if origin == "null":  # sandboxed iframes, data: URLs, privacy-redirected requests
+        return False
+    allowed = {h for h in (request.headers.get("host", ""), urlsplit(config.PUBLIC_BASE).netloc) if h}
     return urlsplit(origin).netloc in allowed
 
 
@@ -78,23 +82,28 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        user = request.state.user = await asyncio.to_thread(
-            auth.current_user, request.cookies.get(config.AUTH_COOKIE))
+        path = request.url.path
+        token = request.cookies.get(config.AUTH_COOKIE)
+        static = path.startswith("/static/") or path == "/favicon.ico"
+        user = request.state.user = (None if static or not token
+                                     else await asyncio.to_thread(auth.current_user, token))
         if not _is_public(request):
             if user is None:
-                if request.url.path in ("/feeds", "/admin"):
+                if request.url.path in _SIGNED_IN_PAGES:
                     return RedirectResponse("/", status_code=303)
                 return JSONResponse(status_code=401, content={"detail": "unauthenticated"})
             if _admin_only(request.url.path) and not user["is_admin"]:
-                if request.url.path in ("/feeds", "/admin"):
+                if request.url.path in _SIGNED_IN_PAGES:
                     return RedirectResponse("/", status_code=303)
                 return JSONResponse(status_code=403, content={"detail": "admins only"})
         return await call_next(request)
 
     @app.middleware("http")
     async def security_middleware(request: Request, call_next):
-        # Cross-site writes (CSRF).
-        if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
+        # Cross-site writes (CSRF); same-site covers sibling subdomains, which share the Lax cookie.
+        if request.method not in ("GET", "HEAD", "OPTIONS") and (
+                not _same_origin(request)
+                or request.headers.get("sec-fetch-site") in ("cross-site", "same-site")):
             return JSONResponse(status_code=403, content={"detail": "cross-origin request rejected"})
         # SameSite=Lax still sends the cookie on cross-site top-level GETs (e.g. /api/feeds/preview).
         if (request.url.path.startswith("/api/") and not _is_public(request)
@@ -102,7 +111,7 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=403, content={"detail": "cross-site request rejected"})
         resp = await call_next(request)
         resp.headers.update(_SECURITY_HEADERS)
-        if config.PUBLIC_BASE.startswith("https"):
+        if is_https(request):
             resp.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.url.path.startswith("/static/"):
             resp.headers["Cache-Control"] = "no-cache"

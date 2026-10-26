@@ -156,10 +156,32 @@ def _run_tag_merge() -> None:
     log.info("tag merge: %s", summary)
 
 
+_refresh_lock = threading.Lock()
+_refreshing = False
+
+
 def refresh() -> dict[str, Any]:
-    """Manual refresh: ingest now, then drain the queue (blocks)."""
-    new = run_ingest()
-    return {"ingest_new": new, **run_pipeline()}
+    """Manual refresh: ingest now, then drain the queue, on a background thread.
+
+    ``started`` is False while an earlier manual refresh is still running.
+    """
+    global _refreshing
+    with _refresh_lock:
+        if _refreshing:
+            return {"started": False}
+        _refreshing = True
+    threading.Thread(target=_run_refresh, name="news-refresh", daemon=True).start()
+    return {"started": True}
+
+
+def _run_refresh() -> None:
+    global _refreshing
+    try:
+        run_ingest()
+        run_pipeline()
+    finally:
+        with _refresh_lock:
+            _refreshing = False
 
 
 def _ingest_loop() -> None:

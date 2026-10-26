@@ -119,8 +119,8 @@ flowchart TD
   AdminCheck -->|No or is admin| UserOK[200 OK · per-user state]
 ```
 
-- **Sessions & passwords** (`app/auth.py`): passwords use salted `scrypt` (`AppUser.password_hash`). Cookie tokens are 256-bit (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS); only `sha256(token)` is stored in `AuthSession` (TTL ~3 months = 7200 h, max 500 sessions, survives restarts). Changing your password revokes sibling sessions; changing `NEWS_AUTH_PASSWORD` invalidates env-password sessions via `env_stamp`. Login and password changes are rate-limited (5 failures / 60 s per client IP, using the right-most `X-Forwarded-For` hop from a local proxy).
-- **SSRF & hardening** (`app/api.py`, `app/ingest.py`): strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, HSTS on HTTPS, CSRF `Origin` check against `Host`/`NEWS_PUBLIC_BASE`, `Sec-Fetch-Site: cross-site` block on private APIs, DNS-pinned public-IP page fetching, single-flight heads-up generation, 50-stream SSE cap.
+- **Sessions & passwords** (`app/auth.py`): passwords use salted `scrypt` (`AppUser.password_hash`). Cookie tokens are 256-bit (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS); only `sha256(token)` is stored in `AuthSession` (TTL ~3 months = 7200 h, max 500 sessions, survives restarts). Changing your password revokes sibling sessions; changing `NEWS_AUTH_PASSWORD` invalidates env-password sessions via `env_stamp`. Login and password changes are rate-limited (5 failures / 60 s per client IP, using the right-most `X-Forwarded-For` hop from a local proxy); after 10 failures on one account from any IPs, further attempts pause (1 s doubling up to 5 min) except from IPs that account signed in from before. Unknown user names cost the same scrypt run as known ones. Failures are logged as `login failed ip=<ip> user=<name>` (and `login throttled ...`), e.g. for fail2ban.
+- **SSRF & hardening** (`app/api.py`, `app/ingest.py`): strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, HSTS on HTTPS (`NEWS_PUBLIC_BASE` or the request scheme), CSRF `Origin` check against `Host`/`NEWS_PUBLIC_BASE` (`Origin: null` rejected), `Sec-Fetch-Site: cross-site` block on private APIs and `cross-site`/`same-site` block on writes, DNS-pinned public-IP page fetching, feed/page bodies streamed with a 5 MB cap, single-flight heads-up generation, 50-stream SSE cap, signed-out story list cap (200).
 - **Sharing**: stories share via `/s/<id>` (public default view). Briefs and chat answers are snapshotted via `POST /api/share` into `ShareLink` (`/p/<token>`: 8-char token for the default brief, 32-char unguessable token for personal briefs and chat answers) and can be listed or revoked in ⚙ Preferences.
 
 ## UI & Pages
@@ -143,10 +143,12 @@ flowchart TD
 | `POST /api/feedback` · `GET /api/feedback` | User | 👍/👎 vote (`up\|down`, or `null` to undo and revert tag weights) · vote log |
 | `GET/PUT /api/profile` | User | Preferences (`about`, `home_*`, `interest_regions`, `locations`, `min_quality`, `excluded_feeds`, `ntfy_reports`), `tag_weights`, `source_weights`, `feed_weights` |
 | `POST /api/share` · `GET /api/share` · `GET/DELETE /api/share/{token}` | User / Public `GET {token}` | Create snapshot (`/p/<token>`), list own links, view snapshot (public), revoke link |
-| `GET /api/articles` · `GET /api/health` · `GET /api/events` | Public | Article timing table · DB/worker health · SSE stream |
+| `GET /api/health` | Public | `{"ok": true}`; DB/worker health for signed-in users |
+| `GET /api/articles` | User | Article timing table (`/list`) |
+| `GET /api/events` | User | SSE stream |
 | `GET /api/auth/session` · `POST /api/auth/login` · `POST /api/auth/logout` · `POST /api/auth/password` | Public / User | Session probe, login (`username`, `password`), logout, change own password |
 | `GET/POST /api/feeds` · `PATCH/DELETE /api/feeds/{id}` · `POST /api/feeds/category` · `GET /api/feeds/preview` | Admin | Feed & category management |
-| `POST /api/refresh` · `GET /api/reports/{kind}` · `POST /api/reports/{kind}/send` | Admin | Blocking ingest+pipeline run · preview / push `brief` or `pipeline` ntfy report |
+| `POST /api/refresh` · `GET /api/reports/{kind}` · `POST /api/reports/{kind}/send` | Admin | Start ingest+pipeline in the background (`{"started": false}` while one runs) · preview / push `brief` or `pipeline` ntfy report |
 | `GET/POST /api/admin/users` · `PATCH/DELETE /api/admin/users/{id}` | Admin | User management (user 1 stays admin; no self-demotion/deletion) |
 
 ## Configuration (`app/config.py`)

@@ -7,11 +7,11 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import bus, db, pipeline, worker
-from ..web import NO_CACHE
+from ..web import NO_CACHE, current_user
 
 router = APIRouter()
 
-_SSE_MAX_CLIENTS = 50  # /api/events is public; each stream holds a connection
+_SSE_MAX_CLIENTS = 50  # each stream holds a connection
 
 
 @router.get("/api/articles")
@@ -23,7 +23,10 @@ def list_articles(limit: int = Query(100, ge=1, le=5000), order: str = "newest",
 
 
 @router.get("/api/health")
-def health():
+def health(request: Request):
+    """Liveness for everyone; pipeline counts and worker state only for signed-in users."""
+    if current_user(request) is None:
+        return {"ok": True}
     with db.get_conn() as conn:
         totals = pipeline.counts(conn)
     return {"ok": True, "articles": totals["articles"], "stories": totals["stories"], "pending": totals["pending"],

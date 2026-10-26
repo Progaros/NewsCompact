@@ -10,8 +10,10 @@ Design decisions (see findings.md, "Authentication & API security"):
   it gets a password of its own.
 - Startup fails unless NEWS_AUTH_PASSWORD is set or an admin has a password of
   their own (there is no unauthenticated mode).
-- Login is throttled per client IP (sliding window) so passwords are not a
-  brute-force target.
+- Login is throttled per client IP (sliding window) and per account (a growing
+  pause after many failures from any IP; IPs the account signed in from before
+  skip it, so an attacker can't lock the owner out).
+- Unknown user names cost one scrypt run like known ones (no timing oracle).
 - The cookie is HttpOnly + SameSite=Lax: JS can't read it, and cross-site
   pages can't issue state-changing POSTs to us.
 """
@@ -50,6 +52,9 @@ def verify_password(password: str, stored: str | None) -> bool:
     return secrets.compare_digest(actual, bytes.fromhex(digest))
 
 
+_DUMMY_HASH = hash_password("timing")
+
+
 # --- sessions --------------------------------------------------------------
 
 
@@ -86,7 +91,7 @@ def authenticate(name: str | None, password: str) -> dict[str, Any] | None:
     with db.get_conn() as conn:
         row = _user_row(conn, user_id=OWNER_ID) if not (name or "").strip() else _user_row(conn, name=name)
     if row is None:
-        verify_password(password, hash_password("timing"))  # don't reveal unknown names by timing
+        verify_password(password, _DUMMY_HASH)  # don't reveal unknown names by timing
         return None
     if row["password_hash"]:
         return row if verify_password(password, row["password_hash"]) else None
@@ -135,29 +140,21 @@ def create_session(user_id: int = OWNER_ID) -> str:
     return token
 
 
-def session_user_id(token: str | None) -> int | None:
+def current_user(token: str | None) -> dict[str, Any] | None:
+    """The signed-in user; None when anonymous."""
     if not token:
         return None
     with db.get_conn() as conn:
         row = conn.execute(
-            "SELECT s.user_id, s.env_stamp, u.password_hash FROM AuthSession s JOIN AppUser u ON u.id = s.user_id "
-            "WHERE s.token_hash = ? AND s.expires_at > ?", (_token_hash(token), time.time()),
+            "SELECT u.id, u.name, u.is_admin, u.password_hash, s.env_stamp FROM AuthSession s "
+            "JOIN AppUser u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
+            (_token_hash(token), time.time()),
         ).fetchone()
     if row is None:
         return None
     if not row["password_hash"] and row["env_stamp"] != _env_stamp():
         return None  # opened with a NEWS_AUTH_PASSWORD that has changed since
-    return row["user_id"]
-
-
-def current_user(token: str | None) -> dict[str, Any] | None:
-    """The signed-in user; None when anonymous."""
-    uid = session_user_id(token)
-    if uid is None:
-        return None
-    with db.get_conn() as conn:
-        row = _user_row(conn, user_id=uid)
-    return public_user(row) if row else None
+    return public_user(row)
 
 
 def is_authenticated(token: str | None) -> bool:
@@ -187,14 +184,15 @@ _fail_lock = threading.Lock()
 
 
 def _prune_locked(ip: str) -> list[float]:
-    """Refresh the IP's window; drop fully-expired IPs to bound memory."""
-    now = time.time()
-    cutoff = now - _WINDOW_SECONDS
-    recent = [t for t in _failures.get(ip, []) if t > cutoff]
-    _failures[ip] = recent
-    if len(_failures) > _MAX_IPS:
-        for other in [k for k, v in _failures.items() if not v]:
+    """Refresh the IP's window; drop expired IPs, then the least recently seen, to bound memory."""
+    cutoff = time.time() - _WINDOW_SECONDS
+    recent = [t for t in _failures.pop(ip, []) if t > cutoff]
+    if len(_failures) >= _MAX_IPS:
+        for other in [k for k, v in _failures.items() if not v or v[-1] <= cutoff]:
             del _failures[other]
+        while len(_failures) >= _MAX_IPS:
+            del _failures[next(iter(_failures))]
+    _failures[ip] = recent  # re-inserted: dict order = least recently seen first
     return recent
 
 
@@ -212,3 +210,63 @@ def record_failure(ip: str) -> None:
 def clear_failures(ip: str) -> None:
     with _fail_lock:
         _failures.pop(ip, None)
+
+
+# --- login throttle per account (all IPs): a growing pause, skipped by known IPs ---
+
+_ACCOUNT_FREE_FAILS = 10          # failures before pauses start
+_ACCOUNT_MAX_PAUSE = 300.0        # seconds
+_ACCOUNT_RESET_SECONDS = 3600.0   # a quiet hour forgets the failures
+_MAX_ACCOUNTS = 1000              # memory bound (unknown names are tracked too)
+_KNOWN_IPS_PER_ACCOUNT = 20
+
+_accounts: dict[str, tuple[int, float]] = {}   # account key -> (failures, last failure)
+_known_ips: dict[str, dict[str, None]] = {}    # account key -> IPs it signed in from (oldest first)
+
+
+def account_key(name: str | None) -> str:
+    """Throttle key of a login name; no name = the owner, so "" and the owner's name share one budget."""
+    name = (name or "").strip()
+    if not name:
+        with db.get_conn() as conn:
+            row = conn.execute("SELECT name FROM AppUser WHERE id = ?", (OWNER_ID,)).fetchone()
+        name = row[0] if row else ""
+    return name.casefold()
+
+
+def _account_fails_locked(key: str, now: float) -> tuple[int, float]:
+    fails, last = _accounts.get(key, (0, 0.0))
+    return (0, last) if now - last > _ACCOUNT_RESET_SECONDS else (fails, last)
+
+
+def account_wait(key: str, ip: str) -> float:
+    """Seconds before the account takes another attempt from ``ip`` (0 = now)."""
+    now = time.time()
+    with _fail_lock:
+        if ip in _known_ips.get(key, {}):
+            return 0.0
+        fails, last = _account_fails_locked(key, now)
+    excess = fails - _ACCOUNT_FREE_FAILS
+    if excess < 0:
+        return 0.0
+    return max(0.0, last + min(_ACCOUNT_MAX_PAUSE, 2.0 ** excess) - now)
+
+
+def record_account_failure(key: str) -> None:
+    now = time.time()
+    with _fail_lock:
+        fails, _ = _account_fails_locked(key, now)
+        _accounts.pop(key, None)
+        _accounts[key] = (fails + 1, now)
+        while len(_accounts) > _MAX_ACCOUNTS:
+            del _accounts[next(iter(_accounts))]
+
+
+def record_account_success(key: str, ip: str) -> None:
+    with _fail_lock:
+        _accounts.pop(key, None)
+        known = _known_ips.setdefault(key, {})
+        known.pop(ip, None)
+        known[ip] = None
+        while len(known) > _KNOWN_IPS_PER_ACCOUNT:
+            del known[next(iter(known))]

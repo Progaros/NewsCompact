@@ -18,6 +18,10 @@ TEST_PASSWORD = "test env password 0123456789"
 
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
+    from app import auth
+
+    for state in (auth._failures, auth._accounts, auth._known_ips):
+        state.clear()
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(config, "HEADS_UP_NTFY_TIMES", [])
     monkeypatch.setattr(config, "HEADS_UP_NTFY_URL", "")

@@ -19,7 +19,7 @@ function storyHtml(d) {
 }
 
 function snapshotHtml(d) {
-  const by = `Shared by ${esc(d.shared_by)} · ${esc(fmtUtc(d.created_at))}`;
+  const by = `Shared · ${esc(fmtUtc(d.created_at))}`;
   if (d.kind === "brief") {
     return `<div class="shared-kicker">Quick Heads Up${d.view === "personal" ? " (personal)" : ""}</div>
       <p class="summary shared-brief">${esc(d.text)}</p>

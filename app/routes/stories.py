@@ -10,6 +10,8 @@ from ..web import current_user, private, require_uid
 
 router = APIRouter()
 
+_ANON_MAX_STORIES = 200  # signed-out visitors: bounded work per request
+
 
 @router.get("/api/stories")
 def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archived: bool = False,
@@ -23,6 +25,8 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
     """
     user = current_user(request)
     uid = user["id"] if user else None
+    if uid is None:
+        limit = min(limit, _ANON_MAX_STORIES)
     personal = uid is not None and view == "personal"
     keep_ids = {int(x) for x in keep.split(",") if x.strip().isdigit()}
     with db.get_conn() as conn:
