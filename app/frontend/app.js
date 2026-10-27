@@ -298,6 +298,7 @@ class StoryCard extends HTMLElement {
         <div class="kicker">
           ${updated ? `<span class="badge-updated" title="Significant update since you marked it read">Updated since you read${newCount ? ` · ${newCount} new` : ""}</span>` : ""}
           ${breaking ? `<span class="badge-breaking">Breaking</span>` : ""}
+          ${d.match === "meaning" ? `<span class="badge-meaning" title="None of the search words appear — found by meaning">Related</span>` : ""}
           ${m.status && !breaking ? `<span>${esc(m.status)}</span>` : ""}
           ${location}
           <span title="Last news ${esc(fmtUtc(d.news_at))}">${esc(timeAgo(d.news_at))}</span>
@@ -361,15 +362,19 @@ class StoryCard extends HTMLElement {
     // The headline link opens the public story page only when the card is
     // already open; on a collapsed card it expands the story in place.
     this.querySelector(".headline-link").addEventListener("click", (e) => {
-      e.stopPropagation(); // don't clear the text selection
-      if (this.classList.contains("open")) { // open card: let it navigate
+      e.stopPropagation();
+      // Open card or Ctrl/Cmd/Shift-click (new tab/window): let it navigate.
+      if (this.classList.contains("open") || e.ctrlKey || e.metaKey || e.shiftKey) {
         if (Auth.state.authenticated && this._data.read !== "read") this._toggleRead();
         return;
       }
       e.preventDefault();
       onClick(); // expands the collapsed card
     });
-    body.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } });
+    body.addEventListener("keydown", (e) => {
+      if (e.target !== body) return; // Enter on the headline link is a link click
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
+    });
     const srcBtn = this.querySelector(".src-toggle");
     srcBtn.addEventListener("click", () => srcBtn.setAttribute("aria-expanded", toggleIn(sourcesOpenIds, d.id, this, "src-open")));
     this.querySelectorAll(".fb[data-kind]").forEach((b) => b.addEventListener("click", () => this._feedback(b.dataset.kind)));
@@ -594,7 +599,7 @@ function storiesUrl(limit) {
   if (state.scope === "archive") p.set("archived", "true");
   if (state.query) p.set("q", state.query);
   if (state.tag) p.set("tag", state.tag);
-  if (state.scope === "active" && view === "personal" && !state.showRead) {
+  if (state.scope === "active" && view === "personal" && !state.showRead && !state.query) {
     p.set("hide_read", "true");
     if (sessionReadIds.size) p.set("keep", [...sessionReadIds].join(","));
   }
@@ -648,6 +653,9 @@ async function poll() {
   }
 }
 
+// A reload requested while a request runs (e.g. typing during a slow search) follows it.
+let reloadQueued = false;
+
 async function loadMore() {
   if (state.loading) return;
   state.loading = true;
@@ -660,10 +668,13 @@ async function loadMore() {
   } finally {
     state.loading = false;
     moreBtn.disabled = false;
+    if (reloadQueued) reload();
   }
 }
 
 function reload() {
+  reloadQueued = state.loading;
+  if (reloadQueued) return;
   state.shown = 0;
   state.loadedAt = Date.now();
   checkStale();

@@ -39,7 +39,7 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import config, db, diversity, tags as tagmod
+from . import config, db, diversity, search, tags as tagmod
 from .tags import normalize_tags
 
 SCORE_VERSION = "v2.1"
@@ -545,12 +545,15 @@ def vote_states(conn: sqlite3.Connection, user_id: int | None) -> dict[int, str]
 def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = None, *,
                    archived: bool = False, query: str = "", tag: str = "",
                    personal: bool = True, user_id: int | None = 1,
-                   keep: frozenset[int] | set[int] = frozenset(), diverse: bool = True) -> list[dict[str, Any]]:
+                   keep: frozenset[int] | set[int] = frozenset(), diverse: bool = True,
+                   semantic: bool = False) -> list[dict[str, Any]]:
     """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
     Active stories (news within STORY_ACTIVE_DAYS) are ranked by score (``display``,
     ``relevance`` = its breakdown); ``archived`` returns the older ones, newest first.
     Honors ``preferences.min_quality``, muted tags (personal) and optional text / tag filters.
+    A ``query`` keeps only search matches (app/search.py; ``semantic`` adds meaning matches),
+    ordered by match, and sets each item's ``match``.
     ``read`` is None, "read" or "updated" (significant update since ``user_id`` read it); the
     personal view scales the score by ``reader_factor`` except for ``keep`` ids (read during
     this page visit, so they don't jump). ``diverse`` reranks the top for variety.
@@ -569,10 +572,13 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     # news_at is always set once a story has a headline (Prompt 2 / migration v5 / init_db backfill).
     sql = "SELECT * FROM Story WHERE headline IS NOT NULL AND news_at " + ("< ?" if archived else ">= ?")
     params: list[Any] = [cutoff]
+    hits: dict[int, dict[str, Any]] = {}
     if query:
-        sql += " AND (headline LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
-        like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        params += [like, like, like]
+        hits = search.search(conn, query, archived=archived, cutoff=cutoff, semantic=semantic)
+        if not hits:
+            return []
+        sql += f" AND id IN ({','.join('?' * len(hits))})"
+        params += list(hits)
     try:
         min_quality = float(profile["preferences"].get("min_quality") or 0)
     except (TypeError, ValueError):
@@ -603,7 +609,13 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
         out.append({"story": s, "source_count": st["feeds"], "outlet_count": st["outlets"],
                     "quality": round(quality, 2),
                     "relevance": relevance, "display": display, "vote": votes.get(s["id"]), **state})
-    if archived:
+    if hits:
+        boost = config.SEARCH_PRIORITY_BOOST
+        for x in out:
+            x["match"] = hits[x["story"]["id"]]["match"]
+        out.sort(key=lambda x: hits[x["story"]["id"]]["score"] * (1 + boost * max(0.0, x["display"]) / 100),
+                 reverse=True)
+    elif archived:
         out.sort(key=lambda x: news_time(x["story"]) or "", reverse=True)
     else:
         out.sort(key=lambda x: x["display"], reverse=True)

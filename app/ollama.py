@@ -55,10 +55,11 @@ def available() -> bool:
 
 
 # --- embeddings ------------------------------------------------------------
-def embed_texts(texts: list[str]) -> list[list[float]]:
+def embed_texts(texts: list[str], *, timeout: float | None = None) -> list[list[float]]:
     if not texts:
         return []
-    r = _http().post("/api/embed", json=_keep_alive({"model": config.EMBED_MODEL, "input": texts}))
+    r = _http().post("/api/embed", json=_keep_alive({"model": config.EMBED_MODEL, "input": texts}),
+                     **({"timeout": timeout} if timeout else {}))
     r.raise_for_status()
     out = r.json().get("embeddings", [])
     if len(out) != len(texts):

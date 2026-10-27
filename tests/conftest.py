@@ -18,10 +18,11 @@ TEST_PASSWORD = "test env password 0123456789"
 
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
-    from app import auth
+    from app import auth, search
 
     for state in (auth._failures, auth._accounts, auth._known_ips):
         state.clear()
+    search.clear_cache()
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(config, "HEADS_UP_NTFY_TIMES", [])
     monkeypatch.setattr(config, "HEADS_UP_NTFY_URL", "")
@@ -60,7 +61,7 @@ class FakeLLM:
             raise httpx.ConnectError("refused")
         return topic_vector(text)
 
-    def embed_texts(self, texts):
+    def embed_texts(self, texts, **_kw):
         if self.down:
             raise httpx.ConnectError("refused")
         self.embed_batches.append(len(texts))

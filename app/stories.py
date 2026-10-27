@@ -46,6 +46,7 @@ def story_payload(item: dict[str, Any], articles: list[dict],
         "read_at": item.get("read_at"),
         "changes": item.get("changes") or [],
         "vote": item.get("vote"),
+        "match": item.get("match"),
         "articles": articles,
         "related": related or [],
     }

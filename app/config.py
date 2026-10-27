@@ -259,6 +259,29 @@ CHAT_STORY_MAX_ARTICLES = _int("NEWS_CHAT_STORY_MAX_ARTICLES", 30)
 CHAT_CONTEXT_PER_SOURCE = _int("NEWS_CHAT_CONTEXT_PER_SOURCE", 1500)
 CHAT_CONTEXT_MAX = _int("NEWS_CHAT_CONTEXT_MAX", 6000)
 
+# --- Story search (app/search.py) -------------------------------------------
+# Word matches (FTS5) for everyone; signed-in users also get meaning matches (query
+# embedding vs article vectors), merged by Reciprocal Rank Fusion.
+SEARCH_RRF_K = _int("NEWS_SEARCH_RRF_K", 60)
+SEARCH_SEMANTIC_WEIGHT = _float("NEWS_SEARCH_SEMANTIC_WEIGHT", 1.0)  # word list weighs 1.0
+SEARCH_KNN = _int("NEWS_SEARCH_KNN", 400)  # nearest articles per query, before the scope filter
+SEARCH_SEMANTIC_MAX_STORIES = _int("NEWS_SEARCH_SEMANTIC_MAX_STORIES", 30)
+# Meaning-only matches need this cosine and must be within SEARCH_SIM_MARGIN of the best one.
+# Uncalibrated guesses: tune with scripts/search_probe.py on the server.
+SEARCH_MIN_SIM = _float("NEWS_SEARCH_MIN_SIM", 0.5)
+SEARCH_SIM_MARGIN = _float("NEWS_SEARCH_SIM_MARGIN", 0.15)
+# Wait at most this long for the query embedding, then answer with word matches only.
+SEARCH_SEMANTIC_TIMEOUT = _float("NEWS_SEARCH_SEMANTIC_TIMEOUT", 1.5)
+SEARCH_EMBED_TIMEOUT = _float("NEWS_SEARCH_EMBED_TIMEOUT", 15)  # HTTP cap of a late embedding
+SEARCH_EMBED_MAX_INFLIGHT = _int("NEWS_SEARCH_EMBED_MAX_INFLIGHT", 2)  # busy -> word matches only
+SEARCH_EMBED_CACHE = _int("NEWS_SEARCH_EMBED_CACHE", 500)
+# Fused score × (1 + boost · priority/100): newer/more important stories win near-ties.
+SEARCH_PRIORITY_BOOST = _float("NEWS_SEARCH_PRIORITY_BOOST", 0.15)
+# Qwen3-Embedding query instruction (documents are embedded without one); changing it
+# changes the query vectors, so re-check SEARCH_MIN_SIM afterwards.
+SEARCH_INSTRUCT = _env("NEWS_SEARCH_INSTRUCT",
+                       "Given a news search query, retrieve news articles about the topic, event or names it mentions")
+
 # --- searchngx (SearXNG web search for chat) ---------------------------------
 SEARCHNGX_BASE_URL = _env("NEWS_SEARCHNGX_BASE_URL", "https://searx.example.org/")
 SEARCHNGX_API_KEY = _env("NEWS_SEARCHNGX_API_KEY", "")

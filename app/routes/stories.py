@@ -22,6 +22,7 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
     during this page visit: exempt from it and from the read-state score factor.
 
     ``view=personal`` (signed-in only) ranks with the user's interests and settings.
+    ``q`` searches words for everyone, and meaning too when signed in (costs an Ollama call).
     """
     user = current_user(request)
     uid = user["id"] if user else None
@@ -29,15 +30,17 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
         limit = min(limit, _ANON_MAX_STORIES)
     personal = uid is not None and view == "personal"
     keep_ids = {int(x) for x in keep.split(",") if x.strip().isdigit()}
+    query = q.strip()
     with db.get_conn() as conn:
         profile = scoring.get_user_profile(conn, uid) if personal else scoring.DEFAULT_PROFILE
-        ranked = scoring.ranked_stories(conn, profile, archived=archived, query=q.strip(), tag=tag.strip(),
-                                        personal=personal, user_id=uid, keep=keep_ids, diverse=False)
+        ranked = scoring.ranked_stories(conn, profile, archived=archived, query=query, tag=tag.strip(),
+                                        personal=personal, user_id=uid, keep=keep_ids, diverse=False,
+                                        semantic=uid is not None)
         hidden = 0
         if hide_read and personal and not archived:
             visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]
             hidden, ranked = len(ranked) - len(visible), visible
-        if not archived:
+        if not archived and not query:
             ranked = diversity.rerank(conn, ranked)
         page = ranked[:limit]
         exclude = scoring.excluded_feeds(profile)

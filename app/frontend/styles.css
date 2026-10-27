@@ -344,6 +344,10 @@ story-card.is-updated { border-color: rgba(79,155,255,.35); }
   color: var(--accent); background: var(--accent-soft); border-radius: 6px;
   padding: 1px 8px; font-weight: 600; font-size: 11px;
 }
+.badge-meaning {
+  color: var(--text-2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 0 7px; font-size: 11px;
+}
 .new-badge {
   display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px;
   background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700;

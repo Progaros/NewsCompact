@@ -59,7 +59,8 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("SELECT rowid FROM StorySearch WHERE StorySearch MATCH 'voted'").fetchone()[0] == 5
         # v8: the weight the 👍 alone made leaves the tag list; hand-set ones stay
         assert json.loads(conn.execute("SELECT tag_weights FROM UserProfile").fetchone()[0]) == {
             "climate": 3.0, "KI": 2}

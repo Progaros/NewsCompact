@@ -70,6 +70,31 @@ _INDEXES = (
 )
 
 VECTOR_TABLE = "Article_Vectors"
+SEARCH_TABLE = "StorySearch"
+
+# One FTS5 row per story (app/search.py): its own text plus its article titles, rebuilt by
+# triggers whenever either side changes.
+_SEARCH_ROW = (
+    f"DELETE FROM {SEARCH_TABLE} WHERE rowid = {{id}}; "
+    f"INSERT INTO {SEARCH_TABLE} (rowid, headline, tags, summary, titles) "
+    "SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id) "
+    "FROM Story WHERE id = {id};"
+)
+_SEARCH_TRIGGERS = (
+    f"CREATE TRIGGER IF NOT EXISTS story_search_insert AFTER INSERT ON Story "
+    f"BEGIN {_SEARCH_ROW.format(id='NEW.id')} END",
+    f"CREATE TRIGGER IF NOT EXISTS story_search_update AFTER UPDATE OF headline, summary, tags ON Story "
+    f"BEGIN {_SEARCH_ROW.format(id='NEW.id')} END",
+    f"CREATE TRIGGER IF NOT EXISTS story_search_delete AFTER DELETE ON Story "
+    f"BEGIN DELETE FROM {SEARCH_TABLE} WHERE rowid = OLD.id; END",
+    f"CREATE TRIGGER IF NOT EXISTS article_search_insert AFTER INSERT ON Article WHEN NEW.story_id IS NOT NULL "
+    f"BEGIN {_SEARCH_ROW.format(id='NEW.story_id')} END",
+    f"CREATE TRIGGER IF NOT EXISTS article_search_update AFTER UPDATE OF story_id, title ON Article "
+    f"WHEN OLD.story_id IS NOT NEW.story_id OR OLD.title IS NOT NEW.title "
+    f"BEGIN {_SEARCH_ROW.format(id='OLD.story_id')} {_SEARCH_ROW.format(id='NEW.story_id')} END",
+    f"CREATE TRIGGER IF NOT EXISTS article_search_delete AFTER DELETE ON Article WHEN OLD.story_id IS NOT NULL "
+    f"BEGIN {_SEARCH_ROW.format(id='OLD.story_id')} END",
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -210,10 +235,25 @@ def _explicit_tag_weights(conn: sqlite3.Connection) -> None:
             conn.execute("UPDATE UserProfile SET tag_weights = ? WHERE id = ?", (json.dumps(keep), uid))
 
 
+def _story_search(conn: sqlite3.Connection) -> None:
+    """v9: full-text index of the stories (kept in sync by _SEARCH_TRIGGERS afterwards)."""
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {SEARCH_TABLE} USING fts5(headline, tags, summary, titles, "
+        "tokenize = 'unicode61 remove_diacritics 2', prefix = '3')"
+    )
+    conn.execute(f"DELETE FROM {SEARCH_TABLE}")
+    conn.execute(
+        f"INSERT INTO {SEARCH_TABLE} (rowid, headline, tags, summary, titles) "
+        "SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id) "
+        "FROM Story"
+    )
+
+
 # (user_version, migration) — each runs once, inside a transaction (foreign keys off,
 # so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
-                    (5, _news_at), (6, _per_user), (7, _drop_read_summary), (8, _explicit_tag_weights))
+                    (5, _news_at), (6, _per_user), (7, _drop_read_summary), (8, _explicit_tag_weights),
+                    (9, _story_search))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -254,6 +294,8 @@ def init_db() -> None:
             f"CREATE TRIGGER IF NOT EXISTS article_vector_delete AFTER DELETE ON Article "
             f"BEGIN DELETE FROM {VECTOR_TABLE} WHERE article_id = OLD.id; END"
         )
+        for ddl in _SEARCH_TRIGGERS:
+            conn.execute(ddl)
         conn.execute(f"DELETE FROM {VECTOR_TABLE} WHERE article_id NOT IN (SELECT id FROM Article)")
         # One vote per user and story (older code could log a vote twice).
         conn.execute("DELETE FROM FeedbackLog WHERE story_id IS NOT NULL AND id NOT IN "
