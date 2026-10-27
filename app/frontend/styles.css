@@ -184,8 +184,9 @@ story-card.breaking { border-color: rgba(248,81,73,.45); }
 }
 .headline a { color: inherit; text-decoration: none; border-radius: 4px;
   transition: color .15s; cursor: pointer; }
-.headline a:hover, .headline a:focus-visible { color: var(--accent); }
-.headline a:hover { color: var(--accent); }
+/* Collapsed, the headline is not a link yet (a click expands the card) — no accent hover.
+   Open card, it navigates to /s/<id> → real link, accent hover. */
+story-card.open .headline a:hover, story-card.open .headline a:focus-visible { color: var(--accent); }
 .summary {
   color: var(--text-2); margin: 8px 0 0; font-size: 15px; line-height: 1.65;
   text-wrap: pretty;
