@@ -9,18 +9,31 @@
  * focuses it, a different story switches it. Survives story-card re-renders
  * (it lives on <body>).
  *
- * Streams are per-story and run in the background: closing the popup does
- * NOT abort a running answer (nor does switching stories) — only the Stop
- * button aborts. After every stream end the history is re-fetched from the
- * server, so the view settles into a consistent state (✎ / version arrows
- * are always present). */
+ * Answers run as server-side jobs (app/chat_jobs.py): closing the popup,
+ * switching stories or reloading the page does NOT stop them — only the Stop
+ * button does. This tab follows each running answer (its own sends, and any
+ * running one it finds via /api/chats or when a chat is opened). After every
+ * stream end the history is re-fetched from the server, so the view settles
+ * into a consistent state (✎ / version arrows are always present).
+ *
+ * Clicking beside the popup while an answer is in progress turns it into a
+ * bubble (bottom right) showing the progress, then "answer ready"; it stays
+ * until the chat is opened or the answer read elsewhere. A chat opened while
+ * its answer is pending doesn't bubble again on the next click beside it (until
+ * the next question). Unread answers are counted on the "Chats" tab (/chats). */
 
 const Chat = (() => {
   let currentStory = null; // story_id the popup is bound to
-  const streams = new Map(); // story_id -> AbortController for the live stream; outlives the box
+  const streams = new Map(); // story_id -> state of the followed answer job; outlives the box
   const queues = new Map();  // story_id -> FIFO queue of sends typed while its stream is running
+  const chats = new Map();   // story_id -> /api/chats row (headline, unread, running, status)
+  const headlines = new Map(); // story_id -> headline (known before the first sync)
+  const noBubble = new Set();  // opened while pending: clicking beside it doesn't bubble it again
+  const listeners = [];
   function busyFor(storyId) { return streams.has(storyId); }
+  function serverBusy(storyId) { return !!chats.get(storyId)?.running; }
   let webSearch = localStorage.getItem("chatWebSearch") !== "0"; // on by default
+  let signedIn = false;
 
   // --- markdown (compact, HTML-safe) ---------------------------------------
   function inline(s) {
@@ -118,13 +131,17 @@ const Chat = (() => {
 
   function isOpen() { return !!document.getElementById("chat-popup"); }
 
-  function open(storyId) {
+  function open(storyId, headline) {
     if (!Auth.state.authenticated) {
       Auth.toast("Sign in to use story chat.", {
         label: "Sign in", onClick: Auth.showLoginModal,
       });
       return;
     }
+    if (headline) headlines.set(storyId, headline);
+    // Looked at while pending: a click beside it later must not bubble it again.
+    if (busyFor(storyId) || serverBusy(storyId) || chats.get(storyId)?.unread) noBubble.add(storyId);
+    removeBubble(storyId);
     if (isOpen() && currentStory === storyId) {
       document.getElementById("chat-input")?.focus();
       return;
@@ -133,12 +150,27 @@ const Chat = (() => {
   }
 
   function close() {
-    // Closing does NOT abort the stream: it belongs to the story, not to
-    // this box, and the model keeps working (whatever was generated is
-    // persisted server-side). Only stopSend() (the Stop button) aborts.
+    // Closing does NOT stop the answer: it runs on the server (whatever is
+    // generated is persisted). Only stopSend() (the Stop button) stops it.
     // render()/open() re-fetches the fresh state next time.
     document.getElementById("chat-popup")?.remove();
+    document.body.classList.remove("chat-open");
     currentStory = null;
+    renderBubbles();
+  }
+
+  // Click beside the popup: an answer in progress continues as a bubble.
+  function minimize() {
+    const storyId = currentStory;
+    close();
+    if (storyId != null && !noBubble.has(storyId)
+        && (busyFor(storyId) || serverBusy(storyId) || (queues.get(storyId) || []).length)) {
+      addBubble(storyId);
+    }
+  }
+
+  function titleOf(storyId) {
+    return headlines.get(storyId) || chats.get(storyId)?.headline || "Story chat";
   }
 
   function render(storyId) {
@@ -149,7 +181,7 @@ const Chat = (() => {
     overlay.innerHTML = `
       <div class="chat-panel">
         <div class="chat-head">
-          <span class="chat-title">\u{1F4AC} Story chat</span>
+          <span class="chat-title"></span>
           <button id="chat-close" class="chat-x" title="Close">×</button>
         </div>
         <div class="chat-messages" id="chat-messages"></div>
@@ -160,11 +192,14 @@ const Chat = (() => {
           <textarea id="chat-input" rows="2" placeholder="Ask about this story\u2026"></textarea>
           <button id="chat-send" class="btn">Send</button>
         </div>
-        <div class="chat-foot">Local model · Enter to send · Shift+Enter for newline · Stop interrupts · closing keeps the agent running · messages queue while working · per-story history</div>
+        <div class="chat-foot">Local model · Enter to send · Shift+Enter for newline · click beside the chat to keep a working answer as a bubble · messages queue while working</div>
       </div>`;
+    overlay.querySelector(".chat-title").textContent = `\u{1F4AC} ${titleOf(storyId)}`;
     document.body.appendChild(overlay);
+    document.body.classList.add("chat-open");
+    renderBubbles();
 
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) minimize(); });
     overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
     overlay.querySelector("#chat-close").onclick = close;
 
@@ -181,25 +216,36 @@ const Chat = (() => {
     input.addEventListener("input", syncSendBtn);
     syncSendBtn();
     loadHistory(storyId, input);
+    if (!busyFor(storyId)) attach(storyId); // an answer may be running (other tab, before a reload)
     drain(storyId); // anything queued before the close now starts
   }
 
   // "Send" turns into "Stop" once the agent is working and there is nothing
-  // to send: aborting the stream stops the server from making further model
-  // / web-search calls (whatever was generated is kept and saved).
+  // to send: stopping makes the server end its model / web-search calls
+  // (whatever was generated is kept and saved).
   function syncSendBtn() {
     const btn = document.getElementById("chat-send");
     const input = document.getElementById("chat-input");
     if (!btn) return;
-    const stopMode = busyFor(currentStory) && input && !input.value.trim();
-    btn.textContent = stopMode ? "Stop" : "Send";
+    const st = streams.get(currentStory);
+    const stopMode = !!st && input && !input.value.trim();
+    btn.textContent = stopMode ? (st.stopping ? "Stopping\u2026" : "Stop") : "Send";
+    btn.disabled = !!(stopMode && st.stopping);
     btn.classList.toggle("stop", stopMode);
-    btn.title = stopMode ? "Stop the answer (aborts further model calls)" : "";
+    btn.title = stopMode ? "Stop the answer (ends further model calls)" : "";
     btn.onclick = stopMode ? stopSend : () => send(); // must not pass the click event as `edited`
   }
 
-  function stopSend() {
-    streams.get(currentStory)?.controller.abort(); // the only abort path
+  async function stopSend() {
+    const storyId = currentStory;
+    const st = streams.get(storyId);
+    if (!st) return;
+    st.stopping = true;
+    syncSendBtn();
+    try {
+      const res = await fetch(`/api/stories/${storyId}/chat/stop`, { method: "POST" });
+      if (Auth.unauth(res)) return;
+    } catch { /* the stream end (or the next sync) settles the state */ }
   }
 
   function loadHistory(storyId, input) {
@@ -212,28 +258,35 @@ const Chat = (() => {
         const box = document.getElementById("chat-messages");
         if (!d || !box || currentStory !== storyId) return; // popup closed or switched meanwhile
         renderMessages(d.messages);
-        const st = streams.get(storyId);
-        if (st) {
-          // This story's stream was started before the close: rebind a live
-          // reply element with all steps/text gathered so far so streaming continues.
-          box.querySelector(".chat-empty")?.remove();
-          if (!d.messages.length || d.messages[d.messages.length - 1].role !== "user") {
-            box.appendChild(msgEl("user", st.question));
-          }
-          const reply = msgEl("assistant", st.answer, st.steps, !st.answer);
-          if (!st.answer) {
-            const t = reply.querySelector(".chat-thinking");
-            if (t) t.textContent = st.status;
-          }
-          box.appendChild(reply);
-          st.reply = reply;
-          renderQueue();
-          box.scrollTop = box.scrollHeight;
-        }
+        bindLive(storyId, d.messages);
         syncSendBtn();
+        if (!busyFor(storyId) && !serverBusy(storyId)) markRead(storyId);
         input.focus();
       })
       .catch(() => { /* history is non-critical; the input still works */ });
+  }
+
+  // The answer in progress gets a live reply element with all steps/text gathered
+  // so far, so streaming continues in the reopened popup.
+  function bindLive(storyId, messages) {
+    const st = streams.get(storyId);
+    const box = document.getElementById("chat-messages");
+    if (!st || !box || currentStory !== storyId) return;
+    if (st.reply && box.contains(st.reply)) return;
+    box.querySelector(".chat-empty")?.remove();
+    box.querySelector(".chat-retry")?.remove();
+    const lastEl = [...box.querySelectorAll(".chat-msg")].pop();
+    const endsWithQuestion = messages ? messages[messages.length - 1]?.role === "user" : !!lastEl?.classList.contains("user");
+    if (st.question && !endsWithQuestion) box.appendChild(msgEl("user", st.question));
+    const reply = msgEl("assistant", st.answer, st.steps, !st.answer);
+    if (!st.answer) {
+      const t = reply.querySelector(".chat-thinking");
+      if (t) t.textContent = st.status;
+    }
+    box.appendChild(reply);
+    st.reply = reply;
+    renderQueue();
+    box.scrollTop = box.scrollHeight;
   }
 
   // Shows one branch of the conversation; edited user messages get ‹ n/m › version arrows.
@@ -253,7 +306,7 @@ const Chat = (() => {
       else if (m.content) addAnswerTools(el, m);
       box.appendChild(el);
     }
-    if (!busyFor(currentStory) && messages.length) {
+    if (!busyFor(currentStory) && !serverBusy(currentStory) && messages.length) {
       const last = messages[messages.length - 1];
       const retryable = last.role === "user"
         || (last.role === "assistant" && (!last.content || (last.steps || []).some((s) => s.kind === "stopped" || s.kind === "error")));
@@ -408,23 +461,52 @@ const Chat = (() => {
   }
 
   // editOf/editEl: resend an edited user message as a new version of it.
-  // While a story's stream is in flight, further sends are queued per-story
+  // While a story's answer is in progress, further sends are queued per-story
   // and pumped FIFO by drain(storyId) once that stream ends.
   function send(edited = null, editOf = null, editEl = null) {
     const storyId = currentStory;
     const input = document.getElementById("chat-input");
     const text = (edited ?? input?.value ?? "").trim();
     if (!text || !storyId) return;
-    if (busyFor(storyId)) {
-      let q = queues.get(storyId);
-      if (!q) { q = []; queues.set(storyId, q); }
-      q.push({ text, editOf, editEl, isNew: edited == null });
+    if (busyFor(storyId) || serverBusy(storyId)) {
+      enqueue(storyId, { text, editOf, editEl, isNew: edited == null });
       if (edited == null && input) input.value = "";
       renderQueue();
       syncSendBtn();
+      if (!busyFor(storyId)) attach(storyId);
       return;
     }
     doSend(storyId, text, editOf, editEl, edited == null);
+  }
+
+  function enqueue(storyId, item, front = false) {
+    let q = queues.get(storyId);
+    if (!q) { q = []; queues.set(storyId, q); }
+    if (front) q.unshift(item); else q.push(item);
+  }
+
+  function newStream(storyId, question, reply) {
+    const st = {
+      controller: new AbortController(), // detaches this tab only; the server job runs on
+      question,
+      steps: [],
+      answer: "",
+      status: "Working\u2026",
+      reply,
+      started: Date.now(),
+      stopping: false,
+      failed: "",
+      lost: false,
+    };
+    streams.set(storyId, st); // before any awaits: Stop button effective immediately
+    const c = chats.get(storyId);
+    if (c) {
+      c.running = true;
+      if (question) Object.assign(c, { question: question.slice(0, 240), answer: "", updated_at: new Date().toISOString().slice(0, 19).replace("T", " ") });
+      else if (c.started) st.started = c.started * 1000; // reattached: count from the server's start
+    }
+    changed();
+    return st;
   }
 
   // A stream belongs to a story, not to the popup: it's registered in
@@ -452,21 +534,76 @@ const Chat = (() => {
       if (isNew && input) input.value = "";
       box.scrollTop = box.scrollHeight;
     }
-    const controller = new AbortController();
-    const st = {
-      controller,
-      question: text,
-      steps: [],
-      answer: "",
-      status: "Working\u2026",
-      reply,
-    };
-    streams.set(storyId, st); // before any awaits: Stop button effective immediately
+    noBubble.delete(storyId); // a new question may bubble again
+    const st = newStream(storyId, text, reply);
     if (visible()) syncSendBtn();
+    let res;
+    try {
+      res = await fetch(`/api/stories/${storyId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, web_search: webSearch, edit_of: editOf }),
+        signal: st.controller.signal,
+      });
+    } catch (err) {
+      res = null;
+      st.failed = `Error: ${err.message || err}`;
+    }
+    if (res && Auth.unauth(res)) {
+      st.reply?.remove();
+      streams.delete(storyId);
+      changed();
+      return;
+    }
+    if (res && (res.status === 409 || res.status === 429)) {
+      // 409: this story is still answering (started elsewhere) — queue and follow it.
+      st.reply?.remove();
+      streams.delete(storyId);
+      if (res.status === 409) {
+        enqueue(storyId, { text, editOf, editEl: null, isNew: false }, true);
+        attach(storyId);
+      } else {
+        Auth.toast("Too many answers in progress \u2014 try again when one is done.");
+        if (visible() && isNew && input && !input.value) input.value = text;
+      }
+      await refresh(storyId);
+      changed();
+      return;
+    }
+    if (res && !res.ok) st.failed = `Error: HTTP ${res.status}`;
+    if (res?.ok) await consume(storyId, st, res);
+    await finish(storyId, st);
+  }
 
+  // Follows an answer that is already running on the server (started in another
+  // tab, before a reload, or found by sync()). Registers only when one runs.
+  async function attach(storyId) {
+    if (busyFor(storyId) || !signedIn) return;
+    const pending = new AbortController();
+    let res;
+    try {
+      res = await fetch(`/api/stories/${storyId}/chat/stream`, { signal: pending.signal });
+    } catch { return; }
+    if (res.status !== 200 || busyFor(storyId)) {
+      try { await res.body?.cancel(); } catch { /* ignore */ }
+      if (res.status === 204) {
+        const c = chats.get(storyId);
+        if (c?.running) { c.running = false; changed(); drain(storyId); }
+      }
+      return;
+    }
+    const st = newStream(storyId, "", null);
+    st.controller = pending;
+    bindLive(storyId);
+    if (currentStory === storyId) syncSendBtn();
+    await consume(storyId, st, res);
+    await finish(storyId, st);
+  }
+
+  // Reads the NDJSON events (steps, thinking, deltas, done/error) into `st` and its reply element.
+  async function consume(storyId, st, res) {
+    const visible = () => currentStory === storyId;
     let rendered = 0;
-    let failed = "";
-    let cancelled = false;
     const setStatus = (s) => {
       st.status = s;
       const t = st.reply?.querySelector(".chat-thinking");
@@ -478,26 +615,15 @@ const Chat = (() => {
       const b = visible() ? document.getElementById("chat-messages") : null;
       if (!r || !r.isConnected || !b) return;
       r.querySelector(".chat-body").innerHTML = mdToHtml(st.answer)
-        + (cancelled ? `<p class="chat-cancelled">Stopped — answer interrupted${st.answer ? " (partial)" : ""}</p>` : "")
-        + (failed ? `<p class="chat-error">${esc(failed)}</p>` : "");
+        + (st.failed ? `<p class="chat-error">${esc(st.failed)}</p>` : "");
       const nearBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
       if (nearBottom) b.scrollTop = b.scrollHeight;
     };
     try {
-      const res = await fetch(`/api/stories/${storyId}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, web_search: webSearch, edit_of: editOf }),
-        signal: controller.signal,
-      });
-      if (Auth.unauth(res)) {
-        st.reply?.remove();
-        return; // finally: streams.delete() runs; Send state stays consistent (unauth → streams.has() false)
-      }
-      if (!res.ok) throw new Error("HTTP " + res.status);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      let finished = false;
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -514,53 +640,330 @@ const Chat = (() => {
             else st.steps.push({ ...ev.step });
             const sb = st.reply?.querySelector(".chat-steps");
             if (sb && ev.step.kind !== "stopped") upsertStep(sb, ev.step);
+            if (ev.step.kind === "stopped") st.stopped = true;
             if (!st.answer) setStatus(ev.step.status === "running" ? ev.step.title : "Working\u2026");
+            changed();
           } else if (ev.type === "thinking") {
             const run = st.steps.find((s) => s.kind === "thinking" && s.status === "running");
             if (run) run.detail = (run.detail || "") + ev.text;
             const sb = st.reply?.querySelector(".chat-steps");
             if (sb) appendThinking(sb, ev.text);
-          } else if (ev.type === "delta") st.answer += ev.text;
-          else if (ev.type === "error") failed = ev.text;
-          // "done" carries no payload; the end of the stream is the signal.
+          } else if (ev.type === "delta") {
+            st.answer += ev.text;
+            changed();
+          } else if (ev.type === "error") st.failed = ev.text;
+          else if (ev.type === "done") finished = true;
         }
         if (st.answer.length > rendered) render();
       }
-      if (!st.answer && !failed && !cancelled) failed = "No answer.";
+      if (!finished && !st.failed) st.lost = true; // connection dropped; the job may still run
+      if (!st.answer && !st.failed && !st.lost && !st.stopped) st.failed = "No answer.";
       render();
     } catch (err) {
-      cancelled = !!(controller.signal.aborted || (err && err.name === "AbortError"));
-      if (!cancelled) failed = `Error: ${err.message || err}`;
+      if (err?.name === "AbortError") return;
+      st.lost = true;
       render();
-    } finally {
-      streams.delete(storyId);
     }
-    // Normalize: re-fetch → re-render (ids + versions → ✎, version arrows),
-    // plus add a "Retry" pill when the answer was interrupted or failed.
-    const messages = await refresh(storyId);
-    if (cancelled && messages && visible()) {
-      // If the server generator is still unwinding its current call, synthesize
-      // the interrupted reply locally so the partial answer and Stop marker stay visible.
-      const last = messages[messages.length - 1];
-      if (!last || last.role === "user") {
-        const steps = st.steps.map((s) => (s.status === "running"
-          ? { ...s, status: s.kind === "thinking" ? "ok" : "warn", title: s.kind === "thinking" ? "Thought (interrupted)" : `${s.title} (stopped)` }
-          : s));
-        steps.push({ id: steps.length, kind: "stopped", title: `Stopped — answer interrupted${st.answer ? " (partial)" : ""}`, status: "warn" });
-        renderMessages([...messages, { role: "assistant", content: st.answer, steps }]);
+  }
+
+  // After a stream ended: settle the view from the server, mark read or announce it, start the next queued send.
+  async function finish(storyId, st) {
+    if (streams.get(storyId) === st) streams.delete(storyId);
+    if (st.controller.signal.aborted) { changed(); return; } // signed out: nothing to settle
+    const visible = () => currentStory === storyId;
+    const c = chats.get(storyId) || { story_id: storyId, headline: titleOf(storyId), questions: 1 };
+    chats.set(storyId, c);
+    if (st.lost) {
+      setTimeout(sync, 1500); // reattach if the server is still working on it
+    } else {
+      c.running = false;
+      c.unread = true;
+      c.status = st.failed && !st.answer ? "error" : st.stopped ? "stopped" : "ok";
+      c.answer = st.answer.slice(0, 240);
+      if (st.question) c.question = st.question.slice(0, 240);
+      c.updated_at = new Date().toISOString().slice(0, 19).replace("T", " ");
+    }
+    await refresh(storyId);
+    if (!st.lost) {
+      if (visible() && document.visibilityState === "visible") markRead(storyId);
+      else if (!bubbleIds().includes(storyId) && document.visibilityState === "visible" && !queuedFor(storyId)) {
+        Auth.toast(`Answer ready: ${titleOf(storyId).slice(0, 60)}`, { label: "Open", onClick: () => open(storyId) });
       }
     }
     if (visible()) syncSendBtn();
+    changed();
     drain(storyId);
+    scheduleSync(800);
   }
+
+  function queuedFor(storyId) { return (queues.get(storyId) || []).length; }
 
   function drain(storyId) {
     const q = queues.get(storyId);
-    if (busyFor(storyId) || !q || !q.length) return;
+    if (busyFor(storyId) || serverBusy(storyId) || !q || !q.length) return;
     const next = q.shift();
     if (storyId === currentStory) renderQueue();
     doSend(storyId, next.text, next.editOf, next.editEl, next.isNew);
   }
 
-  return { open, close, mdToHtml };
+  async function markRead(storyId) {
+    const c = chats.get(storyId);
+    if (c) c.unread = false;
+    removeBubble(storyId);
+    changed();
+    try {
+      const res = await fetch(`/api/stories/${storyId}/chat/read`, { method: "POST" });
+      if (res.ok) scheduleSync(300);
+    } catch { /* offline: the answer stays unread on the server */ }
+  }
+
+  // --- progress of an answer (bubbles, Chats tab) ---------------------------
+  const STAGES = ["Research", "Thinking", "Writing"];
+
+  // { state: running|queued|ready|error|stopped|idle, stage: 0..3 (0 = unknown), text, secs }
+  function progressOf(storyId) {
+    const st = streams.get(storyId);
+    const c = chats.get(storyId);
+    if (st) {
+      const secs = Math.round((Date.now() - st.started) / 1000);
+      const reads = st.steps.filter((s) => s.kind === "read" && s.status !== "running").length;
+      const searches = st.steps.filter((s) => s.kind === "search" && /^Web search: /.test(s.title)).length;
+      const run = [...st.steps].reverse().find((s) => s.status === "running");
+      let stage = 1;
+      let text = "Starting\u2026";
+      if (st.stopping) text = "Stopping\u2026";
+      else if (st.answer) {
+        stage = 3;
+        text = "Writing the answer\u2026";
+      } else if (run?.kind === "thinking") {
+        stage = 2;
+        text = "Thinking\u2026";
+      } else if (run && (run.kind === "search" || run.kind === "read")) {
+        text = run.title;
+      } else if (st.steps.length) {
+        stage = 2;
+        text = "Preparing the answer\u2026";
+      }
+      const research = stage === 1 && (searches || reads)
+        ? `${searches} search${searches === 1 ? "" : "es"} \u00b7 ${reads} page${reads === 1 ? "" : "s"} read` : "";
+      return { state: "running", stage, text, research, secs };
+    }
+    if (c?.running) {
+      return { state: "running", stage: 0, text: "Working\u2026", research: "",
+        secs: c.started ? Math.round(Date.now() / 1000 - c.started) : null };
+    }
+    if (queuedFor(storyId)) return { state: "queued", stage: 0, text: "Queued", research: "", secs: null };
+    if (!c) return { state: "idle", stage: 0, text: "", research: "", secs: null };
+    if (c.unread) {
+      if (c.status === "error") return { state: "error", stage: 0, text: "Answer failed", research: "", secs: null };
+      if (c.status === "stopped") return { state: "stopped", stage: 0, text: "Stopped (partial answer)", research: "", secs: null };
+      return { state: "ready", stage: 3, text: "Answer ready \u2014 click to read", research: "", secs: null };
+    }
+    return { state: "idle", stage: 0, text: "", research: "", secs: null };
+  }
+
+  // --- bubbles (bottom right, stacking upwards) -------------------------------
+  const BUBBLES_KEY = "chatBubbles";
+  const MAX_BUBBLES = 6;
+  const bubbleEls = new Map();
+
+  function bubbleIds() {
+    try {
+      const ids = JSON.parse(localStorage.getItem(BUBBLES_KEY) || "[]");
+      return Array.isArray(ids) ? ids.map(Number).filter(Number.isFinite) : [];
+    } catch { return []; }
+  }
+
+  function saveBubbles(ids) { localStorage.setItem(BUBBLES_KEY, JSON.stringify(ids)); }
+
+  function addBubble(storyId) {
+    const ids = bubbleIds().filter((id) => id !== storyId);
+    ids.push(storyId);
+    saveBubbles(ids);
+    renderBubbles();
+  }
+
+  function removeBubble(storyId) {
+    const ids = bubbleIds();
+    if (!ids.includes(storyId)) return;
+    saveBubbles(ids.filter((id) => id !== storyId));
+    renderBubbles();
+  }
+
+  const ICONS = { ready: "\u2713", error: "\u26A0", stopped: "\u23F9", queued: "\u23F3", idle: "\u{1F4AC}" };
+
+  function renderBubbles() {
+    let wrap = document.getElementById("chat-bubbles");
+    const ids = signedIn ? bubbleIds() : [];
+    if (!ids.length) {
+      wrap?.remove();
+      bubbleEls.clear();
+      return;
+    }
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.id = "chat-bubbles";
+      wrap.setAttribute("aria-label", "Chat answers");
+      document.body.appendChild(wrap);
+    }
+    const shown = ids.slice(-MAX_BUBBLES); // oldest at the bottom (column-reverse), newer ones stack up
+    for (const [id, el] of bubbleEls) if (!shown.includes(id)) { el.remove(); bubbleEls.delete(id); }
+    shown.forEach((id, i) => {
+      let el = bubbleEls.get(id);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "chat-bubble";
+        el.innerHTML = `
+          <button type="button" class="cb-main">
+            <span class="cb-icon" aria-hidden="true"></span>
+            <span class="cb-text"><span class="cb-title"></span><span class="cb-sub"></span>
+              <span class="cb-stages" aria-hidden="true">${STAGES.map((s) => `<i title="${s}"></i>`).join("")}</span></span>
+          </button>
+          <button type="button" class="cb-x" title="Dismiss (the answer stays in Chats)" aria-label="Dismiss">\u00D7</button>`;
+        el.querySelector(".cb-main").onclick = () => open(id);
+        el.querySelector(".cb-x").onclick = () => removeBubble(id);
+        bubbleEls.set(id, el);
+      }
+      if (wrap.children[i] !== el) wrap.insertBefore(el, wrap.children[i] || null);
+      const p = progressOf(id);
+      const state = p.state;
+      el.className = `chat-bubble cb-${state}`;
+      el.querySelector(".cb-icon").textContent = ICONS[state] || "";
+      el.querySelector(".cb-title").textContent = titleOf(id);
+      const sub = [p.text, p.research, p.secs != null ? fmtSecs(p.secs) : ""].filter(Boolean).join(" \u00b7 ");
+      el.querySelector(".cb-sub").textContent = sub;
+      el.querySelector(".cb-main").title = `${titleOf(id)}\n${sub}`;
+      el.querySelectorAll(".cb-stages i").forEach((dot, k) => {
+        dot.className = k + 1 < p.stage ? "done" : k + 1 === p.stage ? (state === "running" ? "now" : "done") : "";
+      });
+    });
+    const more = ids.length - shown.length;
+    let moreEl = wrap.querySelector(".cb-more");
+    if (more > 0) {
+      if (!moreEl) {
+        moreEl = document.createElement("a");
+        moreEl.className = "cb-more";
+        moreEl.href = "/chats";
+      }
+      moreEl.textContent = `+${more} more`;
+      wrap.appendChild(moreEl);
+    } else moreEl?.remove();
+  }
+
+  function fmtSecs(s) {
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  }
+
+  // --- unread badge on the Chats tab + page title ----------------------------
+  function renderBadge() {
+    const unread = signedIn ? [...chats.values()].filter((c) => c.unread).length : 0;
+    const running = signedIn ? [...chats.values()].filter((c) => c.running).length + [...streams.keys()].filter((id) => !chats.get(id)).length : 0;
+    document.querySelectorAll("#chats-link").forEach((a) => {
+      let b = a.querySelector(".nav-badge");
+      if (!b) {
+        b = document.createElement("span");
+        b.className = "nav-badge";
+        a.appendChild(b);
+      }
+      b.textContent = unread ? String(unread) : "";
+      b.classList.toggle("busy", running > 0);
+      b.hidden = !unread && !running;
+      a.title = [unread ? `${unread} unread answer${unread === 1 ? "" : "s"}` : "", running ? `${running} in progress` : ""]
+        .filter(Boolean).join(" \u00b7 ");
+    });
+    const base = document.title.replace(/^\(\d+\) /, "");
+    document.title = unread ? `(${unread}) ${base}` : base;
+  }
+
+  // Coalesces state changes into one bubble/badge/listener update (a timer, not an
+  // animation frame: background tabs must still update the title).
+  let pendingUpdate = false;
+  function changed() {
+    if (pendingUpdate) return;
+    pendingUpdate = true;
+    setTimeout(() => {
+      pendingUpdate = false;
+      renderBubbles();
+      renderBadge();
+      for (const fn of listeners) {
+        try { fn(); } catch { /* a listener bug never breaks the chat */ }
+      }
+    }, 60);
+  }
+
+  function onUpdate(fn) { listeners.push(fn); }
+
+  // --- server sync: unread state, answers running in other tabs --------------
+  const SYNC_MS = 20000;
+  let syncTimer = 0;
+  let syncing = false;
+
+  function scheduleSync(ms = SYNC_MS) {
+    clearTimeout(syncTimer);
+    if (signedIn) syncTimer = setTimeout(sync, ms);
+  }
+
+  async function sync() {
+    if (!signedIn || syncing) return;
+    syncing = true;
+    try {
+      const res = await fetch("/api/chats");
+      if (!res.ok) return;
+      const d = await res.json();
+      const seen = new Set();
+      for (const row of d.chats) {
+        seen.add(row.story_id);
+        const local = streams.get(row.story_id);
+        chats.set(row.story_id, local ? { ...row, running: true } : row);
+        if (row.running && !local) attach(row.story_id);
+      }
+      for (const id of [...chats.keys()]) if (!seen.has(id) && !busyFor(id)) chats.delete(id);
+      // Bubbles of answers read elsewhere (or gone) disappear.
+      const keep = bubbleIds().filter((id) => {
+        const c = chats.get(id);
+        return busyFor(id) || queuedFor(id) || (c && (c.running || c.unread));
+      });
+      if (keep.length !== bubbleIds().length) saveBubbles(keep);
+      for (const id of queues.keys()) drain(id);
+      changed();
+    } catch { /* offline: try again later */ } finally {
+      syncing = false;
+      scheduleSync(streams.size ? 5000 : SYNC_MS);
+    }
+  }
+
+  function chatList() { return [...chats.values()]; }
+
+  let ticker = 0;
+  function start() {
+    if (signedIn) return;
+    signedIn = true;
+    renderBubbles();
+    sync();
+    ticker = setInterval(() => { if (streams.size || [...chats.values()].some((c) => c.running)) changed(); }, 1000);
+  }
+
+  function stopAll() {
+    signedIn = false;
+    clearTimeout(syncTimer);
+    clearInterval(ticker);
+    for (const st of streams.values()) st.controller.abort();
+    streams.clear();
+    queues.clear();
+    chats.clear();
+    close();
+    renderBubbles();
+    renderBadge();
+  }
+
+  if (typeof Auth !== "undefined") {
+    Auth.onChange((s) => (s.authenticated ? start() : stopAll()));
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible" || !signedIn) return;
+      sync();
+      if (currentStory != null && isOpen() && !busyFor(currentStory) && chats.get(currentStory)?.unread) markRead(currentStory);
+    });
+  }
+
+  return { open, close, mdToHtml, onUpdate, progressOf, chatList, markRead, sync, titleOf };
 })();

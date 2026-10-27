@@ -334,6 +334,104 @@ def test_chat_after_failed_turn_branches_instead_of_chaining_empty_reply(client,
     assert msgs2[2]["version"] == 2 and len(msgs2[2]["versions"]) == 2
 
 
+def test_chat_overview_and_unread(client, story, llm):
+    url = f"/api/stories/{story}/chat"
+    assert client.get("/api/chats").json() == {"chats": [], "unread": 0, "running": 0}
+    client.post(url, json={"message": "What happened?", "web_search": False})
+    data = client.get("/api/chats").json()
+    assert data["unread"] == 1 and data["running"] == 0
+    row = data["chats"][0]
+    assert (row["story_id"], row["question"], row["answer"], row["unread"], row["running"], row["status"]) == (
+        story, "What happened?", "Short answer.", True, False, "ok")
+    assert client.post(f"{url}/read").status_code == 200
+    assert client.get("/api/chats").json()["unread"] == 0
+    assert client.get(f"{url}/stream").status_code == 204  # nothing in progress
+
+
+def _gated_job(story, gate, monkeypatch):
+    """Start an answer job directly whose model waits for ``gate`` after the first words."""
+    import time
+
+    from app import chat_history, chat_jobs
+
+    def slow_stream(messages, **_kw):
+        yield "content", "Part one. "
+        assert gate.wait(5)
+        yield "content", "Part two."
+
+    monkeypatch.setattr(ollama, "chat_stream", slow_stream)
+    job = chat_jobs.reserve(1, story, "Slow question?")
+    with db.get_conn() as conn:
+        sid, qid, history = chat_history.start_turn(conn, story, 1, "Slow question?", None, 20)
+    chat_jobs.run(job, {"headline": "H"}, history, False, "", sid, qid)
+    for _ in range(100):  # wait until the model is parked at the gate
+        if any(e["type"] == "delta" for e in job._since(0)[0]):
+            break
+        time.sleep(0.02)
+    return job
+
+
+def _wait_done(job):
+    import time
+
+    for _ in range(100):
+        if job.done:
+            return
+        time.sleep(0.05)
+    raise AssertionError("chat job did not finish")
+
+
+def test_chat_answer_runs_on_without_client_and_can_be_reattached(client, story, monkeypatch):
+    import json
+    import threading
+
+    gate = threading.Event()
+    job = _gated_job(story, gate, monkeypatch)
+    url = f"/api/stories/{story}/chat"
+    data = client.get("/api/chats").json()
+    assert data["running"] == 1 and data["chats"][0]["running"] and data["chats"][0]["status"] == "pending"
+    # One answer per story at a time; the client queues instead.
+    assert client.post(url, json={"message": "Another", "web_search": False}).status_code == 409
+    threading.Timer(0.2, gate.set).start()
+    events = [json.loads(line) for line in client.get(f"{url}/stream").text.splitlines() if line]
+    assert [e.get("text") for e in events if e["type"] == "delta"] == ["Part one. ", "Part two."]
+    assert events[-1]["type"] == "done"
+    _wait_done(job)
+    assert client.get(url).json()["messages"][-1]["content"] == "Part one. Part two."
+    assert client.get("/api/chats").json()["running"] == 0
+
+
+def test_chat_stop_interrupts_the_background_answer(client, story, monkeypatch):
+    import threading
+
+    gate = threading.Event()
+    job = _gated_job(story, gate, monkeypatch)
+    url = f"/api/stories/{story}/chat"
+    assert client.post(f"{url}/stop").json() == {"stopping": True}
+    gate.set()
+    _wait_done(job)
+    last = client.get(url).json()["messages"][-1]
+    assert last["content"] == "Part one." and last["steps"][-1]["kind"] == "stopped"
+    assert client.get("/api/chats").json()["chats"][0]["status"] == "stopped"
+    assert client.post(f"{url}/stop").json() == {"stopping": False}
+
+
+def test_chat_jobs_are_capped_per_user(story, monkeypatch):
+    from app import chat_jobs
+
+    monkeypatch.setattr(config, "CHAT_MAX_JOBS_PER_USER", 1)
+    job = chat_jobs.reserve(1, story, "q")
+    try:
+        with pytest.raises(chat_jobs.Busy):
+            chat_jobs.reserve(1, story, "q")
+        with pytest.raises(chat_jobs.TooMany):
+            chat_jobs.reserve(1, story + 1, "q")
+        chat_jobs.reserve(2, story, "q")._finish()  # other users are independent
+    finally:
+        chat_jobs.release(job)
+    assert chat_jobs.running(1) == {}
+
+
 def test_extract_json_rejects_inner_array_of_truncated_object():
     truncated = '{\n  "new_facts": ["Fact 1", "Fact 2"],\n  "headline": "Truncated'
     with pytest.raises(ValueError, match="could not parse JSON"):

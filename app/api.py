@@ -9,13 +9,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, bus, config, db, reports, worker
+from . import auth, bus, chat_jobs, config, db, reports, worker
 from .routes import ROUTERS
 from .routes.pages import FRONTEND
 from .web import is_https
 
 _ADMIN_PREFIXES = ("/feeds", "/api/feeds", "/api/refresh", "/api/reports", "/api/admin", "/admin")
-_SIGNED_IN_PAGES = ("/feeds", "/admin", "/list")  # browsers are sent to / instead of a JSON 401
+_SIGNED_IN_PAGES = ("/feeds", "/admin", "/list", "/chats")  # browsers are sent to / instead of a JSON 401
 
 
 def _admin_only(path: str) -> bool:
@@ -72,6 +72,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         bus.close_all()
+        chat_jobs.stop_all()
         reports.stop_scheduler()
         await asyncio.to_thread(worker.stop)
 

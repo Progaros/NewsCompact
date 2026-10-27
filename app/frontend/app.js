@@ -378,7 +378,7 @@ class StoryCard extends HTMLElement {
     const srcBtn = this.querySelector(".src-toggle");
     srcBtn.addEventListener("click", () => srcBtn.setAttribute("aria-expanded", toggleIn(sourcesOpenIds, d.id, this, "src-open")));
     this.querySelectorAll(".fb[data-kind]").forEach((b) => b.addEventListener("click", () => this._feedback(b.dataset.kind)));
-    this.querySelector(".chat-btn").addEventListener("click", () => Chat.open(d.id));
+    this.querySelector(".chat-btn").addEventListener("click", () => Chat.open(d.id, d.headline));
     this.querySelector(".share-btn").addEventListener("click", () => copyLink(`/s/${d.id}`));
     this.querySelector(".read-btn").addEventListener("click", () => this._toggleRead());
   }
@@ -520,7 +520,7 @@ document.addEventListener("pointerdown", (e) => {
   }
   const card = e.target.closest?.("story-card");
   if (card) setTouchActive(card);
-  else if (!e.target.closest?.(".tag-menu, #chat-popup")) setTouchActive(null);
+  else if (!e.target.closest?.(".tag-menu, #chat-popup, #chat-bubbles")) setTouchActive(null);
 });
 document.addEventListener("pointerover", (e) => {
   if (e.pointerType !== "mouse") return; // touch = tap-toggle via click only

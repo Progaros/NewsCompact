@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS ChatSession (
     user_id    INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE,
     story_id   INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     leaf_id    INTEGER,
+    seen_id    INTEGER,        -- newest message the user has seen (newer answers are unread)
     created_at TEXT    DEFAULT (datetime('now')),
     updated_at TEXT    DEFAULT (datetime('now')),
     UNIQUE (user_id, story_id)

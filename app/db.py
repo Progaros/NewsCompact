@@ -49,6 +49,7 @@ _MIGRATIONS = (
     ("ChatMessage", "steps", "TEXT"),
     ("ChatMessage", "parent_id", "INTEGER"),
     ("ChatSession", "leaf_id", "INTEGER"),
+    ("ChatSession", "seen_id", "INTEGER"),
     ("UserProfile", "feed_weights", "TEXT DEFAULT '{}'"),
     ("FeedbackLog", "user_id", "INTEGER NOT NULL DEFAULT 1"),
     ("StoryUpdate", "event_at", "TEXT"),
@@ -249,11 +250,18 @@ def _story_search(conn: sqlite3.Connection) -> None:
     )
 
 
+def _chat_seen(conn: sqlite3.Connection) -> None:
+    """v10: unread chat answers; everything answered before counts as seen."""
+    if "seen_id" not in {r[1] for r in conn.execute("PRAGMA table_info(ChatSession)")}:  # v6 rebuilt it
+        conn.execute("ALTER TABLE ChatSession ADD COLUMN seen_id INTEGER")
+    conn.execute("UPDATE ChatSession SET seen_id = (SELECT MAX(id) FROM ChatMessage m WHERE m.session_id = ChatSession.id)")
+
+
 # (user_version, migration) — each runs once, inside a transaction (foreign keys off,
 # so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
                     (5, _news_at), (6, _per_user), (7, _drop_read_summary), (8, _explicit_tag_weights),
-                    (9, _story_search))
+                    (9, _story_search), (10, _chat_seen))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

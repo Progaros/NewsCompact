@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chats — AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script async defer src="https://analytics.example.org/script.js" data-website-id="your-website-id"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand"><img class="logo" src="/static/logo.svg" alt="" width="28" height="28" /><h1>News</h1></a>
+    <nav class="nav">
+      <a href="/">Stories</a>
+      <a href="/list">Articles</a>
+      <a href="/chats" id="chats-link" class="active">Chats</a>
+      <a href="/feeds" id="feeds-link" class="admin-link">Feeds</a>
+      <a href="/admin" class="admin-link">Users</a>
+    </nav>
+    <div class="controls">
+      <span id="chats-status" class="status">loading…</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search your chats…" maxlength="100" />
+      <button id="mark-all" class="btn" type="button" disabled>Mark all read</button>
+    </div>
+    <section id="chat-list" aria-label="Your chats">
+      <div class="empty">Loading chats…</div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/chats.js"></script>
+</body>
+</html>

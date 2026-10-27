@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Generator, Iterator
 
 from . import config, ollama, searchngx
@@ -175,27 +176,56 @@ def _gather_context(story: dict, user_question: str,
         step.update(status="ok", title=f"Web search: {query} · {len(results)} results",
                     detail="\n".join(f"{r.get('title') or r['url']} — {r['url']}" for r in results))
         yield "step", step
-        added = False
-        for res in results:
-            if len(context) >= config.CHAT_CONTEXT_MAX or out_of_time():
-                break
-            name = res.get("title") or res["url"]
-            read = add_step(steps, "read", f"Reading {name}", detail=res["url"])
-            yield "step", read
-            text = searchngx.scrape(res["url"])
-            if text:
-                read.update(status="ok", title=f"Read {name}", detail=f"{res['url']}\n{len(text):,} characters")
-            else:
-                text = res.get("description", "")
-                read.update(status="warn", title=f"Could not read {name}",
-                            detail=f"{res['url']}\nPage could not be fetched — used the search snippet.")
-            yield "step", read
-            text = text[: config.CHAT_CONTEXT_PER_SOURCE]
-            context += f"\n[{name}] ({res['url']})\n{text}"
-            added = True
+        added = yield from _read_results(results, context, steps, deadline)
         if not added:
             break
+        context += added
     return context
+
+
+def _read_results(results: list[dict[str, str]], context: str, steps: list[dict],
+                  deadline: float) -> Generator[Event, None, str]:
+    """Fetch as many result pages as still fit into the context, in parallel; returns the added text."""
+    room = config.CHAT_CONTEXT_MAX - len(context)
+    picked = results[: max(1, -(-room // max(1, config.CHAT_CONTEXT_PER_SOURCE)))]
+    reads = []
+    for res in picked:
+        name = res.get("title") or res["url"]
+        read = add_step(steps, "read", f"Reading {name}", detail=res["url"])
+        reads.append((res, name, read))
+        yield "step", read
+    texts: list[str | None] = [None] * len(reads)
+    pool = ThreadPoolExecutor(max_workers=max(1, config.CHAT_READ_PARALLEL), thread_name_prefix="chat-read")
+    try:
+        futures = {pool.submit(searchngx.scrape, res["url"]): i for i, (res, _n, _r) in enumerate(reads)}
+        try:
+            for fut in as_completed(futures, timeout=max(1.0, deadline - time.monotonic())):
+                i = futures[fut]
+                res, name, read = reads[i]
+                text = fut.result()
+                if text:
+                    read.update(status="ok", title=f"Read {name}", detail=f"{res['url']}\n{len(text):,} characters")
+                else:
+                    text = res.get("description", "")
+                    read.update(status="warn", title=f"Could not read {name}",
+                                detail=f"{res['url']}\nPage could not be fetched — used the search snippet.")
+                texts[i] = text
+                yield "step", read
+        except TimeoutError:
+            for i, (res, name, read) in enumerate(reads):
+                if texts[i] is None:
+                    texts[i] = res.get("description", "")
+                    read.update(status="warn", title=f"Could not read {name} in time",
+                                detail=f"{res['url']}\nSearch time limit reached — used the search snippet.")
+                    yield "step", read
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    added = ""
+    for (res, name, _read), text in zip(reads, texts):
+        if len(context) + len(added) >= config.CHAT_CONTEXT_MAX:
+            break
+        added += f"\n[{name}] ({res['url']})\n{(text or '')[: config.CHAT_CONTEXT_PER_SOURCE]}"
+    return added
 
 
 def stream(story: dict, history: list[dict], user_question: str, web_search: bool = True,

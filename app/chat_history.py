@@ -83,7 +83,8 @@ def start_turn(conn: sqlite3.Connection, story_id: int, user_id: int, text: str,
         "INSERT INTO ChatMessage (session_id, parent_id, role, content) VALUES (?, ?, 'user', ?)",
         (sess["id"], msgs[-1]["id"] if msgs else None, text),
     ).lastrowid
-    conn.execute("UPDATE ChatSession SET leaf_id = ? WHERE id = ?", (question_id, sess["id"]))
+    conn.execute("UPDATE ChatSession SET leaf_id = ?, updated_at = datetime('now') WHERE id = ?",
+                 (question_id, sess["id"]))
     return sess["id"], question_id, history
 
 
@@ -98,3 +99,40 @@ def save_reply(session_id: int, question_id: int, reply: str, steps: list[dict])
         ).lastrowid
         conn.execute("UPDATE ChatSession SET leaf_id = ?, updated_at = datetime('now') "
                      "WHERE id = ? AND leaf_id = ?", (reply_id, session_id, question_id))
+
+
+def mark_seen(conn: sqlite3.Connection, story_id: int, user_id: int) -> None:
+    """The user has seen every answer of this chat so far."""
+    conn.execute("UPDATE ChatSession SET seen_id = (SELECT MAX(id) FROM ChatMessage m WHERE m.session_id = ChatSession.id) "
+                 "WHERE story_id = ? AND user_id = ?", (story_id, user_id))
+
+
+_PREVIEW = 240
+
+
+def overview(conn: sqlite3.Connection, user_id: int, limit: int = 200) -> list[dict[str, Any]]:
+    """The user's chats, newest first: story, last question/answer of the shown branch, unread state."""
+    rows = conn.execute(
+        "SELECT c.story_id, c.updated_at, s.headline, leaf.role AS leaf_role, leaf.content AS leaf_content, "
+        "leaf.steps AS leaf_steps, q.content AS question, "
+        "(SELECT COUNT(*) FROM ChatMessage m WHERE m.session_id = c.id AND m.role = 'user') AS questions, "
+        "EXISTS (SELECT 1 FROM ChatMessage m WHERE m.session_id = c.id AND m.role = 'assistant' "
+        "        AND m.id > COALESCE(c.seen_id, 0)) AS unread "
+        "FROM ChatSession c JOIN Story s ON s.id = c.story_id "
+        "LEFT JOIN ChatMessage leaf ON leaf.id = c.leaf_id "
+        "LEFT JOIN ChatMessage q ON q.id = CASE WHEN leaf.role = 'assistant' THEN leaf.parent_id ELSE leaf.id END "
+        "WHERE c.user_id = ? AND c.leaf_id IS NOT NULL ORDER BY c.updated_at DESC, c.id DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    out = []
+    for r in rows:
+        answer = r["leaf_content"] if r["leaf_role"] == "assistant" else ""
+        kinds = {s.get("kind") for s in db.json_list(r["leaf_steps"]) if isinstance(s, dict)}
+        status = ("error" if "error" in kinds and not answer else "stopped" if "stopped" in kinds
+                  else "ok" if r["leaf_role"] == "assistant" else "pending")
+        out.append({
+            "story_id": r["story_id"], "headline": r["headline"], "updated_at": r["updated_at"],
+            "question": (r["question"] or "")[:_PREVIEW], "answer": (answer or "")[:_PREVIEW],
+            "questions": r["questions"], "unread": bool(r["unread"]), "status": status,
+        })
+    return out

@@ -258,6 +258,10 @@ CHAT_SEARCH_MAX_SECONDS = _float("NEWS_CHAT_SEARCH_MAX_SECONDS", 120)
 CHAT_STORY_MAX_ARTICLES = _int("NEWS_CHAT_STORY_MAX_ARTICLES", 30)
 CHAT_CONTEXT_PER_SOURCE = _int("NEWS_CHAT_CONTEXT_PER_SOURCE", 1500)
 CHAT_CONTEXT_MAX = _int("NEWS_CHAT_CONTEXT_MAX", 6000)
+# Answers run as background jobs (closing the tab doesn't stop them); at most this many per user.
+CHAT_MAX_JOBS_PER_USER = _int("NEWS_CHAT_MAX_JOBS_PER_USER", 3)
+# Search-result pages fetched at the same time (sequential reads took up to a minute).
+CHAT_READ_PARALLEL = _int("NEWS_CHAT_READ_PARALLEL", 4)
 
 # --- Story search (app/search.py) -------------------------------------------
 # Word matches (FTS5) for everyone; signed-in users also get meaning matches (query

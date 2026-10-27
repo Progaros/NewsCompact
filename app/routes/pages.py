@@ -40,6 +40,11 @@ def list_page():
     return _page("list.html")
 
 
+@router.get("/chats")
+def chats_page():
+    return _page("chats.html")
+
+
 @router.get("/admin")
 def admin_page():
     return _page("admin.html")

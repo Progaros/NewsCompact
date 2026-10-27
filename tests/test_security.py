@@ -17,6 +17,8 @@ PASSWORD = "correct horse battery staple 42"
 PRIVATE = [
     ("POST", "/api/stories/1/read"), ("DELETE", "/api/stories/1/read"),
     ("GET", "/api/stories/1/chat"), ("POST", "/api/stories/1/chat"), ("POST", "/api/stories/1/chat/switch"),
+    ("GET", "/api/stories/1/chat/stream"), ("POST", "/api/stories/1/chat/stop"), ("POST", "/api/stories/1/chat/read"),
+    ("GET", "/api/chats"),
     ("POST", "/api/feedback"), ("GET", "/api/feedback"),
     ("GET", "/api/profile"), ("PUT", "/api/profile"),
     ("GET", "/api/reports/pipeline"), ("POST", "/api/reports/pipeline/send"),
@@ -57,6 +59,7 @@ def test_anonymous_internet_client_gets_only_public_views(exposed):
         assert exposed.get(path).status_code == 200, path
     assert exposed.get("/feeds", follow_redirects=False).status_code == 303
     assert exposed.get("/list", follow_redirects=False).status_code == 303
+    assert exposed.get("/chats", follow_redirects=False).status_code == 303
     assert exposed.get("/api/health").json() == {"ok": True}  # no pipeline internals
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert exposed.get(path).status_code in (401, 404), path

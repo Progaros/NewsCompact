@@ -7,7 +7,7 @@ import shutil
 
 import uvicorn
 
-from app import bus, config
+from app import bus, chat_jobs, config
 
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -37,8 +37,10 @@ def setup_logging() -> None:
 
 class _Server(uvicorn.Server):
     def handle_exit(self, sig, frame) -> None:
-        # Uvicorn waits for open responses before shutting down; end the endless SSE streams now.
+        # Uvicorn waits for open responses before shutting down; end the endless SSE streams now
+        # and interrupt running chat answers (their partial text is saved).
         bus.close_all()
+        chat_jobs.stop_all()
         super().handle_exit(sig, frame)
 
 
