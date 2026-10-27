@@ -188,9 +188,10 @@ def fetch_page_text(url: str) -> str:
 
 def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -> httpx.Response:
     headers = {}
-    if etag:
+    # Validators a server sent with non-ASCII bytes can't be sent back (httpx encodes headers as ASCII).
+    if etag and etag.isascii():
         headers["If-None-Match"] = etag
-    if last_modified:
+    if last_modified and last_modified.isascii():
         headers["If-Modified-Since"] = last_modified
     with http().stream("GET", url, headers=headers) as r:
         body = b""

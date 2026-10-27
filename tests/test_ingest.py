@@ -142,6 +142,18 @@ def test_tombstoned_and_too_old_entries_are_skipped(feed_id, monkeypatch):
     assert ingest.ingest_feed(_feed(feed_id)) == 1
 
 
+def test_fetch_skips_non_ascii_validators(monkeypatch):
+    sent = []
+
+    def handler(request):
+        sent.append(request.headers)
+        return httpx.Response(200, content=RSS)
+
+    monkeypatch.setattr(ingest, "_client", httpx.Client(transport=httpx.MockTransport(handler)))
+    assert ingest.fetch("https://x/feed", '"abc\u201a"', "Sat, 24 Oct 2026 15:44:04 GMT").status_code == 200
+    assert "If-None-Match" not in sent[0] and sent[0]["If-Modified-Since"].startswith("Sat")
+
+
 def test_fetch_error_is_recorded(feed_id, monkeypatch):
     def boom(*_a, **_k):
         raise httpx.ConnectError("refused")
