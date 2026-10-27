@@ -263,11 +263,13 @@ CHAT_CONTEXT_MAX = _int("NEWS_CHAT_CONTEXT_MAX", 6000)
 # Word matches (FTS5) for everyone; signed-in users also get meaning matches (query
 # embedding vs article vectors), merged by Reciprocal Rank Fusion.
 SEARCH_RRF_K = _int("NEWS_SEARCH_RRF_K", 60)
-SEARCH_SEMANTIC_WEIGHT = _float("NEWS_SEARCH_SEMANTIC_WEIGHT", 1.0)  # word list weighs 1.0
+# Word list weighs 1.0. At 0.5 a meaning-only story ranks below the first ~60 word matches:
+# probe 2026-10-27 (qwen3-embedding 0.6B) put relevant and off-topic hits both at 0.45–0.57.
+SEARCH_SEMANTIC_WEIGHT = _float("NEWS_SEARCH_SEMANTIC_WEIGHT", 0.5)
 SEARCH_KNN = _int("NEWS_SEARCH_KNN", 400)  # nearest articles per query, before the scope filter
 SEARCH_SEMANTIC_MAX_STORIES = _int("NEWS_SEARCH_SEMANTIC_MAX_STORIES", 30)
 # Meaning-only matches need this cosine and must be within SEARCH_SIM_MARGIN of the best one.
-# Uncalibrated guesses: tune with scripts/search_probe.py on the server.
+# Probe 2026-10-27: unrelated 0.30–0.36, nonsense query max 0.455; tune with scripts/search_probe.py.
 SEARCH_MIN_SIM = _float("NEWS_SEARCH_MIN_SIM", 0.5)
 SEARCH_SIM_MARGIN = _float("NEWS_SEARCH_SIM_MARGIN", 0.15)
 # Wait at most this long for the query embedding, then answer with word matches only.
