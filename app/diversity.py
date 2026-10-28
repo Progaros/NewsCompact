@@ -1,6 +1,6 @@
 """List-level rerank: MMR over the top of a ranked feed, so one topic can't fill the first screen.
 
-    pick next = argmax  λ · score/top_score − (1 − λ) · max similarity to the stories placed above
+    pick next = argmax  λ · score/top_score - (1 - λ) · max similarity to the stories placed above
 
 Similarity of two stories = max(rescaled cosine of their story vectors, StoryLink relation),
 where a story vector is the normalized, content-class-weighted mean of its newest original

@@ -27,7 +27,7 @@ freshness multiplies instead of subtracting, so every story fades unless it gets
 
 ```python
 public   = 0.30·quality + 0.22·coverage + 0.16·urgency + 0.12·impact + 0.12·velocity + 0.08·status
-personal = public + 0.30·tag_affinity (−1..1) + 0.08·geo (0..1)        # "For you" only
+personal = public + 0.30·tag_affinity (-1..1) + 0.08·geo (0..1)        # "For you" only
 score    = 100 · freshness · soft_cap(value + update_boost)            # 0..100, shown as "Priority"
 score   *= READER_FACTOR[read state]                                   # "For you" only
 list     = MMR rerank of the top 50 (app/diversity.py)                 # both views, active only
@@ -36,20 +36,20 @@ list     = MMR rerank of the top 50 (app/diversity.py)                 # both vi
 | Feature | Definition |
 |---|---|
 | quality | trust-weighted median article quality / 10 (`source_stats`) |
-| coverage | `1 − e^(−outlet_trust / 2)`: distinct outlets × their trust; saturating (2nd outlet adds more than the 6th) |
-| urgency | `(urgency_level − 1) / 9`, capped at 0.65 for `Resolved` stories |
+| coverage | `1 - e^(-outlet_trust / 2)`: distinct outlets × their trust; saturating (2nd outlet adds more than the 6th) |
+| urgency | `(urgency_level - 1) / 9`, capped at 0.65 for `Resolved` stories |
 | impact | Local 0.25 · Regional 0.45 · National 0.7 · Global 1.0 |
 | status | Breaking 1.0 · Ongoing 0.6 · Resolved 0.15 |
-| velocity | `1 − e^(−(0.7·Σ VELOCITY_SIG_WEIGHT[sig]·fade(8 h) over StoryUpdate + 0.3·Σ outlet trust·fade(6 h) of each outlet's newest *original* article)/2)`; sig weights 1: 0.05 · 2: 0.35 · 3: 1.0, so one major update outweighs a run of minor ones; cross-feed copies don't count as reporting |
+| velocity | `1 - e^(-(0.7·Σ VELOCITY_SIG_WEIGHT[sig]·fade(8 h) over StoryUpdate + 0.3·Σ outlet trust·fade(6 h) of each outlet's newest *original* article)/2)`; sig weights 1: 0.05 · 2: 0.35 · 3: 1.0, so one major update outweighs a run of minor ones; cross-feed copies don't count as reporting |
 | update_boost | strongest recent update: `max(0.08 · BOOST_SIG_WEIGHT[sig] · fade(8 h))`, weights 1: 0.1 · 2: 0.45 · 3: 1.0 |
-| freshness | `2^(−h since news_at / half-life)`, half-life Breaking 12 h · Ongoing 30 h · Resolved 12 h. An update moves `news_at` only `FRESHNESS_REFRESH[sig]` (1: 10 % · 2: 50 % · 3: 100 %) of the way to its *publication* time (`story.trigger_time`: article `published_date`, at most 24 h before first seen, never in the future), stored as `StoryUpdate.event_at` |
+| freshness | `2^(-h since news_at / half-life)`, half-life Breaking 12 h · Ongoing 30 h · Resolved 12 h. An update moves `news_at` only `FRESHNESS_REFRESH[sig]` (1: 10 % · 2: 50 % · 3: 100 %) of the way to its *publication* time (`story.trigger_time`: article `published_date`, at most 24 h before first seen, never in the future), stored as `StoryUpdate.event_at` |
 | reader factor | "For you": read × 0.2 · updated since read (sig 2) × 0.5 · updated with a major (sig 3) update × 0.85 · unread × 1; stories read during the current page visit (`keep`) are exempt so they don't jump |
-| diversity | MMR: `0.82·score/top − 0.18·max similarity to a story above`; similarity = max(story-vector cosine rescaled from 0.5, StoryLink `CONTINUING_DEVELOPMENT` 0.95 / `SAME_TOPIC_DISTINCT_EVENT` 0.75); story vector = content-class-weighted mean of the newest 8 original article vectors. Moved stories get `relevance.similar_to` |
-| tag_affinity | per matching tag `tanh(weight/4)` (1→0.25, 3→0.64, 10→0.99); tag list wins over learned weights; learned ones × specificity (normalized IDF over active stories, floor 0.2); combined by noisy-OR per sign: `pos − neg` |
+| diversity | MMR: `0.82·score/top - 0.18·max similarity to a story above`; similarity = max(story-vector cosine rescaled from 0.5, StoryLink `CONTINUING_DEVELOPMENT` 0.95 / `SAME_TOPIC_DISTINCT_EVENT` 0.75); story vector = content-class-weighted mean of the newest 8 original article vectors. Moved stories get `relevance.similar_to` |
+| tag_affinity | per matching tag `tanh(weight/4)` (1→0.25, 3→0.64, 10→0.99); tag list wins over learned weights; learned ones × specificity (normalized IDF over active stories, floor 0.2); combined by noisy-OR per sign: `pos - neg` |
 | geo | city 1.0 · country 0.6 · language 0.35, or 0.5 per `interest_regions`/`locations` tag hit |
-| soft_cap | linear to 0.8, then `0.8 + 0.2·tanh((x−0.8)/0.2)` — no ties among the best stories |
+| soft_cap | linear to 0.8, then `0.8 + 0.2·tanh((x-0.8)/0.2)` — no ties among the best stories |
 
-- **Mute**: a tag at weight ≤ −10 hides its stories from "For you" (hard filter, not a penalty); an explicit tag filter still shows them.
+- **Mute**: a tag at weight ≤ -10 hides its stories from "For you" (hard filter, not a penalty); an explicit tag filter still shows them.
 - **Tag list vs learned weights**: `UserProfile.tag_weights` is only what the user set. 👍/👎 (±2/√n per tag, half-life up 60 d / down 90 d) and story chats (+1/√n, 90 d) are derived at ranking time from `FeedbackLog`/`ChatSession` (`inferred_weights`, never stored). Migration v8 removed weights that votes alone had written (179 → 71 tags on the owner profile).
 - **For Everyone** = `public` only (no tags, no location, category trust from `SOURCE_TRUST`).
 - **Archive** = older than `STORY_ACTIVE_DAYS`, newest first, not scored.
@@ -59,7 +59,7 @@ list     = MMR rerank of the top 50 (app/diversity.py)                 # both vi
 ### Request flow (`GET /api/stories` → `scoring.ranked_stories`)
 
 1. Candidates: stories with a headline and `news_at` within `STORY_ACTIVE_DAYS=7` (archive: older, sorted by `news_at`).
-2. Filters: search `q` (LIKE on headline/summary/tags), `tag` filter, `preferences.min_quality`, `excluded_feeds` (their articles don't count; a story with only those disappears), muted tags (For you only, not with a tag filter).
+2. Filters: search `q` (FTS5 word matches, plus meaning matches when signed in, fused by RRF; see README → Search), `tag` filter, `preferences.min_quality`, `excluded_feeds` (their articles don't count; a story with only those disappears), muted tags (For you only, not with a tag filter).
 3. Score every candidate (no caching, ~0.4 s), apply the reader factor (For you), sort by `display`.
 4. For you + Active + "Show read" off → `hide_read=true`: drop stories in state `read` (not `updated`); `keep` = ids read during this page visit, so they don't vanish while scrolling.
 5. Diversity rerank of the top 50 (active lists only).
@@ -97,10 +97,11 @@ Everything below is already stored per article/story — unused or under-used in
 
 ## Interaction (feedback & UI) surface
 
-- **Tag popup on story cards** (`app/frontend/app.js`, `tagMenuRender`): one click sets a weight — `Mute (−10) · −3 · +1 · +3 · +10` — plus an exact input, Remove, and "Filter feed by this tag". A toast offers Undo. Tag pills show their weight (`#ai +9`); negative ones are red, muted ones struck through.
+- **Tag popup on story cards** (`app/frontend/app.js`, `tagMenuRender`): one click sets a weight — `Mute (-10) · -3 · +1 · +3 · +10` — plus an exact input, Remove, and "Filter feed by this tag". A toast offers Undo. Tag pills show their weight (`#ai +9`); negative ones are red, muted ones struck through.
 - **👍/👎** (`POST /api/feedback`): one vote per user × story, logged in `FeedbackLog` with a headline/tags snapshot. Feeds learned weights only; the tag list is never edited. Hidable via ⚙ Preferences → "Show 👍/👎 on stories" (`preferences.show_votes`).
 - **Preferences** (`app/frontend/auth.js`): editable tag list; read-only "Learned interests" (click to pin one to the tag list); source trust sliders, `⊘` hide feed (`excluded_feeds`); home city/country/language, `interest_regions`, `locations`, `min_quality`, `about` (LLM texts only).
 - **Read / unread & resurfacing**: expanding an unread card or clicking its headline marks it read (signed in); the ✓ button toggles read/unread (unread deletes the row). `StoryRead` keeps only the latest `read_at` per user × story — no history, no dwell, no record of *how* it was marked (by design). A story becomes `updated` again when `material_at > read_at` (an update with significance ≥ `READ_RESURFACE_SIGNIFICANCE=2`) and shows up to 3 "New since you read it" facts.
+- **Offline clicks**: read marks and votes the browser couldn't send are replayed later with their age; `MarkChange` keeps the time of the last change per user × story × kind, and an older replay is dropped (the later click wins, measured on the server clock). A replayed read sets `read_at` to the click time, so updates after the click still resurface the story.
 - **"Show read" toggle** (For you + Active only, `localStorage`): see request flow step 4.
 - **Expanded card**: plain facts (`High urgency · Global impact · Quality 7.0 · 7 outlets · 2 updates today`), "Why it is in your feed" (built only from the breakdown: tag-list matches, learned matches, location reason, new facts), and a collapsed "Priority 71/100 · how it is computed" table with every part in points, the freshness factor, the "Already read" factor and a "Variety" row when the rerank moved it.
 - **Story chat** (`app/chat.py`): a session with ≥ 1 message = one `+CHAT_WEIGHT` event for the story's tags, regardless of message count. Editing a message (✎, `edit_of`) adds a sibling branch (`/chat/switch` changes the shown one) — not a signal.
@@ -136,7 +137,7 @@ Dropped (owner decision 2026-10-26): impression/dwell logging, implicit signals 
 Fixed in v2.1: 1 (partial refresh), 2 (publication time), 3 (reader factor, brief), 4 (strongest boost), 5 (velocity weights, copies), 6 (headline refresh), 7 (diversity). Dropped: 8, 9 (no implicit signals).
 
 1. **Minor updates fully reset freshness.** `story.py` sets `news_at = now` for any significance ≥ 1, and 1 means "minor detail, reaction or opinion". So a reaction quote gives freshness 1.0 *plus* velocity *plus* update boost → minor updates float to the top.
-2. **`news_at` is processing time, not publication time.** Pipeline backlog and Ollama-timeout retries (`retry_after`) make old news look brand new. Use the triggering article's `published_date` (clamped to `[created_at − 1 d, now]`).
+2. **`news_at` is processing time, not publication time.** Pipeline backlog and Ollama-timeout retries (`retry_after`) make old news look brand new. Use the triggering article's `published_date` (clamped to `[created_at - 1 d, now]`).
 3. **Read state doesn't affect ranking.** An `updated` story ranks by the whole story's score, not by what is new *to this reader* (max significance and age of the updates after `read_at`). With "Show read" on, read stories rank like unread ones (could be × ~0.3). The heads-up brief can repeat stories the user already read.
 4. **`update_boost` uses the last update, not the strongest.** `story_dynamics` overwrites `boost` per row, so a significance-1 update right after a 3 lowers it. Use the max of the faded boosts.
 5. **Velocity rewards chatter.** `Σ sig/3` is linear, so five minor updates count more than one major one; outlet `heat` also counts copies/reposts that added no facts. Consider `sig²` weighting, counting only ≥ 2, and heat only from articles that changed the story.
