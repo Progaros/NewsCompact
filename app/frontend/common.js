@@ -19,15 +19,49 @@ function hostname(url) {
   }
 }
 
-// Copies an absolute link for `path`; the clipboard API needs HTTPS, so fall back to a prompt.
+// Copies an absolute link for `path`; the clipboard API needs HTTPS, so fall back to a copyable input.
 async function copyLink(path) {
   const url = new URL(path, location.origin).href;
   try {
     await navigator.clipboard.writeText(url);
     if (typeof Auth !== "undefined") Auth.toast("Link copied.");
   } catch {
-    prompt("Copy this link:", url);
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    ta.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand?.("copy");
+    ta.remove();
+    if (ok) {
+      if (typeof Auth !== "undefined") Auth.toast("Link copied.");
+      return;
+    }
+    showCopyDialog(url);
   }
+}
+
+function showCopyDialog(url) {
+  document.getElementById("copy-modal")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "copy-modal";
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="login-panel">
+      <h2>Copy link</h2>
+      <div class="pw-row" style="margin-top:12px">
+        <input type="text" readonly value="${esc(url)}" aria-label="Link URL" />
+        <button type="button" class="btn" id="copy-close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector("input");
+  input.focus();
+  input.select();
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  overlay.querySelector("#copy-close").onclick = close;
 }
 
 // Server timestamps are naive UTC "YYYY-MM-DD HH:MM:SS".

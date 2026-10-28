@@ -33,7 +33,12 @@ function render(users) {
               <span class="toggle-track" aria-hidden="true"></span>${u.is_admin ? "admin" : "user"}</button></td>
         <td>${u.votes}</td><td>${u.reads}</td><td>${u.chats}</td>
         <td class="muted nowrap">${esc(fmtShort(u.created_at))}</td>
-        <td class="nowrap">
+        <td class="nowrap user-actions">
+          <form class="reset-form" hidden>
+            <input type="password" name="password" placeholder="New password (min. 8)" minlength="8" autocomplete="new-password" aria-label="New password for ${esc(u.name)}" />
+            <button type="submit" class="btn">Save</button>
+            <button type="button" class="btn reset-cancel">Cancel</button>
+          </form>
           <button type="button" class="btn reset">Set password</button>
           <button type="button" class="btn del" ${u.id === 1 || u.id === me ? "disabled" : ""}>Delete</button>
         </td>
@@ -46,13 +51,30 @@ function render(users) {
       const d = await api("PATCH", `/api/admin/users/${id}`, { is_admin: !u.is_admin });
       if (d) render(d.users);
     };
-    row.querySelector(".reset").onclick = async () => {
-      const pw = prompt(`New password for ${u.name} (min. 8 characters):`);
-      if (pw == null) return;
+    const resetBtn = row.querySelector(".reset");
+    const resetForm = row.querySelector(".reset-form");
+    const pwInput = resetForm.elements.password;
+    const closeReset = () => {
+      resetForm.hidden = true;
+      resetForm.reset();
+      resetBtn.hidden = false;
+    };
+    resetBtn.onclick = () => {
+      resetBtn.hidden = true;
+      resetForm.hidden = false;
+      pwInput.focus();
+    };
+    row.querySelector(".reset-cancel").onclick = closeReset;
+    pwInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); closeReset(); resetBtn.focus(); }
+    });
+    resetForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const pw = pwInput.value;
       if (pw.length < 8) return Auth.toast("Password too short (min. 8).");
       const d = await api("PATCH", `/api/admin/users/${id}`, { password: pw });
       if (d) { render(d.users); Auth.toast(`Password of ${u.name} changed.`); }
-    };
+    });
     row.querySelector(".del").onclick = async () => {
       if (!confirm(`Delete ${u.name}? Their preferences, votes, read state and chats are removed.`)) return;
       const d = await api("DELETE", `/api/admin/users/${id}`);

@@ -456,7 +456,7 @@ main:has(#article-list) table.feeds td:nth-child(2) { width: auto; }
 body.unsigned-in .interaction { display: none; }
 
 
-#login-modal, #user-modal {
+#login-modal, #user-modal, #copy-modal {
   position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
   display: flex; align-items: center; justify-content: center; z-index: 50;
 }
@@ -541,6 +541,13 @@ body.unsigned-in .interaction { display: none; }
 .share-row a:hover { color: var(--accent); }
 .share-row .muted { font-size: 12px; white-space: nowrap; }
 .users .toggle { min-width: 72px; font-size: 12px; }
+.users .reset-form[hidden] { display: none; }
+.users .reset-form { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; }
+.users .reset-form input {
+  width: 170px; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: 12px;
+}
+.users .reset-form input:focus { outline: none; border-color: var(--accent); }
 .add-feed .check input { flex: none; min-width: 0; }
 .users .toggle[aria-pressed="true"] { border-color: var(--accent); }
 .user-profile .muted { color: var(--muted); font-size: 12px; }
