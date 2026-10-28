@@ -17,6 +17,7 @@ wheels/
 *.sqlite*
 *.zip
 news.pid
+news.pid.lock
 *.log
 *.log.*.gz
 *.out
