@@ -257,7 +257,7 @@ story-card.open .details > div { padding-bottom: 6px; }
 .fact { color: var(--text-2); background: var(--panel-2); border-radius: 6px; padding: 2px 8px; }
 .fact b { font-weight: 600; }
 .why { margin-top: 10px; font-size: 13px; color: var(--text-2); }
-.why-label { font-size: 11px; color: var(--accent-2); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.why-label { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .why ul { margin: 4px 0 0; padding-left: 18px; }
 .why b { color: var(--text); font-weight: 600; }
 .score-inspector { margin-top: 10px; font-size: 12px; color: var(--muted); }
@@ -287,7 +287,7 @@ body.hide-votes .fb { display: none; }
   border: 1px solid transparent; border-radius: 999px; padding: 5px 10px 5px 8px; cursor: pointer;
 }
 .src-toggle:hover { background: var(--panel-2); color: var(--text); }
-.src-count { color: var(--accent-2); font-weight: 600; white-space: nowrap; }
+.src-count { font-weight: 600; white-space: nowrap; }
 .src-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chev {
   width: 7px; height: 7px; flex: none; margin-left: 2px;
@@ -308,8 +308,8 @@ story-card.src-open .chev { transform: translateY(1px) rotate(-135deg); }
 .icon-btn:hover { background: var(--panel-2); color: var(--text); }
 .icon-btn.active { background: var(--accent-2-soft); border-color: var(--accent-2); color: var(--accent-2); }
 /* Hover colours: upvote orange, downvote blue. */
-.icon-btn.fb[data-kind="up"]:hover { color: #ff4500; }
-.icon-btn.fb[data-kind="down"]:hover { color: #0075eb; }
+.icon-btn.fb[data-kind="up"]:hover { color: var(--accent-2); }
+.icon-btn.fb[data-kind="down"]:hover { color: var(--danger); }
 
 .sources > div { padding: 0 22px; }
 story-card.src-open .sources > div { border-top: 1px solid var(--border); padding-bottom: 8px; }

@@ -139,6 +139,7 @@ function inspectorHtml(d) {
   const rows = Object.entries(rel.parts).map(([k, v]) => `<tr><td>${esc(PART_LABELS[k] || k)}</td>
     <td class="muted">${esc(detail[k] ?? "")}</td><td class="num">${esc(signed(v.toFixed(1)))}</td></tr>`).join("");
   return `<details class="score-inspector"><summary>Priority <b>${Math.round(d.display_score)}</b>/100 · how it is computed</summary>
+    ${state.view === "personal" && Auth.state.authenticated ? whyHtml(d) : ""}
     <table>${rows}
       <tr class="sum"><td>Value</td><td class="muted">sum, bent towards 100 above 80</td><td class="num">${rel.value}</td></tr>
       <tr><td>Freshness</td><td class="muted">${rel.age_h} h since news, half-life ${rel.half_life_h} h</td><td class="num">×${rel.freshness}</td></tr>
@@ -363,7 +364,7 @@ class StoryCard extends HTMLElement {
     const feedCount = d.source_count ?? articles.length;
     const feeds = [...new Set(articles.map((a) => shortFeed(a.feed || hostname(a.url))).filter(Boolean))];
     const feedPreview = feeds.slice(0, 3).map(esc).join(" · ") + (feeds.length > 3 ? ` +${feeds.length - 3}` : "");
-    const location = m.location && !/^global\b/i.test(m.location) ? `<span>📍 ${esc(m.location)}</span>` : "";
+    const location = m.location && !/^global\b/i.test(m.location) ? `<span>${esc(m.location)}</span>` : "";
     const tags = (d.tags || []).map((t) => tagButton(t)).join("");
     const updated = d.read === "updated";
     const showChanges = (updated || (d.read === "read" && sessionReadIds.has(d.id))) && d.changes?.length;
@@ -415,7 +416,6 @@ class StoryCard extends HTMLElement {
       <div class="collapse details"><div>
         <div class="tags">${tags || `<span class="muted">no tags</span>`}</div>
         <div class="facts">${factsHtml(d)}</div>
-        ${state.view === "personal" && Auth.state.authenticated ? whyHtml(d) : ""}
         ${inspectorHtml(d)}
         ${related ? `<div class="related"><span class="muted">Related stories</span><ul>${related}</ul></div>` : ""}
       </div></div>
