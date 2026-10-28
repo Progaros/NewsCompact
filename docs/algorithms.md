@@ -78,9 +78,9 @@ Other consumers: heads-up brief = top 5 of the same ranking (personal: unread or
 
 ## Tag synonyms (app/tags.py, app/tag_merge.py)
 
-- Static aliases: unambiguous EN/DE pairs (`ki→ai`, `munchen→munich`, `politik→politics`, `wirtschaft→economy`, …; not `bayern`, which is also the football club).
+- Static aliases: unambiguous EN/DE pairs (`ki→ai`, `munchen→munich`, `politik→politics`, `wirtschaft→economy`, …). Tags with several meanings (`tags.AMBIGUOUS_TAGS`: `bayern` = state or club, `sicherheit` = security or safety, `entwicklung`, `beziehung(en)`, `netzwerk`, `storage`) never merge: the pass doesn't propose them and approved rows with them are ignored.
 - `TagAlias` table, applied at read time by `normalize_tag`, so stored stories and tag lists follow without rewrites; merged tag weights keep the strongest value, never the sum.
-- Daily worker pass (`TAG_MERGE_*`): tags on ≥ 3 stories or on a tag list → `qwen3-embedding` (cached in `TagVector`) → cosine kNN ≥ 0.80 → LLM verifier (`SAME_CONCEPT | BROADER | NARROWER | RELATED | AMBIGUOUS | UNRELATED`). Auto-approve only `SAME_CONCEPT` with cosine ≥ 0.90 and confidence ≥ 0.9; other `SAME_CONCEPT` → pending; everything else → rejected (not asked again). Review: `scripts/merge_tags.py list|approve|reject|add`.
+- Daily worker pass (`TAG_MERGE_*`): tags on ≥ 3 stories or on a tag list → `qwen3-embedding` (cached in `TagVector`) → cosine kNN ≥ 0.80 → LLM verifier (`SAME_CONCEPT | BROADER | NARROWER | RELATED | AMBIGUOUS | UNRELATED`). Auto-approve only `SAME_CONCEPT` with cosine ≥ 0.90 and confidence ≥ 0.9; other `SAME_CONCEPT` → pending; everything else → rejected (not asked again). Review: `scripts/merge_tags.py list|approve|reject|add`. The first hand review (2026-10-28: 60 approved, 15 rejected, `smart home → everything smart home` revoked) is migration v11 (`app/tag_review.py`).
 - Thresholds are **uncalibrated** (Ollama was unreachable from the dev machine). Calibrate with `scripts/merge_tags.py neighbours --min-sim 0.7` and `propose --dry-run` before trusting auto-approval.
 
 ## Available data (raw material for expanding the algorithm)

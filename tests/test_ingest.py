@@ -1,5 +1,6 @@
 import httpx
 import feedparser
+import pytest
 
 from app import config, db, ingest
 
@@ -162,6 +163,46 @@ def test_fetch_skips_non_ascii_validators(monkeypatch):
     monkeypatch.setattr(ingest, "_client", httpx.Client(transport=httpx.MockTransport(handler)))
     assert ingest.fetch("https://x/feed", '"abc\u201a"', "Sat, 24 Oct 2026 15:44:04 GMT").status_code == 200
     assert "If-None-Match" not in sent[0] and sent[0]["If-Modified-Since"].startswith("Sat")
+
+
+def test_fetch_keeps_non_ascii_response_headers(monkeypatch):
+    # muenchen-sehen.de sends "accelerometer=()‚ autoplay=..." (UTF-8 bytes) in Permissions-Policy.
+    policy = "accelerometer=()\u201a autoplay=(self)".encode()
+    monkeypatch.setattr(ingest, "_client", httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=RSS, headers=[(b"Permissions-Policy", policy), (b"ETag", b'"e1"')]))))
+    r = ingest.fetch("https://x/feed")
+    assert r.content == RSS and r.headers["ETag"] == '"e1"'
+
+
+def test_fetch_retries_bot_walls_with_the_feed_user_agent(monkeypatch):
+    agents = []
+
+    def handler(request):
+        ua = request.headers["User-Agent"]
+        agents.append(ua)
+        if ua == config.FEED_USER_AGENT:
+            return httpx.Response(200, content=RSS)
+        return httpx.Response(302 if "faz" in str(request.url) else 403 if "wiki" in str(request.url) else 404)
+
+    monkeypatch.setattr(ingest, "_client", httpx.Client(transport=httpx.MockTransport(handler),
+                                                       headers={"User-Agent": config.USER_AGENT}))
+    assert ingest.fetch("https://faz.example/rss").content == RSS  # 302 without Location
+    assert ingest.fetch("https://wiki.example/feed").content == RSS  # 403
+    assert agents == [config.USER_AGENT, config.FEED_USER_AGENT] * 2
+    agents.clear()
+    with pytest.raises(httpx.HTTPStatusError):
+        ingest.fetch("https://gone.example/feed")
+    assert agents == [config.USER_AGENT]  # a plain 404 is not retried
+
+
+def test_disabled_feeds_are_not_fetched(feed_id, monkeypatch):
+    with db.get_conn() as conn:
+        off = conn.execute("INSERT INTO Feed (title, xml_url, enabled) VALUES ('off', 'https://off/rss', 0)").lastrowid
+    fetched = []
+    monkeypatch.setattr(ingest, "fetch", lambda url, *_a: fetched.append(url) or _response(_rss()))
+    ingest.ingest_all()
+    assert fetched == [_feed(feed_id)["xml_url"]]
+    assert _feed(off)["last_fetched_at"] is None
 
 
 def test_fetch_error_is_recorded(feed_id, monkeypatch):

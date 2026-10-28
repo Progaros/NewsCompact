@@ -83,6 +83,8 @@ USER_AGENT = _env(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 NewsAggregator/1.0",
 )
+# Retry UA for feeds whose bot wall rejects the browser UA (403, or a redirect without Location).
+FEED_USER_AGENT = _env("NEWS_FEED_USER_AGENT", f"NewsAggregator/1.0 (RSS reader; +{PUBLIC_BASE})")
 # Full-text extraction only when the RSS description is shorter than this (words).
 EXTRACT_MIN_DESC_WORDS = _int("NEWS_EXTRACT_MIN_DESC_WORDS", 100)
 MAX_FEEDS_PER_RUN = _int("NEWS_MAX_FEEDS_PER_RUN", 0)  # 0 = all

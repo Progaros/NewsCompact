@@ -38,10 +38,14 @@ _SYSTEM = (
     "You maintain the topic tags of a news app with English and German stories. Decide how "
     "tag A relates to tag B. SAME_CONCEPT only when both name exactly the same thing (a "
     "translation, spelling variant or abbreviation), so a reader who follows one always wants "
-    "the other: 'klimawandel'/'climate change', 'ki'/'ai', 'munchen'/'munich'. BROADER: A is "
+    "the other: 'klimawandel'/'climate change', 'ki'/'ai', 'munchen'/'munich'. A qualifier only "
+    "keeps SAME_CONCEPT when both still name the identical thing ('trump'/'donald trump'); "
+    "otherwise the longer tag is NARROWER ('storage'/'data storage', 'bayern'/'bayern munich', "
+    "'wahlkampf'/'election'). BROADER: A is "
     "more general than B. NARROWER: A is more specific than B ('generative ai' vs 'ai', "
     "'german politics' vs 'germany'). RELATED: connected but different ('economy'/'recession', "
-    "'microsoft'/'azure', 'climate change'/'weather'). AMBIGUOUS: a tag has several meanings "
+    "'microsoft'/'azure', 'climate change'/'weather', 'medicine'/'medication', "
+    "'journalist'/'journalism', 'telekom'/'telecom'). AMBIGUOUS: a tag has several meanings "
     "('bayern' = the state or the football club). Otherwise UNRELATED. canonical: which of the "
     "two is the better shared name, preferring the English one. Respond with JSON only."
 )
@@ -139,7 +143,8 @@ def run(*, apply: bool = True, max_verify: int | None = None,
         result["candidates"] = len(cands)
         pairs = neighbour_pairs(ensure_vectors(conn, sorted(cands)), config.TAG_MERGE_REVIEW_SIM)
         decided = _decided(conn)
-        todo = [p for p in pairs if frozenset(p[:2]) not in decided]
+        todo = [p for p in pairs if frozenset(p[:2]) not in decided
+                and not tags.AMBIGUOUS_TAGS.intersection(p[:2])]
         result["pairs"] = len(todo)
         examples = _examples(conn, {t for a, b, _ in todo[:limit] for t in (a, b)})
         merged: set[str] = set()

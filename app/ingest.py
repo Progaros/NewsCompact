@@ -193,6 +193,17 @@ def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -
         headers["If-None-Match"] = etag
     if last_modified and last_modified.isascii():
         headers["If-Modified-Since"] = last_modified
+    try:
+        return _fetch(url, headers)
+    except httpx.HTTPStatusError as e:
+        # Bot walls answer the browser UA with a 403 (Wikimedia) or a 302 without Location (FAZ)
+        # but serve an identifiable feed reader.
+        if not (300 <= e.response.status_code < 400 or e.response.status_code == 403):
+            raise
+        return _fetch(url, {**headers, "User-Agent": config.FEED_USER_AGENT})
+
+
+def _fetch(url: str, headers: dict[str, str]) -> httpx.Response:
     with http().stream("GET", url, headers=headers) as r:
         body = b""
         if r.status_code != 304:
@@ -200,9 +211,10 @@ def fetch(url: str, etag: str | None = None, last_modified: str | None = None) -
             body = _read_capped(r)
             if body is None:
                 raise ValueError("feed response exceeds size limit")
-    # The body is already decoded: drop the headers that described the wire encoding.
-    kept = [(k, v) for k, v in r.headers.multi_items()
-            if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+    # The body is already decoded: drop the headers that described the wire encoding. Raw bytes,
+    # because a decoded non-ASCII value (a "‚" in Permissions-Policy) can't be re-encoded.
+    kept = [(k, v) for k, v in r.headers.raw
+            if k.lower() not in (b"content-encoding", b"content-length", b"transfer-encoding")]
     return httpx.Response(r.status_code, headers=kept, content=body, request=r.request)
 
 
@@ -376,12 +388,12 @@ def ingest_feed(feed: dict[str, Any], should_stop: Callable[[], bool] = lambda: 
 
 def ingest_all(on_new: Callable[[], None] | None = None,
                should_stop: Callable[[], bool] = lambda: False) -> int:
-    """Fetch all feeds concurrently (failing ones wait out their backoff); ``on_new`` fires
-    whenever a feed stored new articles. ``should_stop`` ends the run early: the process
-    can't exit before the pool's queued feeds are done."""
+    """Fetch all enabled feeds concurrently (failing ones wait out their backoff); ``on_new``
+    fires whenever a feed stored new articles. ``should_stop`` ends the run early: the process
+    can't exit before the pool's queued feeds are done. Disabled feeds are not fetched at all."""
     with db.get_conn() as conn:
-        sql = ("SELECT * FROM Feed WHERE next_fetch_at IS NULL OR next_fetch_at <= datetime('now') "
-               "ORDER BY enabled DESC, id")
+        sql = ("SELECT * FROM Feed WHERE enabled = 1 "
+               "AND (next_fetch_at IS NULL OR next_fetch_at <= datetime('now')) ORDER BY id")
         if config.MAX_FEEDS_PER_RUN > 0:
             sql += f" LIMIT {int(config.MAX_FEEDS_PER_RUN)}"
         feeds = [dict(r) for r in conn.execute(sql)]
@@ -396,6 +408,6 @@ def ingest_all(on_new: Callable[[], None] | None = None,
                 log.warning("ingest error for %s: %s", futures[fut]["title"], e)
                 continue
             total += n
-            if n and on_new and futures[fut]["enabled"]:
+            if n and on_new:
                 on_new()
     return total

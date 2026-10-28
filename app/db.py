@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 import sqlite_vec
 
-from . import config, dedup, tags
+from . import config, dedup, tag_review, tags
 from .content_quality import classify as classify_content
 from .content_quality import clean_body
 
@@ -271,11 +271,16 @@ def _chat_seen(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE ChatSession SET seen_id = (SELECT MAX(id) FROM ChatMessage m WHERE m.session_id = ChatSession.id)")
 
 
+def _tag_review(conn: sqlite3.Connection) -> None:
+    """v11: hand review of the pending tag synonyms (2026-10-28), ambiguous tags un-merged."""
+    tag_review.apply(conn)
+
+
 # (user_version, migration) — each runs once, inside a transaction (foreign keys off,
 # so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
                     (5, _news_at), (6, _per_user), (7, _drop_read_summary), (8, _explicit_tag_weights),
-                    (9, _story_search), (10, _chat_seen))
+                    (9, _story_search), (10, _chat_seen), (11, _tag_review))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

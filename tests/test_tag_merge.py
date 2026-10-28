@@ -76,3 +76,42 @@ def test_review_and_manual_aliases(fake):
         with pytest.raises(ValueError):
             tag_merge.add_manual(conn, "weather", "Weather")
     assert tags.normalize_tag("unwetter") == "unwetter"
+
+
+def test_ambiguous_tags_never_merge(fake):
+    tags.set_aliases({"sicherheit": "safety", "fc bayern": "bayern", "wien": "vienna"})
+    assert tags.normalize_tag("Sicherheit") == "sicherheit"
+    assert tags.normalize_tag("FC Bayern") == "fc bayern"
+    assert tags.normalize_tag("Wien") == "vienna"
+    CONCEPTS["bayern"] = CONCEPTS["bayern munich"] = "club"
+    try:
+        with db.get_conn() as conn:
+            for tag in ("bayern", "bayern munich"):
+                for i in range(3):
+                    conn.execute("INSERT INTO Story (headline, tags) VALUES (?, ?)", (f"{tag} {i}", json.dumps([tag])))
+        tag_merge.run()
+    finally:
+        del CONCEPTS["bayern"], CONCEPTS["bayern munich"]
+    assert not any("bayern" in pair for pair in fake["verified"])  # not even asked
+
+
+def test_hand_review_applies_to_pending_and_revokes_bad_approvals(fake):
+    from app import tag_review
+
+    with db.get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO TagAlias (alias, canonical, status, method) VALUES (?, ?, ?, 'embedding+llm')", [
+                ("vienna", "wien", "pending"),              # approved, direction flipped to English
+                ("bayern", "bayern munich", "pending"),     # rejected
+                ("smart home", "everything smart home", "approved"),  # bad auto-approval revoked
+                ("sicherheit", "safety", "approved"),       # ambiguous tag
+                ("medicine", "medication", "rejected"),     # already decided: untouched
+                ("other", "thing", "pending"),              # not reviewed: stays pending
+            ])
+        assert tag_review.apply(conn, approve=(("wien", "vienna"),),
+                                reject=(("bayern", "bayern munich"), ("smart home", "everything smart home"),
+                                        ("medicine", "medication"))) == 4
+        rows = {(r[0], r[1]): r[2] for r in conn.execute("SELECT alias, canonical, status FROM TagAlias")}
+    assert rows == {("wien", "vienna"): "approved", ("bayern", "bayern munich"): "rejected",
+                    ("smart home", "everything smart home"): "rejected", ("sicherheit", "safety"): "rejected",
+                    ("medicine", "medication"): "rejected", ("other", "thing"): "pending"}

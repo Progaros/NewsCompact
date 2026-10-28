@@ -61,6 +61,10 @@ TAG_ALIASES = {
 _db_aliases: dict[str, str] = {}
 _db_lock = threading.Lock()
 
+# Tags with several common meanings never merge with anything ("bayern" = the state or the
+# football club, "sicherheit" = security or safety, "netzwerk" = social or computer network).
+AMBIGUOUS_TAGS = frozenset({"bayern", "sicherheit", "entwicklung", "beziehung", "beziehungen", "netzwerk", "storage"})
+
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 # Common Latin diacritics → ASCII, mapped *before* the non-alnum strip so
@@ -110,8 +114,10 @@ def normalize_tags(tags: list[str]) -> list[str]:
 
 
 def set_aliases(pairs: dict[str, str]) -> None:
-    """Install DB aliases (``alias -> canonical``, both normalized); chains resolve, cycles drop."""
+    """Install DB aliases (``alias -> canonical``, both normalized); chains resolve, cycles drop,
+    pairs with an ambiguous tag are ignored."""
     base = {base_tag(a): base_tag(c) for a, c in pairs.items()}
+    base = {a: c for a, c in base.items() if a not in AMBIGUOUS_TAGS and c not in AMBIGUOUS_TAGS}
     out = {}
     for alias in base:
         seen, target = {alias}, base[alias]

@@ -59,7 +59,7 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         assert conn.execute("SELECT seen_id FROM ChatSession").fetchone()[0] == 3  # old answers count as read
         assert conn.execute("SELECT rowid FROM StorySearch WHERE StorySearch MATCH 'voted'").fetchone()[0] == 5
         # v8: the weight the 👍 alone made leaves the tag list; hand-set ones stay
