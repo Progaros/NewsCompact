@@ -354,6 +354,7 @@ class StoryCard extends HTMLElement {
   }
 
   render() {
+    if (this.contains(tagMenuEl)) closeTagMenu();
     const d = this._data;
     const m = d.metrics || {};
     const breaking = m.status === "Breaking" && m.urgency_level >= 8;
@@ -579,6 +580,8 @@ function openTagMenu(tag, anchor, fromHover = false) {
   clearTimeout(tagMenuCloseTimer);
   if (fromHover) tagMenuHoverOpenedAt = Date.now();
   tagMenuAnchor = anchor;
+  const host = anchor.closest("story-card") || document.body;
+  if (tagMenuEl.parentNode !== host) host.appendChild(tagMenuEl);
   if (tagMenuTag !== tag) {
     tagMenuTag = tag;
     tagMenuRender();
@@ -597,6 +600,7 @@ function closeTagMenu() {
   clearTimeout(tagMenuCloseTimer);
   if (tagMenuTag !== null) tagMenuClosedAt = Date.now();
   tagMenuEl.hidden = true;
+  if (tagMenuEl.parentNode !== document.body) document.body.appendChild(tagMenuEl);
   tagMenuTag = null;
   tagMenuAnchor = null;
   clearTimeout(tagMenuHoverTimer);
@@ -668,6 +672,7 @@ Auth.onTagWeights(refreshTagButtons);
 
 // --- feed ------------------------------------------------------------------
 function renderFeed() {
+  if (!tagMenuEl.hidden) closeTagMenu();
   feedEl.replaceChildren();
   const slice = state.stories.slice(0, state.shown);
   if (!slice.length) {
