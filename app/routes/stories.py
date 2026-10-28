@@ -20,8 +20,9 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
                  q: str = Query("", max_length=100), tag: str = Query("", max_length=80),
                  hide_read: bool = False, keep: str = Query("", max_length=4000),
                  view: Literal["personal", "default"] = "personal"):
-    """``hide_read`` drops stories marked read (not those updated since); ``keep`` = ids read
-    during this page visit: exempt from it and from the read-state score factor.
+    """``hide_read`` drops stories marked read (not those updated since) and applies the read-state
+    score factor; without it ("Show read") read stories rank at their own score. ``keep`` = ids read
+    during this page visit: exempt from both.
 
     ``view=personal`` (signed-in only) ranks with the user's interests and settings.
     ``q`` searches words for everyone, and meaning too when signed in (costs an Ollama call).
@@ -37,7 +38,7 @@ def list_stories(request: Request, limit: int = Query(50, ge=1, le=1000), archiv
         profile = scoring.get_user_profile(conn, uid) if personal else scoring.DEFAULT_PROFILE
         ranked = scoring.ranked_stories(conn, profile, archived=archived, query=query, tag=tag.strip(),
                                         personal=personal, user_id=uid, keep=keep_ids, diverse=False,
-                                        semantic=uid is not None)
+                                        semantic=uid is not None, reader=hide_read)
         hidden = 0
         if hide_read and personal and not archived:
             visible = [i for i in ranked if i["read"] != "read" or i["story"]["id"] in keep_ids]

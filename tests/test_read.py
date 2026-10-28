@@ -26,7 +26,7 @@ def test_mark_read_hides_keep_exempts_and_unread_restores(client, feed_id, llm):
     assert _ids(client, hide_read="true") == ([second], 1)
     assert _ids(client, hide_read="true", view="default") == ([first, second], 0)  # Everyone view always shows all
     assert _ids(client, hide_read="true", keep=str(first)) == ([first, second], 0)
-    assert _ids(client) == ([second, first], 0)  # "show read": read ones rank lower (READER_FACTOR)
+    assert _ids(client) == ([first, second], 0)  # "show read": read ones keep their rank (no READER_FACTOR)
     payload = client.get(f"/api/stories/{first}").json()
     assert payload["read"] == "read" and payload["changes"] == []
 

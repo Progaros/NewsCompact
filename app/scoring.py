@@ -546,7 +546,7 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
                    archived: bool = False, query: str = "", tag: str = "",
                    personal: bool = True, user_id: int | None = 1,
                    keep: frozenset[int] | set[int] = frozenset(), diverse: bool = True,
-                   semantic: bool = False) -> list[dict[str, Any]]:
+                   semantic: bool = False, reader: bool = True) -> list[dict[str, Any]]:
     """Finished stories as ``[{story, source_count, relevance, display, read}]``.
 
     Active stories (news within STORY_ACTIVE_DAYS) are ranked by score (``display``,
@@ -556,7 +556,8 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
     ordered by match, and sets each item's ``match``.
     ``read`` is None, "read" or "updated" (significant update since ``user_id`` read it); the
     personal view scales the score by ``reader_factor`` except for ``keep`` ids (read during
-    this page visit, so they don't jump). ``diverse`` reranks the top for variety.
+    this page visit, so they don't jump); ``reader=False`` skips it ("Show read": read stories
+    mix in at their own score). ``diverse`` reranks the top for variety.
     ``personal=False`` ranks the default view (DEFAULT_PROFILE, no tags or location);
     otherwise ``profile`` defaults to the profile of ``user_id``.
     """
@@ -604,7 +605,7 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
         if relevance["muted"] and not wanted_tag:
             continue
         state = reads.get(s["id"], {"read": None})
-        if personal and user_id is not None and s["id"] not in keep:
+        if reader and personal and user_id is not None and s["id"] not in keep:
             display = apply_reader_state(relevance, display, state)
         out.append({"story": s, "source_count": st["feeds"], "outlet_count": st["outlets"],
                     "quality": round(quality, 2),

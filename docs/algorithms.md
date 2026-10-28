@@ -29,7 +29,7 @@ freshness multiplies instead of subtracting, so every story fades unless it gets
 public   = 0.30·quality + 0.22·coverage + 0.16·urgency + 0.12·impact + 0.12·velocity + 0.08·status
 personal = public + 0.30·tag_affinity (-1..1) + 0.08·geo (0..1)        # "For you" only
 score    = 100 · freshness · soft_cap(value + update_boost)            # 0..100, shown as "Priority"
-score   *= READER_FACTOR[read state]                                   # "For you" only
+score   *= READER_FACTOR[read state]                                   # "For you" with "Show read" off only
 list     = MMR rerank of the top 50 (app/diversity.py)                 # both views, active only
 ```
 
@@ -43,7 +43,7 @@ list     = MMR rerank of the top 50 (app/diversity.py)                 # both vi
 | velocity | `1 - e^(-(0.7·Σ VELOCITY_SIG_WEIGHT[sig]·fade(8 h) over StoryUpdate + 0.3·Σ outlet trust·fade(6 h) of each outlet's newest *original* article)/2)`; sig weights 1: 0.05 · 2: 0.35 · 3: 1.0, so one major update outweighs a run of minor ones; cross-feed copies don't count as reporting |
 | update_boost | strongest recent update: `max(0.08 · BOOST_SIG_WEIGHT[sig] · fade(8 h))`, weights 1: 0.1 · 2: 0.45 · 3: 1.0 |
 | freshness | `2^(-h since news_at / half-life)`, half-life Breaking 12 h · Ongoing 30 h · Resolved 12 h. An update moves `news_at` only `FRESHNESS_REFRESH[sig]` (1: 10 % · 2: 50 % · 3: 100 %) of the way to its *publication* time (`story.trigger_time`: article `published_date`, at most 24 h before first seen, never in the future), stored as `StoryUpdate.event_at` |
-| reader factor | "For you": read × 0.2 · updated since read (sig 2) × 0.5 · updated with a major (sig 3) update × 0.85 · unread × 1; stories read during the current page visit (`keep`) are exempt so they don't jump |
+| reader factor | "For you" with "Show read" off: read × 0.2 · updated since read (sig 2) × 0.5 · updated with a major (sig 3) update × 0.85 · unread × 1; stories read during the current page visit (`keep`) are exempt so they don't jump. With "Show read" on, no reader factor: read stories mix in at their own score |
 | diversity | MMR: `0.82·score/top - 0.18·max similarity to a story above`; similarity = max(story-vector cosine rescaled from 0.5, StoryLink `CONTINUING_DEVELOPMENT` 0.95 / `SAME_TOPIC_DISTINCT_EVENT` 0.75); story vector = content-class-weighted mean of the newest 8 original article vectors. Moved stories get `relevance.similar_to` |
 | tag_affinity | per matching tag `tanh(weight/4)` (1→0.25, 3→0.64, 10→0.99); tag list wins over learned weights; learned ones × specificity (normalized IDF over active stories, floor 0.2); combined by noisy-OR per sign: `pos - neg` |
 | geo | city 1.0 · country 0.6 · language 0.35, or 0.5 per `interest_regions`/`locations` tag hit |
@@ -60,7 +60,7 @@ list     = MMR rerank of the top 50 (app/diversity.py)                 # both vi
 
 1. Candidates: stories with a headline and `news_at` within `STORY_ACTIVE_DAYS=7` (archive: older, sorted by `news_at`).
 2. Filters: search `q` (FTS5 word matches, plus meaning matches when signed in, fused by RRF; see README → Search), `tag` filter, `preferences.min_quality`, `excluded_feeds` (their articles don't count; a story with only those disappears), muted tags (For you only, not with a tag filter).
-3. Score every candidate (no caching, ~0.4 s), apply the reader factor (For you), sort by `display`.
+3. Score every candidate (no caching, ~0.4 s), apply the reader factor (For you + `hide_read`), sort by `display`.
 4. For you + Active + "Show read" off → `hide_read=true`: drop stories in state `read` (not `updated`); `keep` = ids read during this page visit, so they don't vanish while scrolling.
 5. Diversity rerank of the top 50 (active lists only).
 6. Paginate (`limit`, "more" button re-requests the larger window).
