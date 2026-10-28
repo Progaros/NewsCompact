@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import sqlite3
 import struct
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -110,13 +111,26 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+_local = threading.local()
+
+
 @contextmanager
 def get_conn() -> Iterator[sqlite3.Connection]:
-    conn = _connect()
+    """This thread's connection, opened once per thread and DB path (nested uses share it)."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None and _local.path != config.DB_PATH and not _local.depth:
+        conn.close()
+        conn = None
+    if conn is None:
+        conn = _local.conn = _connect()
+        _local.path, _local.depth = config.DB_PATH, 0
+    _local.depth += 1
     try:
         yield conn
     finally:
-        conn.close()
+        _local.depth -= 1
+        if not _local.depth and conn.in_transaction:  # an error skipped COMMIT/ROLLBACK
+            conn.execute("ROLLBACK")
 
 
 def _clean_bodies(conn: sqlite3.Connection) -> None:
