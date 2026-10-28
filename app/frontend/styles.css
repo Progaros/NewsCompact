@@ -345,7 +345,6 @@ story-card.is-updated .read-btn { color: var(--accent); }
 story-card.is-updated .read-btn:hover { background: var(--accent-soft); }
 
 story-card.is-read { opacity: .5; transition: opacity .25s, border-color .15s, box-shadow .2s; }
-story-card.is-read .headline { font-weight: 550; }
 story-card.is-read.touch-active, story-card.is-read:has(:focus-visible) { opacity: 1; }
 story-card.is-read.touch-active .headline, story-card.is-read:has(:focus-visible) .headline { font-weight: 650; }
 @media (hover: hover) {
