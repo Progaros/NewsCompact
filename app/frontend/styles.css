@@ -203,9 +203,16 @@ story-card.open .details > div { padding-bottom: 6px; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }
 .tag {
   font: inherit; font-size: 12px; color: var(--accent); cursor: pointer;
-  background: var(--accent-soft); border: 1px solid transparent; border-radius: 999px; padding: 3px 10px;
+  background: var(--accent-soft); border: 1px solid transparent; border-radius: 999px; padding: 3px 10px; position: relative;
 }
 .tag:hover { border-color: var(--accent); }
+/* Invisible hover bridge: transparent pseudo-elements extend the tag's and the
+ * menu's hit areas past their visible edges, so crossing the ~6px gap between
+ * them fires no pointerout, and closing can be immediate once truly left. */
+.tag::after {
+  content: ""; position: absolute; inset: -8px -6px;
+  pointer-events: auto; background: transparent;
+}
 /* Tags on the user's tag list show their weight; negative ones are red, muted ones struck. */
 .tag-weighted {
   background: var(--accent-soft);
@@ -292,11 +299,17 @@ story-card.src-open .chev { transform: translateY(1px) rotate(-135deg); }
 .interaction { display: flex; gap: 4px; margin-left: auto; }
 .icon-btn {
   background: transparent; border: 1px solid transparent; color: var(--muted);
-  border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer;
+  border-radius: 999px; padding: 5px 8px; font: inherit; font-size: 13px; cursor: pointer;
   transition: background .15s, color .15s;
 }
+.icon-btn svg { display: block; width: 18px; height: 18px; }
+.icon-btn.share-btn svg { width: 16px; height: 16px; }
+.icon-btn.fb svg { width: 24px; height: 24px; }
 .icon-btn:hover { background: var(--panel-2); color: var(--text); }
 .icon-btn.active { background: var(--accent-2-soft); border-color: var(--accent-2); color: var(--accent-2); }
+/* Hover colours: upvote orange, downvote blue. */
+.icon-btn.fb[data-kind="up"]:hover { color: #ff4500; }
+.icon-btn.fb[data-kind="down"]:hover { color: #0075eb; }
 
 .sources > div { padding: 0 22px; }
 story-card.src-open .sources > div { border-top: 1px solid var(--border); padding-bottom: 8px; }
