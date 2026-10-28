@@ -6,9 +6,10 @@ Schedules are edited in ⚙ Preferences by admins and stored in their
     [{"kind": "brief" | "pipeline", "time": "HH:MM", "days": [0..6], "enabled": bool}]
 
 ``days`` uses Monday = 0; times are server-local. Until that key is saved, the
-NEWS_HEADS_UP_NTFY_TIMES env list applies as a daily brief. Each schedule
-fires once per day within a short catch-up window (a time missed while the
-app was down does not fire later).
+NEWS_HEADS_UP_NTFY_TIMES env list applies as a daily brief (of the first admin only). Each
+schedule fires once per day within a short catch-up window (a time missed while the
+app was down does not fire later); ReportSent keeps a restart or a second process from
+sending it again.
 """
 from __future__ import annotations
 
@@ -140,17 +141,33 @@ def due(schedule: dict[str, Any], now: dt.datetime) -> bool:
     )
 
 
+def _claim(key: str, today: str) -> bool:
+    """True for the one caller (across restarts and processes) that may send ``key`` today."""
+    with db.get_conn() as conn:
+        return conn.execute(
+            "INSERT INTO ReportSent (key, sent_on) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET sent_on = excluded.sent_on WHERE sent_on <> excluded.sent_on",
+            (key, today),
+        ).rowcount > 0
+
+
 def tick(fired: dict[str, str], now: dt.datetime | None = None) -> None:
     now = now or dt.datetime.now()
     today = now.date().isoformat()
     with db.get_conn() as conn:
         admins = [r[0] for r in conn.execute("SELECT id FROM AppUser WHERE is_admin = 1 ORDER BY id")]
     for uid in admins:
-        for s in schedules(scoring.get_user_profile(user_id=uid)):
-            key = f"{uid}:{s.get('kind')}@{s.get('time')}"
+        profile = scoring.get_user_profile(user_id=uid)
+        # The env default is one brief for the server's one topic, not one per admin.
+        if uid != admins[0] and not isinstance(profile["preferences"].get("ntfy_reports"), list):
+            continue
+        for s in schedules(profile):
+            key = f"{uid}:{s.get('kind')}@{_minutes(s.get('time', ''))}"
             if not due(s, now) or fired.get(key) == today:
                 continue
             fired[key] = today
+            if not _claim(key, today):
+                continue
             sent, text = send(s["kind"], uid)
             log.info("scheduled %s report at %s (user %s): %s", s["kind"], s["time"], uid,
                      "sent" if sent else "skipped (no text)" if not text else "push failed")

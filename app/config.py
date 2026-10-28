@@ -178,7 +178,7 @@ IMPACT_SCORE = _weights("NEWS_IMPACT_SCORE", "Local=0.25,Regional=0.45,National=
 STATUS_SCORE = _weights("NEWS_STATUS_SCORE", "Breaking=1.0,Ongoing=0.6,Resolved=0.15")
 # Freshness half-life (hours since the last news) per status; unknown status uses Ongoing.
 FRESHNESS_HALF_LIFE_HOURS = _weights("NEWS_FRESHNESS_HALF_LIFE_HOURS", "Breaking=12,Ongoing=30,Resolved=12")
-# Coverage = 1 − e^(−outlet_trust / k): the 2nd independent outlet adds more than the 6th.
+# Coverage = 1 - e^(-outlet_trust / k): the 2nd independent outlet adds more than the 6th.
 COVERAGE_SATURATION = _float("NEWS_COVERAGE_SATURATION", 2.0)
 RESOLVED_URGENCY_CAP = _float("NEWS_RESOLVED_URGENCY_CAP", 0.65)
 VELOCITY_UPDATE_HALF_LIFE_HOURS = _float("NEWS_VELOCITY_UPDATE_HALF_LIFE_HOURS", 8)
@@ -193,14 +193,17 @@ BOOST_SIG_WEIGHT = _weights("NEWS_BOOST_SIG_WEIGHT", "1=0.1,2=0.45,3=1.0")
 TRIGGER_MAX_LAG_HOURS = _float("NEWS_TRIGGER_MAX_LAG_HOURS", 24)
 # "For you" score factor by read state: read, updated since read (significance 2 / 3).
 READER_FACTOR = _weights("NEWS_READER_FACTOR", "read=0.2,updated=0.5,updated_major=0.85")
-# List-level MMR rerank of the first DIVERSITY_POOL stories: λ·score − (1−λ)·max similarity
+# Read marks / votes clicked offline are replayed at most this long after the click
+# (keep in sync with PENDING_MAX_AGE_MS in frontend/app.js).
+OFFLINE_MARK_MAX_HOURS = 24
+# List-level MMR rerank of the first DIVERSITY_POOL stories: λ·score - (1-λ)·max similarity
 # to a story placed above; cosines below DIVERSITY_SIM_FLOOR count as unrelated.
 DIVERSITY_POOL = _int("NEWS_DIVERSITY_POOL", 50)
 DIVERSITY_LAMBDA = _float("NEWS_DIVERSITY_LAMBDA", 0.82)
 DIVERSITY_SIM_FLOOR = _float("NEWS_DIVERSITY_SIM_FLOOR", 0.5)
 DIVERSITY_LINK_SIM = _weights("NEWS_DIVERSITY_LINK_SIM",
                               "CONTINUING_DEVELOPMENT=0.95,SAME_TOPIC_DISTINCT_EVENT=0.75")
-# Personal: value = public + W_AFFINITY·tag_affinity (−1..1) + W_GEO·geo (0..1)
+# Personal: value = public + W_AFFINITY·tag_affinity (-1..1) + W_GEO·geo (0..1)
 W_AFFINITY = _float("NEWS_W_AFFINITY", 0.30)
 W_GEO = _float("NEWS_W_GEO", 0.08)
 # tanh(weight / k): weight 1 ≈ 0.25, 3 ≈ 0.64, 10 ≈ 0.99

@@ -34,6 +34,30 @@ def test_mark_read_hides_keep_exempts_and_unread_restores(client, feed_id, llm):
     assert _ids(client, hide_read="true") == ([first, second], 0)
 
 
+def test_offline_replay_loses_to_a_later_change(client, feed_id, llm):
+    add_article(feed_id, "Flood hits town")
+    pipeline.process_pending()
+    sid = _ids(client)[0][0]
+    url = f"/api/stories/{sid}/read"
+    # Unread 5 minutes ago, then a read click from 2 minutes ago replayed: applies, dated to the click.
+    assert client.delete(url, params={"age": 300}).status_code == 200
+    assert client.post(url, params={"age": 120}).status_code == 200
+    with db.get_conn() as conn:
+        lag = conn.execute("SELECT (julianday('now') - julianday(read_at)) * 86400 FROM StoryRead").fetchone()[0]
+    assert 115 < lag < 130
+
+    # Device B marks it unread now; device A's read click from 1 minute ago arrives after.
+    assert client.delete(url).status_code == 200
+    assert client.post(url, params={"age": 60}).status_code == 200
+    assert client.get(f"/api/stories/{sid}").json()["read"] is None
+    assert client.post(url, params={"age": 7 * 86400}).status_code == 422  # beyond the replay window
+    assert client.post(url, params={"age": 7 * 86400}).status_code == 422  # beyond the replay window
+
+    assert client.post("/api/feedback", json={"story_id": sid, "kind": "down"}).status_code == 200
+    assert client.post("/api/feedback", json={"story_id": sid, "kind": "up", "age": 600}).status_code == 200
+    assert client.get(f"/api/stories/{sid}").json()["vote"] == "down"
+
+
 def test_read_story_resurfaces_only_on_significant_updates(client, feed_id, llm):
     add_article(feed_id, "Flood hits town")
     pipeline.process_pending()

@@ -10,7 +10,9 @@ import json
 import threading
 
 _subscribers: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = set()
-_lock = threading.Lock()
+# Reentrant: the SIGTERM handler (main.py) publishes on the main thread, possibly while that
+# thread is inside subscribe/unsubscribe; a plain Lock would deadlock the shutdown.
+_lock = threading.RLock()
 _QUEUE_MAX = 100
 
 

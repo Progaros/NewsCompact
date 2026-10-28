@@ -11,6 +11,8 @@ from ..web import current_user, private, require_uid
 router = APIRouter()
 
 _ANON_MAX_STORIES = 200  # signed-out visitors: bounded work per request
+# Seconds since the click, for clicks queued offline and sent later (0 = now).
+_Age = Query(0.0, ge=0, le=config.OFFLINE_MARK_MAX_HOURS * 3600)
 
 
 @router.get("/api/stories")
@@ -83,19 +85,19 @@ def get_story(story_id: int, request: Request, view: Literal["personal", "defaul
 
 
 @router.post("/api/stories/{story_id}/read")
-def mark_read(story_id: int, request: Request):
+def mark_read(story_id: int, request: Request, age: float = _Age):
     uid = require_uid(request)
     with db.get_conn() as conn:
-        if not stories.mark_read(conn, uid, story_id):
+        if not stories.mark_read(conn, uid, story_id, age):
             raise HTTPException(404, "story not found")
     return {"ok": True, "read": "read"}
 
 
 @router.delete("/api/stories/{story_id}/read")
-def mark_unread(story_id: int, request: Request):
+def mark_unread(story_id: int, request: Request, age: float = _Age):
     uid = require_uid(request)
     with db.get_conn() as conn:
-        stories.mark_unread(conn, uid, story_id)
+        stories.mark_unread(conn, uid, story_id, age)
     return {"ok": True, "read": None}
 
 

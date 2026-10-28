@@ -3,17 +3,17 @@
 Every story gets a 0..100 score; all features are 0..1 so the weights are comparable:
 
     public   = Σ W_PUB_x · x   x ∈ quality, coverage, urgency, impact, velocity, status (weights sum to 1)
-    personal = public + W_AFFINITY · tag_affinity (−1..1) + W_GEO · geo (0..1)        ("For you" only)
+    personal = public + W_AFFINITY · tag_affinity (-1..1) + W_GEO · geo (0..1)        ("For you" only)
     score    = 100 · freshness · soft_cap(value + update_boost)   (linear to 0.8, then bends towards 1)
 
 - quality       trust-weighted median of member article qualities / 10 (low-trust reposts
                 can't water down a credible source)
-- coverage      1 − e^(−outlet_trust / COVERAGE_SATURATION); outlet_trust sums the best feed
+- coverage      1 - e^(-outlet_trust / COVERAGE_SATURATION); outlet_trust sums the best feed
                 trust of each distinct outlet (several feeds of one site count once)
-- urgency       (urgency_level − 1) / 9, capped at RESOLVED_URGENCY_CAP for Resolved stories
+- urgency       (urgency_level - 1) / 9, capped at RESOLVED_URGENCY_CAP for Resolved stories
 - impact        IMPACT_SCORE[impact_scale]; status = STATUS_SCORE[status]
 - velocity      saturating sum of recent StoryUpdate significance and of outlets reporting now
-- freshness     2^(−hours since news_at / FRESHNESS_HALF_LIFE_HOURS[status]): multiplicative,
+- freshness     2^(-hours since news_at / FRESHNESS_HALF_LIFE_HOURS[status]): multiplicative,
                 so every story fades unless it gets new facts; an update moves news_at only
                 FRESHNESS_REFRESH[significance] of the way to its publication time
 - update_boost  strongest recent update: UPDATE_BOOST · BOOST_SIG_WEIGHT[significance], fading like velocity
@@ -318,7 +318,7 @@ def specificity(tag: str, n: int, df: dict[str, int]) -> float:
 
 def tag_signals(tags: list[str], profile: dict[str, Any],
                 freq: tuple[int, dict[str, int]] | None = None) -> list[dict[str, Any]]:
-    """Per matching tag: tanh-bounded signal −1..1; the tag list wins over inferred weights."""
+    """Per matching tag: tanh-bounded signal -1..1; the tag list wins over inferred weights."""
     explicit, inferred = profile["tag_weights"], profile.get("inferred_weights") or {}
     k = config.TAG_WEIGHT_SCALE
     out = []
@@ -703,8 +703,9 @@ def update_profile(preferences: dict[str, Any] | None = None,
         return get_user_profile(conn, user_id)
 
 
-def apply_feedback(story_id: int, kind: str | None, user_id: int = 1) -> dict[str, Any] | None:
-    """Set, switch or remove (``kind=None``) a user's vote on ``story_id``.
+def apply_feedback(story_id: int, kind: str | None, user_id: int = 1, age: float = 0.0) -> dict[str, Any] | None:
+    """Set, switch or remove (``kind=None``) a user's vote on ``story_id``, cast ``age`` seconds ago
+    (a later vote change wins).
 
     Votes only go to FeedbackLog (with a headline/tags snapshot); ranking turns them into
     decaying inferred weights, the user's tag list stays untouched.
@@ -713,7 +714,7 @@ def apply_feedback(story_id: int, kind: str | None, user_id: int = 1) -> dict[st
         # Serialized: two quick clicks must not both log a vote.
         conn.execute("BEGIN IMMEDIATE")
         try:
-            found = _apply_vote(conn, story_id, kind, user_id)
+            found = _apply_vote(conn, story_id, kind, user_id, age)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -721,13 +722,15 @@ def apply_feedback(story_id: int, kind: str | None, user_id: int = 1) -> dict[st
         return get_user_profile(conn, user_id) if found else None
 
 
-def _apply_vote(conn: sqlite3.Connection, story_id: int, kind: str | None, user_id: int) -> bool:
+def _apply_vote(conn: sqlite3.Connection, story_id: int, kind: str | None, user_id: int, age: float = 0.0) -> bool:
     alias = conn.execute("SELECT story_id FROM StoryAlias WHERE old_id = ?", (story_id,)).fetchone()
     if alias is not None:
         story_id = alias[0]
     story = conn.execute("SELECT headline, tags FROM Story WHERE id = ?", (story_id,)).fetchone()
     if story is None:
         return False
+    if db.claim_mark(conn, user_id, story_id, "vote", age) is None:
+        return True
     conn.execute("DELETE FROM FeedbackLog WHERE user_id = ? AND story_id = ?", (user_id, story_id))
     if kind in ("up", "down"):
         conn.execute("INSERT INTO FeedbackLog (user_id, story_id, headline, tags, kind) VALUES (?, ?, ?, ?, ?)",

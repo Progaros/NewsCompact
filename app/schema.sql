@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS AuthSession (
 CREATE INDEX IF NOT EXISTS idx_authsession_user ON AuthSession(user_id);
 
 -- One row per user (id = AppUser.id), created on first use.
--- tag_weights = the user's explicit tag list (−10..10); 👍/👎 and chats only feed the
+-- tag_weights = the user's explicit tag list (-10..10); 👍/👎 and chats only feed the
 -- inferred weights derived from FeedbackLog / ChatSession at ranking time.
 CREATE TABLE IF NOT EXISTS UserProfile (
     id             INTEGER PRIMARY KEY,
@@ -135,6 +135,24 @@ CREATE TABLE IF NOT EXISTS StoryRead (
     story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
     read_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, story_id)
+);
+
+-- When a user last changed a story's read mark or vote (app/db.py claim_mark). Clicks made
+-- offline are replayed later with their age; one older than this change is dropped, so a
+-- device coming back online can't undo what another device decided after it.
+CREATE TABLE IF NOT EXISTS MarkChange (
+    user_id    INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    story_id   INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,   -- read | vote
+    changed_at TEXT    NOT NULL,
+    PRIMARY KEY (user_id, story_id, kind)
+);
+
+-- Scheduled ntfy reports already sent (app/reports.py): one row per schedule, so a restart
+-- inside the catch-up window or a second server process can't push the same report again.
+CREATE TABLE IF NOT EXISTS ReportSent (
+    key     TEXT PRIMARY KEY,   -- <user>:<kind>@<minute of day>
+    sent_on TEXT NOT NULL       -- local date
 );
 
 -- New facts of each rated story update (Prompt 2 new_facts); a reader's "what changed"

@@ -16,6 +16,7 @@ router = APIRouter()
 class Feedback(BaseModel):
     story_id: int
     kind: str | None = None
+    age: float = Field(0.0, ge=0, le=config.OFFLINE_MARK_MAX_HOURS * 3600)  # seconds since an offline click
 
 
 class ReportSchedule(BaseModel):
@@ -52,7 +53,7 @@ def post_feedback(body: Feedback, request: Request):
     if kind not in ("up", "down", None):
         raise HTTPException(400, "kind must be 'up', 'down' or null")
     uid = require_uid(request)
-    profile = scoring.apply_feedback(body.story_id, kind, uid)
+    profile = scoring.apply_feedback(body.story_id, kind, uid, body.age)
     if profile is None:
         raise HTTPException(404, "story not found")
     heads_up.invalidate(heads_up.user_key(uid))

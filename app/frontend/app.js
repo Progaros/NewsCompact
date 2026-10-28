@@ -14,6 +14,14 @@ const viewBtns = { personal: document.getElementById("view-personal"), default: 
 const refreshBtn = document.getElementById("refresh-btn");
 const newBtn = document.getElementById("new-btn");
 
+/* Icons are inline SVGs (24px, stroke inherits currentColor). */
+const SVG_ICONS = {
+  link: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>`,
+  thumbsUp: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M12 7l-6 10h12z" /></svg>`,
+  thumbsDown: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M12 17l6-10H6z" /></svg>`,
+  ask: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><circle cx="8" cy="12" r="1.2" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" /><circle cx="16" cy="12" r="1.2" fill="currentColor" stroke="none" /></svg>`,
+};
+
 const PAGE = 50;
 const STALE_MS = 10 * 60 * 1000; // offer a refresh once the shown content is this old
 const POLL_MS = 20 * 1000;
@@ -162,6 +170,98 @@ function clampSummary(text) {
   return (at > SUMMARY_MAX * 0.8 ? cut.slice(0, at) : cut) + "\u2026";
 }
 
+// --- read marks / votes clicked offline -------------------------------------
+// A click that can't reach the server is kept in localStorage (the latest per user, story and
+// kind) and replayed with its age once the server is reachable. The server drops a replay
+// older than a change made meanwhile (e.g. on another device): the later click wins.
+const PENDING_KEY = "pendingMarks";
+const PENDING_MAX_AGE_MS = 24 * 3600 * 1000; // = OFFLINE_MARK_MAX_HOURS on the server
+
+const sameMark = (a, b) => a.uid === b.uid && a.story === b.story && a.kind === b.kind;
+
+function pendingMarks() {
+  try {
+    const ops = JSON.parse(localStorage.getItem(PENDING_KEY) || "[]");
+    return Array.isArray(ops) ? ops.filter((o) => Date.now() - o.at < PENDING_MAX_AGE_MS) : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePendingMarks(ops) {
+  if (ops.length) localStorage.setItem(PENDING_KEY, JSON.stringify(ops));
+  else localStorage.removeItem(PENDING_KEY);
+}
+
+// kind "read": value true / false; kind "vote": "up" | "down" | null.
+function newMark(kind, story, value) {
+  return { uid: Auth.state.user?.id ?? null, story, kind, value, at: Date.now() };
+}
+
+function sendMark(op, keepalive = false) {
+  const age = Math.max(0, (Date.now() - op.at) / 1000).toFixed(1);
+  if (op.kind === "read") {
+    return fetch(`/api/stories/${op.story}/read?age=${age}`, { method: op.value ? "POST" : "DELETE", keepalive });
+  }
+  return fetch("/api/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ story_id: op.story, kind: op.value, age: Number(age) }),
+    keepalive,
+  });
+}
+
+// No answer from the app: offline, or the reverse proxy in front of a stopped server.
+const unreachable = (res) => !res || [502, 503, 504].includes(res.status);
+
+/* Sends a click now; when the server can't be reached it is queued and null is returned. */
+async function sendMarkNow(op) {
+  savePendingMarks(pendingMarks().filter((o) => !sameMark(o, op))); // supersedes a queued click
+  let res = null;
+  try { res = await sendMark(op, true); } catch { /* offline */ }
+  if (!unreachable(res)) return res;
+  savePendingMarks([...pendingMarks().filter((o) => !sameMark(o, op)), op]);
+  Auth.toast("Offline — saved on this device, it syncs when the connection is back.");
+  return null;
+}
+
+let flushing = null;
+/* Replays the signed-in user's queued clicks in order, until one can't get through. */
+function flushMarks() {
+  flushing ||= (async () => {
+    const uid = Auth.state.user?.id;
+    for (const op of pendingMarks()) {
+      if (op.uid !== uid) continue;
+      let res = null;
+      try { res = await sendMark(op); } catch { /* still offline */ }
+      if (unreachable(res) || res.status === 401) break;
+      // Applied, overtaken by a later change, or refused for good (story gone): done either way.
+      savePendingMarks(pendingMarks().filter((o) => !(sameMark(o, op) && o.at === op.at)));
+    }
+  })().finally(() => { flushing = null; });
+  return flushing;
+}
+
+/* Clicks still queued show as made on freshly loaded stories. */
+function overlayPendingMarks(stories) {
+  const uid = Auth.state.user?.id;
+  const ops = pendingMarks().filter((o) => o.uid === uid);
+  if (!ops.length) return;
+  const byId = new Map(stories.map((s) => [s.id, s]));
+  for (const op of ops) {
+    const s = byId.get(op.story);
+    if (!s) continue;
+    if (op.kind === "vote") {
+      s.vote = op.value;
+    } else if (op.value) {
+      s.read = "read";
+      sessionReadIds.add(s.id);
+    } else {
+      s.read = null;
+    }
+  }
+}
+
 // --- <story-card> ---------------------------------------------------------
 class StoryCard extends HTMLElement {
   set story(data) {
@@ -169,24 +269,28 @@ class StoryCard extends HTMLElement {
     this.render();
   }
 
-  _feedback(kind) {
-    const next = this._data.vote === kind ? null : kind;
-    fetch("/api/feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ story_id: this._data.id, kind: next }),
-    }).then(async (res) => {
-      if (Auth.unauth(res) || !res.ok) return;
-      const body = await res.json().catch(() => null);
-      if (body?.profile?.tag_weights) Auth.setTagWeights(body.profile.tag_weights);
-      this._data.vote = next;
-      this.querySelectorAll(".fb[data-kind]").forEach((b) => {
-        const on = b.dataset.kind === next;
-        b.classList.toggle("active", on);
-        b.setAttribute("aria-pressed", on);
-      });
-      Auth.toast(next === "up" ? "Thanks — more like this."
-        : next === "down" ? "Got it — less like this." : "Vote removed.");
+  async _feedback(kind) {
+    const prev = this._data.vote;
+    const next = prev === kind ? null : kind;
+    this._setVote(next);
+    const res = await sendMarkNow(newMark("vote", this._data.id, next));
+    if (!res) return; // queued offline
+    if (Auth.unauth(res) || !res.ok) {
+      this._setVote(prev);
+      return;
+    }
+    const body = await res.json().catch(() => null);
+    if (body?.profile?.tag_weights) Auth.setTagWeights(body.profile.tag_weights);
+    Auth.toast(next === "up" ? "Thanks — more like this."
+      : next === "down" ? "Got it — less like this." : "Vote removed.");
+  }
+
+  _setVote(vote) {
+    this._data.vote = vote;
+    this.querySelectorAll(".fb[data-kind]").forEach((b) => {
+      const on = b.dataset.kind === vote;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on);
     });
   }
 
@@ -241,8 +345,8 @@ class StoryCard extends HTMLElement {
       sessionReadIds.delete(d.id);
     }
     this._syncReadDom();
-    const res = await fetch(`/api/stories/${d.id}/read`, { method: markRead ? "POST" : "DELETE", keepalive: true });
-    if (Auth.unauth(res) || !res.ok) {
+    const res = await sendMarkNow(newMark("read", d.id, markRead));
+    if (res && (Auth.unauth(res) || !res.ok)) {
       Object.assign(d, { read: prevRead, read_at: prevReadAt, prev_read_at: prevPrevReadAt });
       if (hadSessionRead) sessionReadIds.add(d.id); else sessionReadIds.delete(d.id);
       this._syncReadDom();
@@ -320,11 +424,11 @@ class StoryCard extends HTMLElement {
           <span class="src-names">${feedPreview}</span>
           <span class="chev" aria-hidden="true"></span>
         </button>
-        <button type="button" class="icon-btn share-btn" title="Copy a public link to this story" aria-label="Share">🔗</button>
+        <button type="button" class="icon-btn share-btn" title="Copy a public link to this story" aria-label="Share">${SVG_ICONS.link}</button>
         <div class="interaction">
-          <button type="button" class="icon-btn fb${d.vote === "up" ? " active" : ""}" data-kind="up" aria-pressed="${d.vote === "up"}" title="More like this" aria-label="More like this">👍</button>
-          <button type="button" class="icon-btn fb${d.vote === "down" ? " active" : ""}" data-kind="down" aria-pressed="${d.vote === "down"}" title="Less like this" aria-label="Less like this">👎</button>
-          <button type="button" class="icon-btn chat-btn" title="Ask about this story">💬 Ask</button>
+          <button type="button" class="icon-btn fb${d.vote === "up" ? " active" : ""}" data-kind="up" aria-pressed="${d.vote === "up"}" title="More like this" aria-label="More like this">${SVG_ICONS.thumbsUp}</button>
+          <button type="button" class="icon-btn fb${d.vote === "down" ? " active" : ""}" data-kind="down" aria-pressed="${d.vote === "down"}" title="Less like this" aria-label="Less like this">${SVG_ICONS.thumbsDown}</button>
+          <button type="button" class="icon-btn chat-btn" title="Ask about this story">${SVG_ICONS.ask}</button>
         </div>
       </div>
       <div class="collapse sources"><div>
@@ -410,8 +514,8 @@ tagMenuEl.setAttribute("role", "menu");
 document.body.appendChild(tagMenuEl);
 let tagMenuTag = null, tagMenuAnchor = null, tagMenuHoverTimer = 0, tagMenuCloseTimer = 0, tagMenuHoverOpenedAt = 0, tagMenuClosedAt = 0;
 
-// One click sets the weight: −10 mutes the tag in "For you", 10 = must see.
-const TAG_PRESETS = [[-10, "Mute", "Hide stories with this tag from “For you”"], [-3, "−3", "Less of this"],
+// One click sets the weight: -10 mutes the tag in “For you”, 10 = must see.
+const TAG_PRESETS = [[-10, "Mute", "Hide stories with this tag from “For you”"], [-3, "-3", "Less of this"],
   [1, "+1", "A bit more"], [3, "+3", "More of this"], [10, "+10", "Must see"]];
 
 function setTagWeight(tag, weight) {
@@ -490,19 +594,21 @@ function openTagMenu(tag, anchor, fromHover = false) {
 }
 
 function closeTagMenu() {
+  clearTimeout(tagMenuCloseTimer);
   if (tagMenuTag !== null) tagMenuClosedAt = Date.now();
   tagMenuEl.hidden = true;
   tagMenuTag = null;
   tagMenuAnchor = null;
   clearTimeout(tagMenuHoverTimer);
-  clearTimeout(tagMenuCloseTimer);
 }
 
 /* Delegated handlers — story-cards render tags dynamically, so there is no
  * per-button binding. Signed out: click filters directly (no personal list).
  * Signed in: mouse pointer-over opens after 400 ms, or instantly while a menu is
- * open / just closed ("warm"); closes 400 ms after it leaves the tag/menu;
- * touch or click toggles immediately. */
+ * open / just closed ("warm"). Leaves of the tag/menu (CSS hit-area
+ * bridges extend past the visible gap) close it after a 50 ms micro-timer
+ * that lets the pointerover on the menu cancel the close. touch or click
+ * toggles immediately. */
 document.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".tag");
   if (btn) {
@@ -542,8 +648,10 @@ document.addEventListener("pointerout", (e) => {
   if (!from || from.contains(e.relatedTarget)) return; // still inside the same tag/menu
   clearTimeout(tagMenuHoverTimer);
   if (tagMenuTag === null || tagMenuEl.contains(document.activeElement)) return;
-  clearTimeout(tagMenuCloseTimer);
-  tagMenuCloseTimer = setTimeout(closeTagMenu, 400);
+  // 50 ms micro-timer: the browser needs a couple of frames for the
+  // pointerover on the menu (or its CSS hit-area bridge) to cancel the
+  // pending close. The delay is imperceptible to the user.
+  tagMenuCloseTimer = setTimeout(closeTagMenu, 50);
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeTagMenu(); });
 document.addEventListener("scroll", () => { if (!tagMenuEl.hidden) closeTagMenu(); }, { passive: true });
@@ -607,9 +715,11 @@ function storiesUrl(limit) {
 }
 
 async function fetchStories(limit) {
+  await flushMarks(); // the list below then already reflects clicks made offline
   const res = await fetch(storiesUrl(limit));
   if (!res.ok) return false;
   const data = await res.json();
+  overlayPendingMarks(data.stories);
   for (const s of data.stories) {
     if (s.changes?.length) {
       sessionChanges.set(s.id, { changes: s.changes, read_at: s.read_at });
@@ -631,6 +741,7 @@ async function fetchStories(limit) {
 
 // Background check (cheap: no ranking): offer a reload when stories got news since the page loaded.
 async function poll() {
+  flushMarks();
   if (document.hidden || state.loading || !state.newestAt || state.scope === "archive") return;
   lastPoll = Date.now();
   const since = state.newestAt;
@@ -811,6 +922,7 @@ document.getElementById("share-brief").addEventListener("click", async () => {
   copyLink((await res.json()).url);
 });
 setInterval(checkStale, 30000);
+window.addEventListener("online", () => flushMarks());
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   checkStale();

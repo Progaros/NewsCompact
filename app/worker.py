@@ -59,7 +59,7 @@ def run_ingest() -> int:
         status.update(ingest_running=True, ingest_last_started=db.utcnow())
         t0 = time.perf_counter()
         try:
-            new = ingest.ingest_all(on_new=wake_pipeline)
+            new = ingest.ingest_all(on_new=wake_pipeline, should_stop=_stop.is_set)
         except Exception:  # noqa: BLE001
             log.exception("ingest failed")
             new = 0

@@ -87,16 +87,24 @@ def exists(conn: sqlite3.Connection, story_id: int) -> bool:
     return conn.execute("SELECT 1 FROM Story WHERE id = ?", (story_id,)).fetchone() is not None
 
 
-def mark_read(conn: sqlite3.Connection, user_id: int, story_id: int) -> bool:
-    """Marks the story read (shown again when it changes materially); False if no such story."""
+def mark_read(conn: sqlite3.Connection, user_id: int, story_id: int, age: float = 0.0) -> bool:
+    """Marks the story read ``age`` seconds ago (shown again when it changes materially after
+    that); a later change of the mark wins. False if no such story."""
     story_id = resolve_id(conn, story_id)
     if not exists(conn, story_id):
         return False
-    conn.execute("INSERT OR REPLACE INTO StoryRead (user_id, story_id, read_at) "
-                 "VALUES (?, ?, datetime('now'))", (user_id, story_id))
+    with db.immediate(conn):
+        at = db.claim_mark(conn, user_id, story_id, "read", age)
+        if at is not None:
+            conn.execute("INSERT OR REPLACE INTO StoryRead (user_id, story_id, read_at) VALUES (?, ?, ?)",
+                         (user_id, story_id, at))
     return True
 
 
-def mark_unread(conn: sqlite3.Connection, user_id: int, story_id: int) -> None:
+def mark_unread(conn: sqlite3.Connection, user_id: int, story_id: int, age: float = 0.0) -> None:
     story_id = resolve_id(conn, story_id)
-    conn.execute("DELETE FROM StoryRead WHERE user_id = ? AND story_id = ?", (user_id, story_id))
+    if not exists(conn, story_id):
+        return
+    with db.immediate(conn):
+        if db.claim_mark(conn, user_id, story_id, "read", age) is not None:
+            conn.execute("DELETE FROM StoryRead WHERE user_id = ? AND story_id = ?", (user_id, story_id))

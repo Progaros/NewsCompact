@@ -346,6 +346,34 @@ def reclaim_space() -> None:
 
 
 # --- helpers ---------------------------------------------------------------
+@contextmanager
+def immediate(conn: sqlite3.Connection) -> Iterator[None]:
+    """One write transaction, locked up front (connections autocommit otherwise)."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
+def claim_mark(conn: sqlite3.Connection, user_id: int, story_id: int, kind: str, age: float = 0.0) -> str | None:
+    """Record a change of the user's ``kind`` mark (read | vote) made ``age`` seconds ago.
+
+    Returns that time, or None if the mark already changed later (a replayed offline click
+    that another device overtook): the caller must then leave the mark alone.
+    """
+    at = conn.execute("SELECT datetime('now', ?)", (f"-{max(0.0, age):.3f} seconds",)).fetchone()[0]
+    won = conn.execute(
+        "INSERT INTO MarkChange (user_id, story_id, kind, changed_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (user_id, story_id, kind) DO UPDATE SET changed_at = excluded.changed_at "
+        "WHERE excluded.changed_at >= MarkChange.changed_at",
+        (user_id, story_id, kind, at),
+    ).rowcount
+    return at if won else None
+
+
 def utcnow() -> str:
     """Naive-UTC timestamp in SQLite's datetime('now') format."""
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S")

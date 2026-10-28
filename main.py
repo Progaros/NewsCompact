@@ -4,6 +4,8 @@ import logging
 import logging.handlers
 import os
 import shutil
+import sys
+from typing import IO
 
 import uvicorn
 
@@ -44,7 +46,24 @@ class _Server(uvicorn.Server):
         super().handle_exit(sig, frame)
 
 
+def _single_instance() -> IO | None:
+    """Lock held for the process lifetime. A second server runs its lifespan (workers, ntfy
+    scheduler -> duplicate pushes) before it fails to bind the port, and overwrites the PID file."""
+    try:
+        import fcntl
+    except ImportError:  # Windows dev box
+        return None
+    path = config.PID_FILE.with_name(config.PID_FILE.name + ".lock")
+    handle = open(path, "a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(f"another server is already running ({path} is locked)")
+    return handle
+
+
 def main() -> None:
+    lock = _single_instance()  # noqa: F841 - released when the process ends
     setup_logging()
     config.PID_FILE.write_text(str(os.getpid()))
     try:

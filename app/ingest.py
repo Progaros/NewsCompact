@@ -303,8 +303,10 @@ def _hero_image(entry: Any) -> str | None:
 
 
 # --- feeds -----------------------------------------------------------------
-def ingest_feed(feed: dict[str, Any]) -> int:
+def ingest_feed(feed: dict[str, Any], should_stop: Callable[[], bool] = lambda: False) -> int:
     """Fetch one feed and store new entries. Returns the number of new articles."""
+    if should_stop():
+        return 0
     try:
         r = fetch(feed["xml_url"], feed.get("etag"), feed.get("last_modified"))
     except Exception as e:  # noqa: BLE001
@@ -323,6 +325,8 @@ def ingest_feed(feed: dict[str, Any]) -> int:
             parsed = feedparser.parse(r.content, resolve_relative_uris=False, sanitize_html=False)
             entries = parsed.entries[: config.MAX_ITEMS_PER_FEED]
             for entry in entries:
+                if should_stop():
+                    return new  # Feed row (ETag) untouched: the rest comes with the next run
                 link = (entry.get("link") or "").strip() or None
                 title = (entry.get("title") or "").strip()
                 if not link and not title:
@@ -370,9 +374,11 @@ def ingest_feed(feed: dict[str, Any]) -> int:
     return new
 
 
-def ingest_all(on_new: Callable[[], None] | None = None) -> int:
+def ingest_all(on_new: Callable[[], None] | None = None,
+               should_stop: Callable[[], bool] = lambda: False) -> int:
     """Fetch all feeds concurrently (failing ones wait out their backoff); ``on_new`` fires
-    whenever a feed stored new articles."""
+    whenever a feed stored new articles. ``should_stop`` ends the run early: the process
+    can't exit before the pool's queued feeds are done."""
     with db.get_conn() as conn:
         sql = ("SELECT * FROM Feed WHERE next_fetch_at IS NULL OR next_fetch_at <= datetime('now') "
                "ORDER BY enabled DESC, id")
@@ -382,7 +388,7 @@ def ingest_all(on_new: Callable[[], None] | None = None) -> int:
 
     total = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.FETCH_CONCURRENCY) as ex:
-        futures = {ex.submit(ingest_feed, f): f for f in feeds}
+        futures = {ex.submit(ingest_feed, f, should_stop): f for f in feeds}
         for fut in concurrent.futures.as_completed(futures):
             try:
                 n = fut.result()

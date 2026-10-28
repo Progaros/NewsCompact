@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stop the server: SIGTERM (graceful: workers stop, SSE streams close), then
-# SIGKILL if it is still alive after the timeout.
+# Stop the server (every instance started from this checkout): SIGTERM (graceful: workers
+# stop, SSE streams close), then SIGKILL if it is still alive after the timeout.
 # Usage: scripts/shutdown.sh [timeout_seconds]   (default 20)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,21 +15,39 @@ is_ours() {  # guards against a stale PID file pointing at a reused PID
     | grep -qE "main\.py|uvicorn.*app\.api"
 }
 
-pid=""
-[[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE")"
-if ! is_ours "$pid"; then
-  pid="$(ss -ltnpH "sport = :$PORT" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n1 || true)"
-fi
-if ! is_ours "$pid"; then
+# Every server process of this checkout (the python one, not its `uv run` parent): older
+# versions could end up with several, and only one of them is in the PID file / on the port.
+candidates() {
+  [[ -f "$PID_FILE" ]] && echo "$(cat "$PID_FILE")"  # the file has no trailing newline
+  ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 || true
+  local p
+  for p in $(pgrep -f 'main\.py' || true); do
+    [[ "$(readlink "/proc/$p/cwd" 2>/dev/null)" == "$(pwd -P)" ]] || continue
+    [[ "$(basename "$(readlink "/proc/$p/exe" 2>/dev/null)")" == python* ]] && echo "$p"
+  done
+  return 0
+}
+
+pids=()
+for p in $(candidates | sort -un); do
+  is_ours "$p" && pids+=("$p")
+done
+if ((${#pids[@]} == 0)); then
   echo "not running"
   rm -f "$PID_FILE"
   exit 0
 fi
 
-echo "stopping pid $pid (timeout ${TIMEOUT}s) ..."
-kill -TERM "$pid"
+alive() {
+  local p
+  for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && echo "$p"; done
+  return 0
+}
+
+echo "stopping pid ${pids[*]} (timeout ${TIMEOUT}s) ..."
+kill -TERM "${pids[@]}" 2>/dev/null || true
 for ((i = 0; i < TIMEOUT; i++)); do
-  if ! kill -0 "$pid" 2>/dev/null; then
+  if [[ -z "$(alive)" ]]; then
     rm -f "$PID_FILE"
     echo "stopped"
     exit 0
@@ -37,7 +55,8 @@ for ((i = 0; i < TIMEOUT; i++)); do
   sleep 1
 done
 
-echo "still running after ${TIMEOUT}s, sending SIGKILL" >&2
-kill -KILL "$pid" 2>/dev/null || true
+left="$(alive | tr '\n' ' ')"
+echo "still running after ${TIMEOUT}s (pid ${left% }), sending SIGKILL" >&2
+kill -KILL $left 2>/dev/null || true
 rm -f "$PID_FILE"
 echo "killed"

@@ -58,6 +58,16 @@ def _rss(*items):
     return f'<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>{body}</channel></rss>'.encode()
 
 
+def test_ingest_feed_stops_on_shutdown(feed_id, monkeypatch):
+    monkeypatch.setattr(config, "RETENTION_DAYS", 0)
+    monkeypatch.setattr(ingest, "fetch", lambda url, *_a: _response(RSS, headers={"ETag": "e1"}))
+    monkeypatch.setattr(ingest, "fetch_page_text", lambda url: "word " * 200)
+    assert ingest.ingest_feed(_feed(feed_id), should_stop=lambda: True) == 0
+    calls = iter([False, False, True])  # stop after the first entry
+    assert ingest.ingest_feed(_feed(feed_id), should_stop=lambda: next(calls)) == 1
+    assert _feed(feed_id)["etag"] is None  # the feed is read again in full next run
+
+
 def test_ingest_feed_cleans_bodies_dedups_and_fetches_html_only(feed_id, monkeypatch):
     fetched = []
     monkeypatch.setattr(config, "RETENTION_DAYS", 0)
