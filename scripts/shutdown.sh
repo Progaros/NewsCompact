@@ -8,6 +8,15 @@ cd "$(dirname "$0")/.."
 TIMEOUT="${1:-20}"
 PORT="${NEWS_PORT:-8787}"
 PID_FILE="${NEWS_PID_FILE:-news.pid}"
+UNIT="${NEWS_SYSTEMD_UNIT:-news-server.service}"
+
+# Killed behind systemd's back, Restart=on-failure may start the server again.
+unit_stopped=0
+if systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+  echo "stopping $UNIT ..."
+  systemctl --user stop "$UNIT"
+  unit_stopped=1
+fi
 
 is_ours() {  # guards against a stale PID file pointing at a reused PID
   [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null \
@@ -33,7 +42,7 @@ for p in $(candidates | sort -un); do
   is_ours "$p" && pids+=("$p")
 done
 if ((${#pids[@]} == 0)); then
-  echo "not running"
+  ((unit_stopped)) && echo "stopped" || echo "not running"
   rm -f "$PID_FILE"
   exit 0
 fi

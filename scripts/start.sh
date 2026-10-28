@@ -17,6 +17,22 @@ PORT="${NEWS_PORT:-8787}"
 PID_FILE="${NEWS_PID_FILE:-news.pid}"
 export NEWS_LOG_FILE="${NEWS_LOG_FILE:-server.log}"
 LOG="$NEWS_LOG_FILE"
+UNIT="${NEWS_SYSTEMD_UNIT:-news-server.service}"
+
+# Under the systemd unit (Restart=on-failure) a second, script-started server must not run.
+if systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null || systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+  systemctl --user start "$UNIT"
+  for _ in $(seq 1 60); do
+    if curl -fsS --noproxy '*' -o /dev/null "http://127.0.0.1:$PORT/api/health" 2>/dev/null; then
+      echo "started via systemd ($UNIT, pid $(systemctl --user show -p MainPID --value "$UNIT"))"
+      exit 0
+    fi
+    sleep 1
+  done
+  echo "$UNIT not healthy after 60s:" >&2
+  systemctl --user status --no-pager "$UNIT" >&2 || true
+  exit 1
+fi
 
 if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "already running (pid $(cat "$PID_FILE"))" >&2

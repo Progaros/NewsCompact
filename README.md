@@ -23,10 +23,11 @@ uv run pytest                  # tests (fake LLM, temp DB)
 ```
 
 Only one server runs per checkout: `main.py` holds an exclusive lock on `news.pid.lock` and a
-second start exits right away (before it would start workers and the ntfy scheduler). If the
-server runs as the systemd user unit (`news-server.service`, `Restart=on-failure`), start and
-stop it with `systemctl --user` instead of the scripts: a SIGKILL from `shutdown.sh` counts as a
-failure and systemd starts it again.
+second start exits right away (before it would start workers and the ntfy scheduler). When the
+systemd user unit (`news-server.service`, override with `NEWS_SYSTEMD_UNIT`) is enabled or
+active, `start.sh` / `shutdown.sh` go through `systemctl --user` (a server killed behind
+systemd's back is restarted by `Restart=on-failure`). The unit logs to the journal unless `.env`
+sets `NEWS_LOG_FILE=server.log`.
 
 Put settings in a gitignored `.env` next to `main.py` (`start.sh` sources it):
 
