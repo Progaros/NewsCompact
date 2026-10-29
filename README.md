@@ -127,7 +127,7 @@ flowchart TD
   AdminCheck -->|No or is admin| UserOK[200 OK · per-user state]
 ```
 
-- **Sessions & passwords** (`app/auth.py`): passwords use salted `scrypt` (`AppUser.password_hash`). Cookie tokens are 256-bit (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS); only `sha256(token)` is stored in `AuthSession` (TTL ~3 months = 7200 h, max 500 sessions, survives restarts). Changing your password revokes sibling sessions; changing `NEWS_AUTH_PASSWORD` invalidates env-password sessions via `env_stamp`. Login and password changes are rate-limited (5 failures / 60 s per client IP, using the right-most `X-Forwarded-For` hop from a local proxy); after 10 failures on one account from any IPs, further attempts pause (1 s doubling up to 5 min) except from IPs that account signed in from before. Unknown user names cost the same scrypt run as known ones. Failures are logged as `login failed ip=<ip> user=<name>` (and `login throttled ...`), e.g. for fail2ban.
+- **Sessions & passwords** (`app/auth.py`): passwords use salted `scrypt` (`AppUser.password_hash`). Cookie tokens are 256-bit (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS); only `sha256(token)` is stored in `AuthSession` (TTL ~10 months = 7200 h, max 500 sessions, survives restarts). Changing your password revokes sibling sessions; changing `NEWS_AUTH_PASSWORD` invalidates env-password sessions via `env_stamp`. Login and password changes are rate-limited (5 failures / 60 s per client IP, using the right-most `X-Forwarded-For` hop from a local proxy); after 10 failures on one account from any IPs, further attempts pause (1 s doubling up to 5 min) except from IPs that account signed in from before. Unknown user names cost the same scrypt run as known ones. Failures are logged as `login failed ip=<ip> user=<name>` (and `login throttled ...`), e.g. for fail2ban.
 - **SSRF & hardening** (`app/api.py`, `app/ingest.py`): strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, HSTS on HTTPS (`NEWS_PUBLIC_BASE` or the request scheme), CSRF `Origin` check against `Host`/`NEWS_PUBLIC_BASE` (`Origin: null` rejected), `Sec-Fetch-Site: cross-site` block on private APIs and `cross-site`/`same-site` block on writes, DNS-pinned public-IP page fetching, feed/page bodies streamed with a 5 MB cap, single-flight heads-up generation, 50-stream SSE cap, signed-out story list cap (200).
 - **Sharing**: stories share via `/s/<id>` (public default view). Briefs and chat answers are snapshotted via `POST /api/share` into `ShareLink` (`/p/<token>`: 8-char token for the default brief, 32-char unguessable token for personal briefs and chat answers) and can be listed or revoked in ⚙ Preferences.
 
@@ -192,13 +192,13 @@ flowchart TD
 | `NEWS_VOTE_WEIGHT` / `NEWS_CHAT_WEIGHT` / `NEWS_VOTE_HALF_LIFE_DAYS` | `2` / `1` / `up=60,down=90,chat=90` | Learned (inferred) tag weights from 👍/👎 and story chats |
 | `NEWS_TAG_MERGE_ENABLED` / `NEWS_TAG_MERGE_REVIEW_SIM` / `NEWS_TAG_MERGE_AUTO_SIM` / `NEWS_TAG_MERGE_MAX_VERIFY` | `1` / `0.80` / `0.90` / `30` | Daily tag synonym pass (`scripts/merge_tags.py`): review / auto-merge cosine, LLM calls per run |
 | `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
-| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `5` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint / daily brief of the first admin until schedules are saved in ⚙ (each schedule is sent at most once a day, `ReportSent`) |
+| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `11` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint / daily brief of the first admin until schedules are saved in ⚙ (each schedule is sent at most once a day, `ReportSent`) |
 | `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` / `NEWS_CHAT_SEARCH_MAX_SECONDS` | `https://searx.example.org/` / `8` / `120` | SearXNG URL and safety caps on autonomous chat search (turns, time) |
 | `NEWS_CHAT_MAX_TOKENS` / `NEWS_CHAT_STORY_MAX_ARTICLES` | `4096` / `30` | Chat answer budget (thinking included) / newest article lines in the chat system prompt |
 | `NEWS_CHAT_MAX_JOBS_PER_USER` / `NEWS_CHAT_READ_PARALLEL` | `3` / `4` | Background answers per user / search-result pages read at once |
 | `NEWS_SEARCH_SEMANTIC_WEIGHT` / `NEWS_SEARCH_MIN_SIM` / `NEWS_SEARCH_SIM_MARGIN` | `0.5` / `0.5` / `0.15` | Story search: weight of meaning matches in RRF (words = 1) / their cosine floor / max distance to the best one |
 | `NEWS_SEARCH_SEMANTIC_TIMEOUT` / `NEWS_SEARCH_EMBED_MAX_INFLIGHT` / `NEWS_SEARCH_PRIORITY_BOOST` | `1.5` / `2` / `0.15` | Wait for the query embedding (s) / concurrent embeddings (busy → words only) / priority boost on fused scores |
-| `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `7200` | Owner login password (required unless an admin has a stored password; startup fails otherwise) / session TTL in hours (default ~3 months) |
+| `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `7200` | Owner login password (required unless an admin has a stored password; startup fails otherwise) / session TTL in hours (default ~10 months) |
 | `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |
 | `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty / `10` / `10` | Rotating gzipped log (`start.sh` sets `server.log`) |
 | `NEWS_COPY_SKIP_SIM` | `0.9` | Word-for-word copies above this cosine skip Harness & Prompt 2 (`> 1` = off) |
@@ -206,7 +206,7 @@ flowchart TD
 ## Database & Layout
 
 `news.db` (SQLite WAL, foreign keys, `sqlite-vec`, auto-migrated via `PRAGMA user_version` in `app/db.py`). Copy it while the server runs with `uv run python -c "import sqlite3; sqlite3.connect('news.db').execute(\"VACUUM INTO 'news-copy.db'\")"` (a plain `cp` of a live WAL database can tear):
-- **Shared tables**: `Feed`, `Article` (timings, `content_class`, `quality`, `duplicate_of`), `Article_Vectors` (`vec0 FLOAT[1024]`), `Story` (`headline`, `summary`, `tags`, `metrics`, `quality_score`, `news_at`, `material_at`, `merge_checked_at`), `StoryLink` (pair verdicts for merge skip + related stories), `StoryAlias` (merged-away ids → surviving story), `StoryUpdate` (new facts per rated update), `ArticleTombstone`, `TagAlias` + `TagVector` (tag synonyms and their embedding cache), `StorySearch` (FTS5, kept in sync by triggers), `ReportSent` (scheduled ntfy reports sent today).
+- **Shared tables**: `Feed` (incl. general `trust`), `FeedCategory` (trust per category), `Article` (timings, `content_class`, `quality`, `duplicate_of`), `Article_Vectors` (`vec0 FLOAT[1024]`), `Story` (`headline`, `summary`, `tags`, `metrics`, `quality_score`, `news_at`, `material_at`, `merge_checked_at`), `StoryLink` (pair verdicts for merge skip + related stories), `StoryAlias` (merged-away ids → surviving story), `StoryUpdate` (new facts per rated update), `ArticleTombstone`, `TagAlias` + `TagVector` (tag synonyms and their embedding cache), `StorySearch` (FTS5, kept in sync by triggers), `ReportSent` (scheduled ntfy reports sent today).
 - **Per-user tables**: `AppUser`, `AuthSession` (hashed tokens), `UserProfile` (weights, feed overrides, exclusions, `about`, `home_*`, ntfy schedules), `StoryRead`, `FeedbackLog`, `MarkChange` (time of the last read/vote change, so stale offline replays lose), `ChatSession` (`seen_id` = unread tracking) + `ChatMessage` (branching tree + agent `steps`), `ShareLink`.
 
 ```
@@ -216,12 +216,12 @@ app/
   routes/                       One APIRouter per area (stories, chat, auth, profile, share, admin, feeds, ...); no SQL
   auth.py, users.py, bus.py     scrypt/session auth, user administration, SSE bus
   stories.py, chat_history.py, share.py, feeds.py   Story payloads & read marks, chat tree, share links, feed management
-  db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations, env config
+  db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations (one-off review data: tag_review.py, feed_review.py), env config
   ingest.py, content_quality.py, dedup.py, retention.py
-  pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, tags.py, tag_merge.py
+  pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, diversity.py, tags.py, tag_merge.py
   heads_up.py, reports.py, chat.py, chat_jobs.py, searchngx.py, search.py, worker.py
   frontend/                     vanilla JS/CSS UI (index, list, chats, feeds, admin, share)
-scripts/                start.sh, shutdown.sh, pipeline_report.py, recluster_stories.py, split_stories.py, rescore_metrics.py, merge_tags.py, search_probe.py, benchmark/
-tests/                  pytest suite (176 tests: API, security, pipeline, merge, split, scoring, search, read, reports, ingest, migrations, frontend JS syntax via tree-sitter)
-docs/                   plan.md (changelog), todo.md, findings.md, future_ideas.md
+scripts/                start.sh, shutdown.sh, pipeline_report.py, compare_rankings.py, recluster_stories.py, split_stories.py, rescore_metrics.py, merge_tags.py, search_probe.py, benchmark/
+tests/                  pytest suite (API, security, pipeline, merge, split, scoring, search, read, reports, ingest, migrations, frontend JS syntax via tree-sitter)
+docs/                   algorithms.md (ranking), plan.md (changelog), todo.md, findings.md, performance.md, future_ideas.md
 ```

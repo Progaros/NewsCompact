@@ -19,7 +19,7 @@ import logging
 import re
 import sqlite3
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import httpx
 

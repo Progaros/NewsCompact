@@ -17,7 +17,8 @@ import re
 import socket
 import threading
 import urllib.request
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import feedparser
 import httpcore
@@ -54,7 +55,7 @@ def is_http_url(url: str | None) -> bool:
 
 
 def _is_global(addr: str) -> bool:
-    return ipaddress.ip_address(addr.split("%")[0]).is_global
+    return ipaddress.ip_address(addr.split("%", maxsplit=1)[0]).is_global
 
 
 def is_public_url(url: str) -> bool:

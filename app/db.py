@@ -10,9 +10,10 @@ import json
 import sqlite3
 import struct
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import sqlite_vec
 

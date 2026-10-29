@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Generator, Iterator
+from typing import Any
 
 from . import config, ollama, searchngx
 

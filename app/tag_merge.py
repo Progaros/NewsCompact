@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import sqlite_vec
 

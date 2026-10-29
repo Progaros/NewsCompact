@@ -9,20 +9,15 @@ article vectors. Only the first DIVERSITY_POOL stories move, and only among them
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from typing import Any
 
 from . import config, db
+from .clustering import dot, normalize
 
 _PER_STORY = 8
 # How much an article's text says about the story (title-only / broken bodies say little).
 _SUFFICIENCY = {"ok": 1.0, "thin": 0.55, "broken": 0.1, "empty": 0.0}
-
-
-def _normalize(v: list[float]) -> list[float]:
-    n = math.sqrt(sum(x * x for x in v)) or 1.0
-    return [x / n for x in v]
 
 
 def story_vectors(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[float]]:
@@ -42,10 +37,10 @@ def story_vectors(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, l
             row = conn.execute(f"SELECT embedding FROM {db.VECTOR_TABLE} WHERE article_id = ?", (aid,)).fetchone()
             if row is None:
                 continue
-            v = _normalize(db.unpack_floats(bytes(row[0])))
+            v = normalize(db.unpack_floats(bytes(row[0])))
             acc = [w * x for x in v] if acc is None else [a + w * x for a, x in zip(acc, v)]
         if acc is not None:
-            out[sid] = _normalize(acc)
+            out[sid] = normalize(acc)
     return out
 
 
@@ -80,8 +75,7 @@ def rerank(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> list[dict[s
         sim = links.get((min(a, b), max(a, b)), 0.0)
         va, vb = vectors.get(a), vectors.get(b)
         if va is not None and vb is not None and floor < 1:
-            cos = sum(x * y for x, y in zip(va, vb))
-            sim = max(sim, (cos - floor) / (1 - floor))
+            sim = max(sim, (dot(va, vb) - floor) / (1 - floor))
         return sim
 
     closest: dict[int, tuple[float, dict[str, Any] | None]] = {sid: (0.0, None) for sid in ids}

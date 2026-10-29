@@ -19,9 +19,8 @@ from __future__ import annotations
 import json
 import logging
 import math
-import operator
 import sqlite3
-from typing import Callable
+from collections.abc import Callable
 
 import httpx
 
@@ -32,11 +31,7 @@ log = logging.getLogger("news.split")
 Vector = list[float]
 _GATE_SAMPLE = 120  # members (evenly spaced in time) used for the far-pair share
 
-
-def _dot(a: Vector, b: Vector) -> float:
-    return sum(map(operator.mul, a, b))
-
-
+_dot = clustering.dot
 _unit = clustering.normalize
 
 

@@ -13,6 +13,7 @@ Usage: python scripts/pipeline_report.py [--db news.db] [--hours 24]
 from __future__ import annotations
 
 import argparse
+import math
 import sqlite3
 import statistics
 from pathlib import Path
@@ -25,7 +26,7 @@ def pct(values: list[float], p: int) -> float:
 
 
 def fmt(seconds: float) -> str:
-    if seconds != seconds:  # NaN
+    if math.isnan(seconds):
         return "-"
     if seconds < 120:
         return f"{seconds:.0f}s"

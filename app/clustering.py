@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import logging
 import math
+import operator
 import sqlite3
 from typing import Any
 
@@ -77,7 +78,7 @@ def normalize(v: Vector) -> Vector:
 
 
 def dot(a: Vector, b: Vector) -> float:
-    return sum(x * y for x, y in zip(a, b))
+    return sum(map(operator.mul, a, b))
 
 
 def knn(conn: sqlite3.Connection, vec: Vector, k: int) -> list[tuple[int, float]]:
