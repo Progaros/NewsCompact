@@ -51,7 +51,7 @@ list     = MMR rerank of the top 50 (app/diversity.py)                 # both vi
 
 - **Mute**: a tag at weight ≤ -10 hides its stories from "For you" (hard filter, not a penalty); an explicit tag filter still shows them.
 - **Tag list vs learned weights**: `UserProfile.tag_weights` is only what the user set. 👍/👎 (±2/√n per tag, half-life up 60 d / down 90 d) and story chats (+1/√n, 90 d) are derived at ranking time from `FeedbackLog`/`ChatSession` (`inferred_weights`, never stored). Migration v8 removed weights that votes alone had written (179 → 71 tags on the owner profile).
-- **For Everyone** = `public` only (no tags, no location, category trust from `SOURCE_TRUST`).
+- **For Everyone** = `public` only (no tags, no location, the general source trust from the Feeds page).
 - **Archive** = older than `STORY_ACTIVE_DAYS`, newest first, not scored.
 - Every knob is `NEWS_*` env-overridable (`app/config.py`, "Ranking v2"). Weights are starting hypotheses, not validated constants.
 - API: `story.relevance` is the breakdown (`version`, `parts` in points, `matches`, `geo_reason`, `freshness`, `half_life_h`, `age_h`, …), `display_score` the priority.
@@ -106,7 +106,7 @@ Everything below is already stored per article/story — unused or under-used in
 - **Expanded card**: plain facts (`High urgency · Global impact · Quality 7.0 · 7 outlets · 2 updates today`), "Why it is in your feed" (built only from the breakdown: tag-list matches, learned matches, location reason, new facts), and a collapsed "Priority 71/100 · how it is computed" table with every part in points, the freshness factor, the "Already read" factor and a "Variety" row when the rerank moved it.
 - **Story chat** (`app/chat.py`): a session with ≥ 1 message = one `+CHAT_WEIGHT` event for the story's tags, regardless of message count. Editing a message (✎, `edit_of`) adds a sibling branch (`/chat/switch` changes the shown one) — not a signal.
 - **Not signals**: sharing (`ShareLink`, story links/briefs/chats), search queries, tag filter clicks, source-list expansion, the "↑ n new updates" pulse (counts stories whose `news_at` moved).
-- **Feeds page** (`/feeds`): add/remove/enable feeds, set categories → indirectly changes trust via `SOURCE_TRUST`/category.
+- **Feeds page** (`/feeds`): add/edit/remove/enable feeds, set categories and the source trust for everyone (`FeedCategory.trust` per category, `Feed.trust` per feed); ⚙ Preferences overrides it per user.
 
 ## Review of the external proposal (2026-10-23)
 

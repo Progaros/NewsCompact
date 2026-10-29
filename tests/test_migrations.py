@@ -59,7 +59,9 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db.init_db()
     db.init_db()  # idempotent
     with db.get_conn() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert conn.execute("SELECT trust FROM FeedCategory WHERE name = 'Reddit'").fetchone()[0] == 0.2
+        assert conn.execute("SELECT trust FROM Feed").fetchone()[0] is None
         assert conn.execute("SELECT seen_id FROM ChatSession").fetchone()[0] == 3  # old answers count as read
         assert conn.execute("SELECT rowid FROM StorySearch WHERE StorySearch MATCH 'voted'").fetchone()[0] == 5
         # v8: the weight the 👍 alone made leaves the tag list; hand-set ones stay
@@ -89,3 +91,24 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
         assert {"enabled", "last_error"} <= cols
         assert "material_at" in {r[1] for r in conn.execute("PRAGMA table_info(Story)")}
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'StoryRead'").fetchone()
+
+
+def test_feed_review_moves_trust_from_profiles_to_feeds():
+    from app import feed_review
+
+    reddit = "https://upvoterss.example/?platform=reddit&subreddit={}&comments=10&view=rss"
+    with db.get_conn() as conn:
+        conn.executemany("INSERT INTO Feed (title, xml_url, category) VALUES (?, ?, ?)", [
+            ("tagesschau", "https://www.tagesschau.de/index~rss2.xml", "Zu viele News"),
+            ("SZ", "https://rss.sueddeutsche.de/rss/Topthemen", "Zu viele News"),
+            ("worldnews", reddit.format("worldnews"), "Reddit"),
+            ("de", reddit.format("de"), "Reddit"),
+            ("de_EDV", reddit.format("de_EDV"), "Reddit"),
+            ("mine", "https://mine.example/rss", "Zu viele News"),
+        ])
+        conn.execute("UPDATE UserProfile SET source_weights = '{\"Reddit\": 0.2}', feed_weights = '{\"1\": 1}'")
+        assert feed_review.apply(conn) == 4
+        rows = {r["title"]: (r["category"], r["trust"]) for r in conn.execute("SELECT * FROM Feed")}
+        assert rows == {"tagesschau": ("News DACH", 1.0), "SZ": ("News DACH", None), "worldnews": ("Reddit", 0.35),
+                        "de": ("Reddit", 0.35), "de_EDV": ("Reddit", None), "mine": ("Zu viele News", None)}
+        assert tuple(conn.execute("SELECT source_weights, feed_weights FROM UserProfile").fetchone()) == ("{}", "{}")

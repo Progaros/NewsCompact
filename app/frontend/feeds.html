@@ -39,11 +39,19 @@
         24h / 7d numbers stop growing. Category totals only count enabled feeds. Re-enabling
         fetches it again from the next ingest run on.
       </p>
+      <p class="hint">
+        Trust (0–1) is how much a source counts as independent confirmation and how much its
+        articles weigh in story quality, for everyone. A feed without its own value uses its
+        category's (shown greyed out; clear the field to go back to it). Users can still override
+        both in ⚙ Preferences.
+      </p>
     </section>
 
     <div class="toolbar">
       <input id="feed-search" type="search" placeholder="Filter feeds…" />
       <label class="check"><input id="only-errors" type="checkbox" /> only failing</label>
+      <button id="collapse-all" class="btn" type="button">Collapse all</button>
+      <button id="expand-all" class="btn" type="button">Expand all</button>
     </div>
     <section class="table-wrap" id="feed-list" aria-label="Feeds">
       <div class="empty">Loading feeds…</div>

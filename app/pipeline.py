@@ -7,7 +7,6 @@ bottleneck). Every successful run stores per-stage wall times plus
 from __future__ import annotations
 
 import collections
-import json
 import logging
 import re
 import sqlite3
@@ -386,10 +385,6 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
     return result
 
 
-def _low_trust_categories() -> str:
-    return json.dumps([c for c, w in config.SOURCE_TRUST.items() if w < config.BACKLOG_LOW_TRUST_BELOW])
-
-
 def _embed_batch(batch: list[dict[str, Any]]) -> dict[int, tuple[list[float], float]]:
     """``{article_id: (vector, seconds share)}`` for batch articles without a stored vector.
 
@@ -415,14 +410,15 @@ def _embed_batch(batch: list[dict[str, Any]]) -> dict[int, tuple[list[float], fl
 
 def _drain(result: dict[str, int], tried: set[int], emit: Callable[[dict], None] | None,
            should_stop: Callable[[], bool]) -> None:
-    # Newest first; low-trust categories (Reddit ...) only after the rest of a backlog. Nothing is skipped.
-    low = _low_trust_categories()
+    # Newest first; low-trust feeds (Reddit ...) only after the rest of a backlog. Nothing is skipped.
     while not should_stop():
         with db.get_conn() as conn:
             rows = conn.execute(
-                f"SELECT a.* FROM Article a JOIN Feed f ON f.id = a.feed_id WHERE {PENDING_WHERE} "
-                "ORDER BY COALESCE(f.category, '') IN (SELECT value FROM json_each(?)), a.id DESC LIMIT ?",
-                (config.PIPELINE_MAX_FAILURES, low, config.PIPELINE_BATCH + len(tried)),
+                f"SELECT a.* FROM Article a JOIN Feed f ON f.id = a.feed_id "
+                f"LEFT JOIN FeedCategory c ON c.name = COALESCE(f.category, '') WHERE {PENDING_WHERE} "
+                "ORDER BY COALESCE(f.trust, c.trust, ?) < ?, a.id DESC LIMIT ?",
+                (config.PIPELINE_MAX_FAILURES, config.SOURCE_TRUST_DEFAULT, config.BACKLOG_LOW_TRUST_BELOW,
+                 config.PIPELINE_BATCH + len(tried)),
             ).fetchall()
         batch = [dict(r) for r in rows if r["id"] not in tried][: config.PIPELINE_BATCH]
         if not batch:

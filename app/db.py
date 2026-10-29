@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 import sqlite_vec
 
-from . import config, dedup, tag_review, tags
+from . import config, dedup, feed_review, tag_review, tags
 from .content_quality import classify as classify_content
 from .content_quality import clean_body
 
@@ -47,6 +47,7 @@ _MIGRATIONS = (
     ("Feed", "last_error", "TEXT"),
     ("Feed", "fetch_failures", "INTEGER NOT NULL DEFAULT 0"),
     ("Feed", "next_fetch_at", "TEXT"),
+    ("Feed", "trust", "REAL"),
     ("ChatMessage", "steps", "TEXT"),
     ("ChatMessage", "parent_id", "INTEGER"),
     ("ChatSession", "leaf_id", "INTEGER"),
@@ -276,11 +277,16 @@ def _tag_review(conn: sqlite3.Connection) -> None:
     tag_review.apply(conn)
 
 
+def _feed_review(conn: sqlite3.Connection) -> None:
+    """v12: feed categories and trust for everyone (2026-10-29); profiles stop overriding them."""
+    feed_review.apply(conn)
+
+
 # (user_version, migration) — each runs once, inside a transaction (foreign keys off,
 # so table rebuilds don't cascade).
 _DATA_MIGRATIONS = ((1, _clean_bodies), (2, _create_vector_table), (3, _dedup_and_retention), (4, _chat_tree),
                     (5, _news_at), (6, _per_user), (7, _drop_read_summary), (8, _explicit_tag_weights),
-                    (9, _story_search), (10, _chat_seen), (11, _tag_review))
+                    (9, _story_search), (10, _chat_seen), (11, _tag_review), (12, _feed_review))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

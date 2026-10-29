@@ -160,6 +160,7 @@ const Auth = (() => {
 
     let weights = {};
     let reports = [];
+    let catOverrides = {};
     let feedOverrides = {};
     let excluded = new Set();
     let ntfy = null;
@@ -170,10 +171,11 @@ const Auth = (() => {
         weights = { ...(p.tag_weights || {}) };
         reports = (p.ntfy_reports || []).map((r) => ({ ...r, days: [...(r.days || [])] }));
         feedOverrides = { ...(p.feed_weights || {}) };
+        catOverrides = { ...(p.source_weights || {}) };
         excluded = new Set(((p.preferences || {}).excluded_feeds || []).map(String));
         ntfy = p.ntfy || null; // admins only
         box.innerHTML = renderProfileForm(p.preferences || {}, ntfy, p.home_defaults || {});
-        renderTrust(box, p.source_trust || {}, p.feed_trust || [], feedOverrides, excluded);
+        renderTrust(box, p.source_trust_default || {}, catOverrides, p.feed_trust || [], feedOverrides, excluded);
         if (ntfy) renderReports(box, reports, ntfy);
         renderWeights(box, weights);
         renderLearned(box, p.inferred_weights || {}, weights);
@@ -186,8 +188,6 @@ const Auth = (() => {
       e.preventDefault();
       const list = (name) => form.elements[name].value.split(",").map((s) => s.trim()).filter(Boolean);
       const minQ = parseFloat(form.elements.min_quality.value);
-      const sourceWeights = {};
-      form.querySelectorAll("input[data-trust]").forEach((i) => { sourceWeights[i.dataset.trust] = parseFloat(i.value); });
       const res = await fetch("/api/profile", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -205,7 +205,7 @@ const Auth = (() => {
             show_votes: form.elements.show_votes.checked,
           },
           tag_weights: weights,
-          source_weights: sourceWeights,
+          source_weights: catOverrides,
           feed_weights: feedOverrides,
         }),
       });
@@ -244,8 +244,8 @@ const Auth = (() => {
       <label class="check pref-check"><input type="checkbox" name="show_votes" ${prefs.show_votes === false ? "" : "checked"} />
         Show \u{1F44D}/\u{1F44E} on stories <span class="hint">votes teach "For you" a little; your tag list below is never changed by them</span></label>
       <div class="user-section">
-        <div class="user-section-label">Source trust</div>
-        <p class="hint">How much a source counts as independent confirmation (credibility) and how much its articles weigh in story quality. 0 = ignore, 1 = full. Expand a category to set single sources; ⊘ hides a source from your “For you” feed.</p>
+        <div class="user-section-label">Source trust <button type="button" class="link" id="reset-trust">reset all</button></div>
+        <p class="hint">How much a source counts as independent confirmation (credibility) and how much its articles weigh in story quality. 0 = ignore, 1 = full. Sliders start at the values the admins set for everyone; yours are highlighted and ↺ goes back. Expand a category to set single sources; ⊘ hides a source from your “For you” feed.</p>
         <div id="trust"></div>
       </div>${ntfy ? `
       <div class="user-section">
@@ -324,34 +324,47 @@ const Auth = (() => {
 
   const REPORT_LABELS = { brief: "News brief", pipeline: "Pipeline report" };
 
-  /* Category sliders with expandable per-source sliders. `overrides` ({feed id: trust})
-   * is edited in place; a category with individually set sources is faded and moving
-   * its slider asks before overwriting them. `excluded` (feed ids) hides sources from "For you". */
-  function renderTrust(box, cats, feeds, overrides, excluded) {
+  /* Category sliders with expandable per-source sliders, starting at the general trust (`defaults`
+   * per category, `f.default` per feed). Moving one stores an own value in `catOverrides` /
+   * `overrides` (edited in place), ↺ drops it again. A category with individually set sources is
+   * faded and moving its slider asks before overwriting them. `excluded` (feed ids) hides sources
+   * from "For you". */
+  function renderTrust(box, defaults, catOverrides, feeds, overrides, excluded) {
     const el = box.querySelector("#trust");
-    const fmt = (v) => Number(v).toFixed(1);
+    const fmt = (v) => Number(v).toFixed(2);
     const byCat = {};
     for (const f of feeds) (byCat[f.category] ||= []).push(f);
-    const slider = (attrs, v) => `<input type="range" min="0" max="1" step="0.1" value="${esc(v)}" ${attrs} /><output>${fmt(v)}</output>`;
-    el.innerHTML = Object.keys(cats).sort((a, b) => a.localeCompare(b)).map((cat) => `
+    const catValue = (cat) => catOverrides[cat] ?? defaults[cat] ?? 1;
+    const feedValue = (f) => overrides[f.id] ?? (f.category in catOverrides ? catOverrides[f.category] : f.default);
+    const slider = (attrs, v) => `<input type="range" min="0" max="1" step="0.05" value="${esc(v)}" ${attrs} /><output>${fmt(v)}</output>`;
+    el.innerHTML = Object.keys(defaults).sort((a, b) => a.localeCompare(b)).map((cat) => `
       <div class="trust-group" data-cat="${esc(cat)}">
-        <div class="trust-row">
+        <div class="trust-row cat">
           <button type="button" class="trust-toggle" aria-expanded="false" title="Show single sources">
             <span class="chev" aria-hidden="true"></span>${esc(cat || "(uncategorized)")} <span class="muted">${(byCat[cat] || []).length}</span> <span class="hidden-count"></span></button>
-          ${slider(`data-trust="${esc(cat)}" aria-label="Trust of ${esc(cat || "uncategorized")}"`, cats[cat])}
+          ${slider(`data-trust="${esc(cat)}" aria-label="Trust of ${esc(cat || "uncategorized")}"`, catValue(cat))}
+          <button type="button" class="link" data-cat-reset title="Back to the general value (${fmt(defaults[cat] ?? 1)})">\u21ba</button>
         </div>
         <div class="trust-feeds" hidden>${(byCat[cat] || []).map((f) => `
           <div class="trust-row feed" data-feed="${Number(f.id)}">
             <span class="trust-name" title="${esc(f.title)}"><button type="button" class="link exclude-btn" data-exclude title="Hide this source from your feed">\u2298</button>${esc(f.title)}</span>
-            ${slider(`data-feed-id="${Number(f.id)}" aria-label="Trust of ${esc(f.title)}"`, f.trust)}
-            <button type="button" class="link" data-reset title="Follow the category again">\u21ba</button>
+            ${slider(`data-feed-id="${Number(f.id)}" aria-label="Trust of ${esc(f.title)}"`, feedValue(f))}
+            <button type="button" class="link" data-reset title="Back to the category value">\u21ba</button>
           </div>`).join("")}</div>
       </div>`).join("") || `<div class="muted">No feeds yet.</div>`;
 
+    box.querySelector("#reset-trust").onclick = () => {
+      for (const k of Object.keys(catOverrides)) delete catOverrides[k];
+      for (const k of Object.keys(overrides)) delete overrides[k];
+      renderTrust(box, defaults, catOverrides, feeds, overrides, excluded);
+    };
+
     el.querySelectorAll(".trust-group").forEach((g) => {
       const cat = g.dataset.cat;
-      const catInput = g.querySelector("input[data-trust]");
+      const catRow = g.querySelector(".trust-row.cat");
+      const catInput = catRow.querySelector("input[data-trust]");
       const feedRows = [...g.querySelectorAll(".trust-row.feed")];
+      const feedOf = Object.fromEntries((byCat[cat] || []).map((f) => [String(f.id), f]));
       let prev = catInput.value;
       const set = (input, v) => { input.value = v; input.nextElementSibling.textContent = fmt(v); };
       const refresh = () => {
@@ -369,12 +382,13 @@ const Auth = (() => {
           custom += on;
           hidden += off;
         }
+        catRow.classList.toggle("custom", cat in catOverrides);
         g.classList.toggle("faded", custom > 0);
         g.querySelector(".hidden-count").textContent = hidden ? `${hidden} hidden` : "";
         catInput.title = custom ? `${custom} source(s) set individually — moving this resets them` : "";
       };
       const follow = () => feedRows.forEach((row) => {
-        if (!(row.dataset.feed in overrides)) set(row.querySelector("input"), catInput.value);
+        if (!(row.dataset.feed in overrides)) set(row.querySelector("input"), feedValue(feedOf[row.dataset.feed]));
       });
       g.querySelector(".trust-toggle").onclick = (e) => {
         const list = g.querySelector(".trust-feeds");
@@ -383,7 +397,11 @@ const Auth = (() => {
       };
       catInput.addEventListener("input", () => {
         catInput.nextElementSibling.textContent = fmt(catInput.value);
-        if (!g.classList.contains("faded")) { follow(); prev = catInput.value; }
+        if (g.classList.contains("faded")) return;
+        catOverrides[cat] = parseFloat(catInput.value);
+        prev = catInput.value;
+        follow();
+        refresh();
       });
       catInput.addEventListener("change", () => {
         if (!g.classList.contains("faded")) return;
@@ -393,10 +411,18 @@ const Auth = (() => {
           return;
         }
         for (const row of feedRows) delete overrides[row.dataset.feed];
+        catOverrides[cat] = parseFloat(catInput.value);
         prev = catInput.value;
         follow();
         refresh();
       });
+      catRow.querySelector("[data-cat-reset]").onclick = () => {
+        delete catOverrides[cat];
+        set(catInput, catValue(cat));
+        prev = catInput.value;
+        follow();
+        refresh();
+      };
       for (const row of feedRows) {
         const input = row.querySelector("input");
         input.addEventListener("input", () => {
@@ -406,7 +432,7 @@ const Auth = (() => {
         });
         row.querySelector("[data-reset]").onclick = () => {
           delete overrides[row.dataset.feed];
-          set(input, catInput.value);
+          set(input, feedValue(feedOf[row.dataset.feed]));
           refresh();
         };
         row.querySelector("[data-exclude]").onclick = () => {

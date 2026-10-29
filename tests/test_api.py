@@ -101,7 +101,8 @@ def test_home_location_is_per_user(client, story):
 
 def test_profile_reports_and_source_trust(client, feed_id):
     p = client.get("/api/profile").json()
-    assert p["source_trust"] == {"News": 1.0} and p["ntfy"]["enabled"] is False
+    assert p["source_trust"] == {"News": 1.0} and p["source_trust_default"] == {"News": 1.0}
+    assert p["ntfy"]["enabled"] is False
     sched = [{"kind": "pipeline", "time": "06:45", "days": [4, 0, 0]}]
     r = client.put("/api/profile", json={"preferences": {"ntfy_reports": sched}, "source_weights": {"News": 0.4}})
     assert r.status_code == 200
@@ -120,7 +121,8 @@ def test_profile_reports_and_source_trust(client, feed_id):
 
 def test_single_source_trust_overrides_its_category(client, story, feed_id):
     p = client.get("/api/profile").json()
-    assert p["feed_trust"] == [{"id": feed_id, "title": "Feed", "category": "News", "trust": 1.0, "custom": False}]
+    assert p["feed_trust"] == [{"id": feed_id, "title": "Feed", "category": "News", "trust": 1.0, "default": 1.0,
+                                "custom": False}]
     before = client.get(f"/api/stories/{story}").json()["relevance"]["coverage"]
     body = client.put("/api/profile", json={"source_weights": {"News": 1.0},
                                             "feed_weights": {str(feed_id): 0.2, "999": 1}}).json()
@@ -130,6 +132,57 @@ def test_single_source_trust_overrides_its_category(client, story, feed_id):
     assert client.get(f"/api/stories/{story}").json()["relevance"]["coverage"] < before
     assert client.put("/api/profile", json={"feed_weights": {str(feed_id): 1.5}}).status_code == 422
     assert client.put("/api/profile", json={"feed_weights": {}}).json()["feed_trust"][0]["custom"] is False
+
+
+def test_general_trust_applies_to_everyone_and_users_can_override_it(client, story, feed_id):
+    coverage = lambda: client.get(f"/api/stories/{story}", params={"view": "default"}).json()["relevance"]["coverage"]  # noqa: E731
+    full = coverage()
+    assert client.post("/api/feeds/category", json={"category": "News", "trust": 0.5}).json() == {"trust": 0.5}
+    data = client.get("/api/feeds").json()
+    assert data["categories"]["News"]["trust"] == 0.5 and data["feeds"][0]["trust_effective"] == 0.5
+    assert data["feeds"][0]["trust"] is None and coverage() < full
+
+    assert client.patch(f"/api/feeds/{feed_id}", json={"trust": 0.3}).status_code == 200
+    p = client.get("/api/profile").json()
+    assert p["source_trust_default"] == {"News": 0.5} and p["source_trust"] == {"News": 0.5}
+    assert (p["feed_trust"][0]["trust"], p["feed_trust"][0]["default"], p["feed_trust"][0]["custom"]) == (0.3, 0.3, False)
+
+    # own values: feed > category > general; an empty override goes back to the general value
+    body = client.put("/api/profile", json={"source_weights": {"News": 0.9}}).json()
+    assert body["source_trust"] == {"News": 0.9} and body["feed_trust"][0]["trust"] == 0.9
+    body = client.put("/api/profile", json={"feed_weights": {str(feed_id): 0.1}}).json()
+    assert body["feed_trust"][0]["trust"] == 0.1 and body["feed_trust"][0]["default"] == 0.3
+    body = client.put("/api/profile", json={"source_weights": {}, "feed_weights": {}}).json()
+    assert body["feed_trust"][0]["trust"] == 0.3 and body["source_trust"] == {"News": 0.5}
+
+    assert client.patch(f"/api/feeds/{feed_id}", json={"trust": None}).status_code == 200  # follow the category
+    assert client.get("/api/feeds").json()["feeds"][0]["trust_effective"] == 0.5
+    client.post("/api/feeds/category", json={"category": "News", "trust": None})
+    assert client.get("/api/feeds").json()["feeds"][0]["trust_effective"] == 1.0 and coverage() == full
+
+    assert client.patch(f"/api/feeds/{feed_id}", json={"trust": 1.5}).status_code == 422
+    assert client.post("/api/feeds/category", json={"category": "News", "trust": -1}).status_code == 422
+    assert client.post("/api/feeds/category", json={"category": "News"}).status_code == 422
+
+
+def test_feed_name_and_urls_are_editable(client, feed_id):
+    with db.get_conn() as conn:
+        conn.execute("UPDATE Feed SET etag = 'x', last_modified = 'y', last_error = 'boom', fetch_failures = 3 "
+                     "WHERE id = ?", (feed_id,))
+        conn.execute("INSERT INTO Feed (title, xml_url) VALUES ('Other', 'https://other.example/rss')")
+    url = f"/api/feeds/{feed_id}"
+    assert client.patch(url, json={"title": " New name ", "xml_url": "https://new.example/feed",
+                                   "site_url": "https://new.example"}).status_code == 200
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT * FROM Feed WHERE id = ?", (feed_id,)).fetchone()
+    assert (row["title"], row["xml_url"], row["site_url"]) == ("New name", "https://new.example/feed", "https://new.example")
+    assert (row["etag"], row["last_modified"], row["last_error"], row["fetch_failures"]) == (None, None, None, 0)
+    assert client.patch(url, json={"site_url": ""}).status_code == 200
+    feeds = {f["id"]: f for f in client.get("/api/feeds").json()["feeds"]}
+    assert feeds[feed_id]["site_url"] is None
+    assert client.patch(url, json={"xml_url": "https://other.example/rss"}).status_code == 409
+    assert client.patch(url, json={"site_url": "javascript:alert(1)"}).status_code == 422
+    assert client.patch(url, json={"title": "  "}).status_code == 422
 
 
 def test_excluded_sources_leave_the_personal_feed_only(client, story, feed_id, monkeypatch):

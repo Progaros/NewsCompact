@@ -85,36 +85,48 @@ def freshness(story: sqlite3.Row, status: str | None, now: dt.datetime | None = 
     return _fade(age, half_life), half_life, age
 
 
+def _trust(value: Any, fallback: float) -> float:
+    try:
+        return fallback if value is None else _clamp01(float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def category_defaults(conn: sqlite3.Connection) -> dict[str, float]:
+    """Trust for everyone per feed category ('' = uncategorized), set on the Feeds page."""
+    stored = dict(conn.execute("SELECT name, trust FROM FeedCategory"))
+    return {cat: _trust(stored.get(cat), config.SOURCE_TRUST_DEFAULT)
+            for (cat,) in conn.execute("SELECT DISTINCT COALESCE(category, '') FROM Feed")}
+
+
+def feed_defaults(conn: sqlite3.Connection) -> dict[int, float]:
+    """Trust for everyone per feed id: ``Feed.trust``, else its category's."""
+    cats = category_defaults(conn)
+    return {fid: _trust(trust, cats[cat])
+            for fid, cat, trust in conn.execute("SELECT id, COALESCE(category, ''), trust FROM Feed")}
+
+
 def trust_weights(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[str, float]:
-    """Effective trust per feed category ('' = uncategorized): profile > SOURCE_TRUST > default."""
-    out = {}
-    for (cat,) in conn.execute("SELECT DISTINCT COALESCE(category, '') FROM Feed"):
-        w = profile["source_weights"].get(cat, config.SOURCE_TRUST.get(cat, config.SOURCE_TRUST_DEFAULT))
-        try:
-            out[cat] = _clamp01(float(w))
-        except (TypeError, ValueError):
-            out[cat] = config.SOURCE_TRUST_DEFAULT
-    return out
+    """Effective trust per feed category: the profile's override, else the general one."""
+    own = profile.get("source_weights") or {}
+    return {cat: _trust(own.get(cat), w) for cat, w in category_defaults(conn).items()}
 
 
 def feed_trust(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[int, float]:
-    """Effective trust per feed id: the profile's per-feed override, else its category's trust."""
-    cats = trust_weights(conn, profile)
+    """Effective trust per feed id: profile feed override > profile category override > general trust."""
+    own_cats = profile.get("source_weights") or {}
     overrides = profile.get("feed_weights") or {}
-    out = {}
-    for fid, cat in conn.execute("SELECT id, COALESCE(category, '') FROM Feed"):
-        try:
-            out[fid] = _clamp01(float(overrides[str(fid)])) if str(fid) in overrides else cats[cat]
-        except (TypeError, ValueError):
-            out[fid] = cats[cat]
-    return out
+    general = feed_defaults(conn)
+    return {fid: _trust(overrides.get(str(fid)), _trust(own_cats.get(cat), general[fid]))
+            for fid, cat in conn.execute("SELECT id, COALESCE(category, '') FROM Feed")}
 
 
 def feed_trust_list(conn: sqlite3.Connection, profile: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every feed with its effective trust and whether the profile overrides it (⚙ Preferences)."""
+    """Every feed with its effective and general trust and whether the profile overrides it (⚙ Preferences)."""
     per_feed = feed_trust(conn, profile)
-    return [{"id": f["id"], "title": f["title"], "category": f["category"],
-             "trust": per_feed[f["id"]], "custom": str(f["id"]) in profile["feed_weights"]}
+    general = feed_defaults(conn)
+    return [{"id": f["id"], "title": f["title"], "category": f["category"], "trust": per_feed[f["id"]],
+             "default": general[f["id"]], "custom": str(f["id"]) in profile["feed_weights"]}
             for f in conn.execute("SELECT id, title, COALESCE(category, '') AS category FROM Feed "
                                   "ORDER BY category, title COLLATE NOCASE")]
 

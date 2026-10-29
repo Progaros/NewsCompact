@@ -248,6 +248,21 @@ def test_low_trust_backlog_waits_for_the_rest(feed_id, llm, monkeypatch):
     assert order == [news, post]
 
 
+def test_feed_trust_decides_the_backlog_order(feed_id, llm, monkeypatch):
+    with db.get_conn() as conn:
+        rumors = conn.execute("INSERT INTO Feed (title, xml_url, category, trust) "
+                              "VALUES ('rumors', 'https://rumors/rss', 'News', 0.3)").lastrowid
+        good = conn.execute("INSERT INTO Feed (title, xml_url, category, trust) "
+                            "VALUES ('good', 'https://good/rss', 'Reddit', 0.9)").lastrowid
+    news = add_article(good, "Alpha news", age="-2 hours")
+    post = add_article(rumors, "Beta post")
+    order = []
+    real = pipeline.process_article
+    monkeypatch.setattr(pipeline, "process_article", lambda art, *a, **k: order.append(art["id"]) or real(art, *a, **k))
+    assert pipeline.process_pending() == {"processed": 2, "failed": 0}
+    assert order == [news, post]
+
+
 def test_batch_embedding_is_used_and_falls_back(feed_id, llm, monkeypatch):
     from app import clustering, ollama
 

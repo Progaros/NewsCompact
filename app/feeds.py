@@ -1,4 +1,4 @@
-"""Feed management: list with volume stats, add, preview, enable/disable, edit, delete.
+"""Feed management: list with volume stats, add, preview, enable/disable, edit, trust, delete.
 
 Conflicts (duplicate URL) raise ValueError; unknown feeds return False.
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from . import clustering, db, ingest, pipeline, worker
+from . import clustering, db, ingest, pipeline, scoring, worker
 
 
 def list_with_stats() -> dict[str, Any]:
@@ -19,7 +19,9 @@ def list_with_stats() -> dict[str, Any]:
             "COUNT(CASE WHEN created_at >= datetime('now', '-7 day') THEN 1 END) AS last_7d, "
             "COUNT(*) AS total FROM Article GROUP BY feed_id"
         )}
-    cats: dict[str, dict[str, int]] = {}
+        cat_trust = scoring.category_defaults(conn)
+        general = scoring.feed_defaults(conn)
+    cats: dict[str, dict[str, Any]] = {}
     for f in feeds:
         f.pop("etag", None)
         f.pop("last_modified", None)
@@ -27,8 +29,10 @@ def list_with_stats() -> dict[str, Any]:
         f["last_24h"] = s["last_24h"] if s else 0
         f["last_7d"] = s["last_7d"] if s else 0
         f["article_total"] = s["total"] if s else 0
+        f["trust_effective"] = general[f["id"]]
         g = cats.setdefault(f["category"] or "(uncategorized)",
-                            {"feeds": 0, "enabled": 0, "errors": 0, "last_24h": 0, "last_7d": 0})
+                            {"feeds": 0, "enabled": 0, "errors": 0, "last_24h": 0, "last_7d": 0,
+                             "trust": cat_trust[f["category"] or ""]})
         g["feeds"] += 1
         g["errors"] += 1 if f["last_error"] else 0
         if f["enabled"]:  # category totals = active load only
@@ -80,7 +84,17 @@ def set_category_enabled(category: str | None, enabled: bool) -> int:
     return n
 
 
-_EDITABLE = frozenset({"enabled", "title", "category", "xml_url"})
+def set_category_trust(category: str | None, trust: float | None) -> None:
+    """Trust for everyone of the category's feeds without their own; None = back to the default."""
+    with db.get_conn() as conn:
+        if trust is None:
+            conn.execute("DELETE FROM FeedCategory WHERE name = ?", (category or "",))
+        else:
+            conn.execute("INSERT INTO FeedCategory (name, trust) VALUES (?, ?) "
+                         "ON CONFLICT (name) DO UPDATE SET trust = excluded.trust", (category or "", trust))
+
+
+_EDITABLE = frozenset({"enabled", "title", "category", "xml_url", "site_url", "trust"})
 
 
 def update(feed_id: int, changes: dict[str, Any]) -> bool:
@@ -92,6 +106,8 @@ def update(feed_id: int, changes: dict[str, Any]) -> bool:
             return False
         if changes:
             assignments = ", ".join(f"{col} = ?" for col in changes)  # whitelisted above
+            if "xml_url" in changes:  # another feed now: no validators or errors of the old URL
+                assignments += ", etag = NULL, last_modified = NULL, last_error = NULL"
             if "xml_url" in changes or changes.get("enabled"):
                 assignments += ", fetch_failures = 0, next_fetch_at = NULL"  # fetch again right away
             try:

@@ -16,7 +16,15 @@ CREATE TABLE IF NOT EXISTS Feed (
     enabled         INTEGER NOT NULL DEFAULT 1,   -- 0 = fetch RSS rows only, no AI
     last_error      TEXT,                         -- NULL after a successful fetch
     fetch_failures  INTEGER NOT NULL DEFAULT 0,   -- consecutive failed fetches (backoff)
-    next_fetch_at   TEXT                          -- skip the feed until then (NULL = every run)
+    next_fetch_at   TEXT,                         -- skip the feed until then (NULL = every run)
+    trust           REAL                          -- 0..1 for everyone; NULL = its category's (FeedCategory)
+);
+
+-- Default source trust per feed category (Feeds page); categories without a row count 1.0.
+-- Users can override category and feed trust in UserProfile.source_weights / feed_weights.
+CREATE TABLE IF NOT EXISTS FeedCategory (
+    name  TEXT PRIMARY KEY,   -- Feed.category ('' = uncategorized)
+    trust REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS Article (

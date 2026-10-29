@@ -71,7 +71,7 @@ def test_source_trust_weights_credibility(feed_id):
             conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (social, add_article(fid, f"post {i}")))
         conn.execute("UPDATE Article SET story_id = ? WHERE id = ?", (news, add_article(feed_id, "wire")))
         ranked = {i["story"]["id"]: i for i in scoring.ranked_stories(conn)}
-    assert ranked[social]["source_count"] == 3 and ranked[social]["relevance"]["outlet_trust"] == 0.9
+    assert ranked[social]["source_count"] == 3 and ranked[social]["relevance"]["outlet_trust"] == 0.6
     assert ranked[news]["relevance"]["coverage"] == 0.39
     assert ranked[social]["relevance"]["coverage"] < ranked[news]["relevance"]["coverage"]
 

@@ -255,16 +255,16 @@ def _ask(schema: dict[str, Any], messages: list[dict[str, str]], story_id: int) 
 
 def _story_articles(conn: sqlite3.Connection, story_id: int) -> list[dict[str, Any]]:
     return [dict(a) for a in conn.execute(
-        "SELECT a.*, COALESCE(f.category, '') AS feed_category FROM Article a JOIN Feed f ON f.id = a.feed_id "
-        "WHERE a.story_id = ? ORDER BY a.published_date ASC", (story_id,)
+        "SELECT a.*, COALESCE(f.trust, c.trust, ?) AS feed_trust FROM Article a JOIN Feed f ON f.id = a.feed_id "
+        "LEFT JOIN FeedCategory c ON c.name = COALESCE(f.category, '') "
+        "WHERE a.story_id = ? ORDER BY a.published_date ASC", (config.SOURCE_TRUST_DEFAULT, story_id)
     )]
 
 
 def _quality(arts: list[dict[str, Any]]) -> float | None:
     """Trust-weighted median: one bot-blocked fetch or a pile of low-trust reposts can't drag it down."""
     quality = scoring.median_quality([
-        (a["id"], a.get("duplicate_of"), a.get("quality"),
-         config.SOURCE_TRUST.get(a["feed_category"], config.SOURCE_TRUST_DEFAULT)) for a in arts])
+        (a["id"], a.get("duplicate_of"), a.get("quality"), a["feed_trust"]) for a in arts])
     return None if quality is None else round(float(quality), 2)
 
 

@@ -77,6 +77,7 @@ def get_profile(request: Request):
             "home_defaults": {"home_city": config.USER_CITY, "home_country": config.USER_COUNTRY,
                               "language": config.USER_LANGUAGE},
             "source_trust": scoring.trust_weights(conn, profile),
+            "source_trust_default": scoring.category_defaults(conn),
             "feed_trust": scoring.feed_trust_list(conn, profile),
         }
     if user["is_admin"]:  # ntfy pushes go to the server's one topic

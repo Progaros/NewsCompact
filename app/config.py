@@ -66,7 +66,7 @@ HARNESS_TIMEOUT = _float("NEWS_HARNESS_TIMEOUT", 120)
 WORKER_INTERVAL_SECONDS = _int("NEWS_WORKER_INTERVAL", 300)
 PIPELINE_BATCH = _int("NEWS_PIPELINE_BATCH", 50)
 EMBED_BATCH = _int("NEWS_EMBED_BATCH", 16)  # texts per Ollama /api/embed call at batch start
-# Pending articles of categories with SOURCE_TRUST below this are processed after the rest.
+# Pending articles of feeds whose general trust is below this are processed after the rest.
 BACKLOG_LOW_TRUST_BELOW = _float("NEWS_BACKLOG_LOW_TRUST_BELOW", 0.5)
 # Articles failing this many pipeline runs are parked (dead letter).
 PIPELINE_MAX_FAILURES = _int("NEWS_PIPELINE_MAX_FAILURES", 3)
@@ -229,9 +229,9 @@ TAG_MERGE_REVIEW_SIM = _float("NEWS_TAG_MERGE_REVIEW_SIM", 0.80)
 TAG_MERGE_AUTO_SIM = _float("NEWS_TAG_MERGE_AUTO_SIM", 0.90)
 TAG_MERGE_AUTO_CONFIDENCE = _float("NEWS_TAG_MERGE_AUTO_CONFIDENCE", 0.9)
 TAG_MERGE_MAX_VERIFY = _int("NEWS_TAG_MERGE_MAX_VERIFY", 30)  # LLM calls per run
-# Trust (0..1) of a feed category in the credibility term; ⚙ Preferences overrides per category.
-SOURCE_TRUST = _weights("NEWS_SOURCE_TRUST", "Reddit=0.3,Hacker News=0.5,Reviews=0.5")
-SOURCE_TRUST_DEFAULT = _float("NEWS_SOURCE_TRUST_DEFAULT", 1.0)
+# Source trust (0..1) is set on the Feeds page (FeedCategory, Feed.trust); this is the trust of a
+# category without a value there. ⚙ Preferences overrides both per user.
+SOURCE_TRUST_DEFAULT = 1.0
 # Outlets of one organization count as one source for credibility ("host=group", hosts without www./feeds.).
 OUTLET_GROUPS = {k.strip(): v.strip() for k, _, v in (p.partition("=") for p in _list(
     "NEWS_OUTLET_GROUPS",
