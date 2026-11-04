@@ -7,8 +7,8 @@ Two backends, chosen per base URL:
   + ``think: false`` (on Qwen3 thinking models, thinking tokens otherwise eat num_predict and
   ``format`` is silently ignored).
 - OpenAI-compatible (``NEWS_LLM_BASE_URL`` / ``NEWS_EMBED_BASE_URL``, ending in /v1): llama.cpp
-  ``llama serve``, AI routers such as Tianji, hosted APIs. /chat/completions with
-  ``response_format: json_schema`` for structured calls, /embeddings, optional Bearer key.
+  ``llama-server``, vLLM, hosted APIs. /chat/completions with ``response_format: json_schema``
+  for structured calls, /embeddings, optional Bearer key.
 """
 from __future__ import annotations
 

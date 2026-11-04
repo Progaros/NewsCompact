@@ -58,9 +58,9 @@ Every LLM call goes through one of four roles; each can use its own Ollama model
 
 Structured calls use Ollama's native `/api/chat` with a JSON schema (`format`) and `think: false`, so the model must support structured outputs. Each model that differs from the others needs its own VRAM (`NEWS_OLLAMA_KEEP_ALIVE` keeps all of them loaded).
 
-**Other servers**: set `NEWS_LLM_BASE_URL` to any OpenAI-compatible base URL ending in `/v1` (llama.cpp `llama serve`: `http://127.0.0.1:9931/v1`; [Tianji AI Router](https://tianji.dev/docs/ai-router/usage): `https://<tianji>/api/ai-router/<workspaceId>/<routerId>/openai/v1`; Ollama itself: `http://127.0.0.1:11434/v1`) and, if needed, `NEWS_LLM_API_KEY` (sent as `Authorization: Bearer`). All LLM roles then use `/chat/completions`, structured calls with `response_format: {type: json_schema}`. Embeddings stay on Ollama unless `NEWS_EMBED_BASE_URL` (+ `NEWS_EMBED_API_KEY`) points to a server with `/embeddings` (llama.cpp with a pooling model; the Tianji router has none). Ollama's `think: false` has no OpenAI equivalent: `NEWS_LLM_STRUCTURED_EXTRA` (JSON) is merged into structured requests, e.g. `{"chat_template_kwargs": {"enable_thinking": false}}` for Qwen3 on llama.cpp / vLLM, so chat answers can still think. Run `model_check.py` after switching.
+**Replacing Ollama (`llama.cpp` / OpenAI-compatible `/v1`)**: set `NEWS_LLM_BASE_URL` and `NEWS_EMBED_BASE_URL` to base URLs ending in `/v1` (plus optional `NEWS_LLM_API_KEY` / `NEWS_EMBED_API_KEY` sent as `Authorization: Bearer`). All LLM roles then use `/chat/completions`, structured calls with `response_format: {type: json_schema}`, and embeddings use `/embeddings`. Ollama's `think: false` has no OpenAI equivalent: `NEWS_LLM_STRUCTURED_EXTRA` (JSON) is merged into structured requests, e.g. `{"chat_template_kwargs": {"enable_thinking": false}}` for Qwen3 on `llama-server` / vLLM, so chat answers can still think.
 
-Example: chat model on the GPU and embeddings on the CPU with two llama.cpp servers (the old Ollama split):
+Example — replacing Ollama with `llama-server` (chat model on the GPU, embeddings on the CPU):
 
 ```bash
 llama-server -m Qwen3-27B-Q3_K_M.gguf --alias qwen3-27b -ngl 99 -c 81920 -np 1 --jinja --port 8080
@@ -69,14 +69,14 @@ llama-server -m Qwen3-Embedding-0.6B-Q8_0.gguf --alias qwen3-embedding --embeddi
 ```
 
 ```bash
-NEWS_LLM_BASE_URL=http://127.0.0.1:8080/v1                 # or the Tianji router in front of it
+NEWS_LLM_BASE_URL=http://127.0.0.1:8080/v1
 NEWS_CHAT_MODEL=qwen3-27b
 NEWS_LLM_STRUCTURED_EXTRA='{"chat_template_kwargs":{"enable_thinking":false}}'
-NEWS_EMBED_BASE_URL=http://127.0.0.1:8081/v1                # always direct: the router has no /embeddings
+NEWS_EMBED_BASE_URL=http://127.0.0.1:8081/v1
 NEWS_EMBED_MODEL=qwen3-embedding
 ```
 
-Prompt 2 sends up to `NEWS_CONTEXT_BUDGET_CHARS` (200k chars ≈ 50k tokens), so the chat server needs that context per slot (`-c` / `-np`). Before switching embeddings, check that the new server returns the same vectors as the old Ollama model (else stored and new vectors don't compare): `model_check.py --embed-vs-ollama <old Ollama model> --only embed` (cosine ≥ 0.99 = no re-embed needed).
+Prompt 2 sends up to `NEWS_CONTEXT_BUDGET_CHARS` (200k chars ≈ 50k tokens), so the chat server needs that context per slot (`-c` / `-np`). Before switching embeddings, check that the new server returns the same vectors as the old Ollama model (else stored and new vectors don't compare): `model_check.py --embed-vs-ollama <old Ollama model> --only embed` (cosine ≥ 0.99 = no re-embed needed), then run `model_check.py` to smoke-test all roles.
 
 Before switching, compare the candidate with the current model on the bundled fictional test cases (no database needed):
 
@@ -224,8 +224,8 @@ flowchart TD
 | `OLLAMA_BASE_URL` / `NEWS_OLLAMA_KEEP_ALIVE` | `http://127.0.0.1:11434` / `15m` | Ollama server / model keep-alive |
 | `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | `qwen3:14b` / `qwen3-embedding:0.6b` / `1024` | Default LLM and embedding model (see [Swapping models](#swapping-models)) |
 | `NEWS_VERIFY_MODEL` / `NEWS_ASSESS_MODEL` / `NEWS_STORY_MODEL` | empty (= `NEWS_CHAT_MODEL`) | Per-role LLMs: event verifier, article quality, story writer |
-| `NEWS_LLM_BASE_URL` / `NEWS_LLM_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (llama.cpp, Tianji AI Router, …) for all LLM calls, Bearer key |
-| `NEWS_EMBED_BASE_URL` / `NEWS_EMBED_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint for embeddings |
+| `NEWS_LLM_BASE_URL` / `NEWS_LLM_API_KEY` / `NEWS_LLM_STRUCTURED_EXTRA` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (`llama-server`, …) for all LLM calls, Bearer key, extra JSON for structured calls |
+| `NEWS_EMBED_BASE_URL` / `NEWS_EMBED_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (`llama-server --embedding`, …) for embeddings |
 | `NEWS_WORKER_INTERVAL` / `NEWS_PIPELINE_BATCH` / `NEWS_EMBED_BATCH` | `300` / `50` / `16` | Ingest interval (s) / pipeline batch / texts per embed call |
 | `NEWS_PIPELINE_MAX_FAILURES` / `NEWS_BACKLOG_LOW_TRUST_BELOW` | `3` / `0.5` | Dead-letter threshold / trust cutoff processed last in backlog |
 | `NEWS_PIPELINE_MAX_TIMEOUTS` / `NEWS_PIPELINE_TIMEOUT_BACKOFF_MINUTES` | `6` / `15` | Ollama timeouts don't count as failures: the article retries after a doubling delay and the run pauses; parked after this many in a row |

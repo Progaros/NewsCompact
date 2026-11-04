@@ -51,12 +51,12 @@ LOG_BACKUPS = _int("NEWS_LOG_BACKUPS", 10)
 # Prompts and thresholds were calibrated on a Qwen3 27B (Q3) + qwen3-embedding:0.6b; check a
 # replacement with scripts/benchmark/model_check.py before switching (README "Swapping models").
 OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-# OpenAI-compatible endpoint ending in /v1 (llama.cpp `llama serve`, an AI router such as Tianji,
-# Ollama's own /v1) for all LLM calls instead of Ollama's native API; empty = Ollama native.
+# OpenAI-compatible endpoint ending in /v1 (e.g. llama.cpp `llama-server`) for all LLM calls
+# instead of Ollama's native API; empty = Ollama native.
 LLM_BASE_URL = _env("NEWS_LLM_BASE_URL", "")
 LLM_API_KEY = _env("NEWS_LLM_API_KEY", "")  # sent as Bearer token
 # JSON merged into OpenAI-compatible structured calls, the counterpart of Ollama's think=false;
-# llama.cpp / vLLM with Qwen3: {"chat_template_kwargs": {"enable_thinking": false}}
+# llama-server / vLLM with Qwen3: {"chat_template_kwargs": {"enable_thinking": false}}
 LLM_STRUCTURED_EXTRA: dict = json.loads(_env("NEWS_LLM_STRUCTURED_EXTRA", "") or "{}")
 # Same for embeddings (POST /embeddings); empty = Ollama native at OLLAMA_BASE_URL.
 EMBED_BASE_URL = _env("NEWS_EMBED_BASE_URL", "")
