@@ -288,6 +288,7 @@ def structured(schema: dict[str, Any], messages: list[dict[str, Any]], *,
             "stream": False,
             "temperature": temperature,
             "max_tokens": num_predict,
+            **config.LLM_STRUCTURED_EXTRA,
         })
         r.raise_for_status()
         body = r.json()

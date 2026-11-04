@@ -1,11 +1,11 @@
 # AI News Aggregator
 
 Local-first web app that ingests RSS feeds, clusters related articles into
-**stories** with a local Ollama LLM, summarizes them, scores their quality and
+**stories** with a local LLM, summarizes them, scores their quality and
 ranks them for several users. Stories, summaries and classifications are shared;
 preferences, votes, read state, story chats and personal briefs are per user.
 Everything lives in one SQLite file (`news.db`, including the `sqlite-vec`
-embedding table) plus HTTP calls to Ollama and SearXNG.
+embedding table) plus HTTP calls to Local LLM and SearXNG.
 
 ![Stories page: Quick Heads Up brief and ranked story cards](docs/screenshot.png)
 
@@ -58,7 +58,25 @@ Every LLM call goes through one of four roles; each can use its own Ollama model
 
 Structured calls use Ollama's native `/api/chat` with a JSON schema (`format`) and `think: false`, so the model must support structured outputs. Each model that differs from the others needs its own VRAM (`NEWS_OLLAMA_KEEP_ALIVE` keeps all of them loaded).
 
-**Other servers**: set `NEWS_LLM_BASE_URL` to any OpenAI-compatible base URL ending in `/v1` (llama.cpp `llama serve`: `http://127.0.0.1:9931/v1`; [Tianji AI Router](https://tianji.dev/docs/ai-router/usage): `https://<tianji>/api/ai-router/<workspaceId>/<routerId>/openai/v1`; Ollama itself: `http://127.0.0.1:11434/v1`) and, if needed, `NEWS_LLM_API_KEY` (sent as `Authorization: Bearer`). All LLM roles then use `/chat/completions`, structured calls with `response_format: {type: json_schema}`. Embeddings stay on Ollama unless `NEWS_EMBED_BASE_URL` (+ `NEWS_EMBED_API_KEY`) points to a server with `/embeddings` (llama.cpp with a pooling model; the Tianji router has none). Thinking models can't be told `think: false` over the OpenAI API: disable reasoning on the server (or route to a non-thinking model) if structured replies come back empty. Run `model_check.py` after switching.
+**Other servers**: set `NEWS_LLM_BASE_URL` to any OpenAI-compatible base URL ending in `/v1` (llama.cpp `llama serve`: `http://127.0.0.1:9931/v1`; [Tianji AI Router](https://tianji.dev/docs/ai-router/usage): `https://<tianji>/api/ai-router/<workspaceId>/<routerId>/openai/v1`; Ollama itself: `http://127.0.0.1:11434/v1`) and, if needed, `NEWS_LLM_API_KEY` (sent as `Authorization: Bearer`). All LLM roles then use `/chat/completions`, structured calls with `response_format: {type: json_schema}`. Embeddings stay on Ollama unless `NEWS_EMBED_BASE_URL` (+ `NEWS_EMBED_API_KEY`) points to a server with `/embeddings` (llama.cpp with a pooling model; the Tianji router has none). Ollama's `think: false` has no OpenAI equivalent: `NEWS_LLM_STRUCTURED_EXTRA` (JSON) is merged into structured requests, e.g. `{"chat_template_kwargs": {"enable_thinking": false}}` for Qwen3 on llama.cpp / vLLM, so chat answers can still think. Run `model_check.py` after switching.
+
+Example: chat model on the GPU and embeddings on the CPU with two llama.cpp servers (the old Ollama split):
+
+```bash
+llama-server -m Qwen3-27B-Q3_K_M.gguf --alias qwen3-27b -ngl 99 -c 81920 -np 1 --jinja --port 8080
+llama-server -m Qwen3-Embedding-0.6B-Q8_0.gguf --alias qwen3-embedding --embedding --pooling last \
+  -ngl 0 -c 8192 -ub 8192 --port 8081
+```
+
+```bash
+NEWS_LLM_BASE_URL=http://127.0.0.1:8080/v1                 # or the Tianji router in front of it
+NEWS_CHAT_MODEL=qwen3-27b
+NEWS_LLM_STRUCTURED_EXTRA='{"chat_template_kwargs":{"enable_thinking":false}}'
+NEWS_EMBED_BASE_URL=http://127.0.0.1:8081/v1                # always direct: the router has no /embeddings
+NEWS_EMBED_MODEL=qwen3-embedding
+```
+
+Prompt 2 sends up to `NEWS_CONTEXT_BUDGET_CHARS` (200k chars ≈ 50k tokens), so the chat server needs that context per slot (`-c` / `-np`). Before switching embeddings, check that the new server returns the same vectors as the old Ollama model (else stored and new vectors don't compare): `model_check.py --embed-vs-ollama <old Ollama model> --only embed` (cosine ≥ 0.99 = no re-embed needed).
 
 Before switching, compare the candidate with the current model on the bundled fictional test cases (no database needed):
 

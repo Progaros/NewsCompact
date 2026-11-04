@@ -1,6 +1,7 @@
 """Application settings, all overridable via environment variables."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -54,6 +55,9 @@ OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # Ollama's own /v1) for all LLM calls instead of Ollama's native API; empty = Ollama native.
 LLM_BASE_URL = _env("NEWS_LLM_BASE_URL", "")
 LLM_API_KEY = _env("NEWS_LLM_API_KEY", "")  # sent as Bearer token
+# JSON merged into OpenAI-compatible structured calls, the counterpart of Ollama's think=false;
+# llama.cpp / vLLM with Qwen3: {"chat_template_kwargs": {"enable_thinking": false}}
+LLM_STRUCTURED_EXTRA: dict = json.loads(_env("NEWS_LLM_STRUCTURED_EXTRA", "") or "{}")
 # Same for embeddings (POST /embeddings); empty = Ollama native at OLLAMA_BASE_URL.
 EMBED_BASE_URL = _env("NEWS_EMBED_BASE_URL", "")
 EMBED_API_KEY = _env("NEWS_EMBED_API_KEY", "")

@@ -18,6 +18,8 @@ Examples:
     uv run python scripts/benchmark/model_check.py --model qwen3:8b --baseline current.json
     uv run python scripts/benchmark/model_check.py --verify-model gemma3:12b --only verify
     uv run python scripts/benchmark/model_check.py --embed-model bge-m3 --only embed
+    NEWS_EMBED_BASE_URL=http://127.0.0.1:8081/v1 NEWS_EMBED_MODEL=qwen3-embedding \
+      uv run python scripts/benchmark/model_check.py --embed-vs-ollama qwen3-embedding:0.6b --only embed
 """
 from __future__ import annotations
 
@@ -183,7 +185,7 @@ def _cos(a: list[float], b: list[float]) -> float:
     return dot / ((math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))) or 1.0)
 
 
-def check_embed(cases: list[dict]) -> tuple[dict, list[float], list[str]]:
+def _embed_cases(cases: list[dict]) -> tuple[list[str], list[tuple[int, int, bool, str]]]:
     texts, pairs = [], []
     for case in cases:
         texts.append(f"{case['article']['title']} {case['article']['text']}")
@@ -191,6 +193,28 @@ def check_embed(cases: list[dict]) -> tuple[dict, list[float], list[str]]:
         for c in case["candidates"]:
             texts.append(f"{c['headline']}. {c['summary']}")
             pairs.append((left, len(texts) - 1, c["expected"][0] in harness.MERGE_CLASSES, case["id"]))
+    return texts, pairs
+
+
+def compare_embed(cases: list[dict], ollama_model: str) -> None:
+    """Same texts via NEWS_EMBED_BASE_URL and via Ollama native: are stored vectors still comparable?"""
+    texts, _ = _embed_cases(cases)
+    new = ollama.embed_texts(texts, model=config.EMBED_MODEL)
+    base, config.EMBED_BASE_URL = config.EMBED_BASE_URL, ""
+    try:
+        old = ollama.embed_texts(texts, model=ollama_model)
+    finally:
+        config.EMBED_BASE_URL = base
+    sims = [_cos(a, b) for a, b in zip(new, old)]
+    advice = ("same vectors: switch without re-embedding" if min(sims) >= 0.99 else
+              "close: thresholds still fit, old and new vectors mix slightly" if min(sims) >= 0.95 else
+              "different: re-embed all articles before switching")
+    print(f"\n== embed {config.EMBED_MODEL} @ {base or config.OLLAMA_BASE_URL} vs Ollama {ollama_model}\n"
+          f"   dims {len(new[0])}/{len(old[0])}, cosine min {min(sims):.4f} mean {statistics.mean(sims):.4f}: {advice}")
+
+
+def check_embed(cases: list[dict]) -> tuple[dict, list[float], list[str]]:
+    texts, pairs = _embed_cases(cases)
     vecs, secs, err = timed(ollama.embed_texts, texts, model=config.EMBED_MODEL)
     if vecs is None:
         return {"auc": 0.0, "recall_at_retrieve": 0.0}, [secs], [err]
@@ -224,6 +248,8 @@ def main() -> int:
     p.add_argument("--story-model")
     p.add_argument("--embed-model")
     p.add_argument("--embed-dim", type=int, help="expected embedding dimension (default NEWS_EMBED_DIM)")
+    p.add_argument("--embed-vs-ollama", metavar="OLLAMA_MODEL",
+                   help="compare NEWS_EMBED_BASE_URL vectors with this Ollama embedding model (migration check)")
     p.add_argument("--only", default=",".join(ROLES), help=f"comma-separated subset of {','.join(ROLES)}")
     p.add_argument("--save", type=Path, help="write the scores as JSON (baseline for later runs)")
     p.add_argument("--baseline", type=Path, help="compare with scores saved by --save")
@@ -243,6 +269,8 @@ def main() -> int:
         return 2
 
     cases = json.loads(CASES.read_text(encoding="utf-8"))
+    if args.embed_vs_ollama:
+        compare_embed(cases["verify"], args.embed_vs_ollama)
     checks = {"verify": (check_verify, cases["verify"], config.VERIFY_MODEL),
               "assess": (check_assess, cases["assess"], config.ASSESS_MODEL),
               "story": (check_story, cases["story"], config.STORY_MODEL),

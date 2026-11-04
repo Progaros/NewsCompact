@@ -418,6 +418,7 @@ def test_openai_compatible_backend(monkeypatch):
     monkeypatch.setattr(config, "LLM_BASE_URL", router)
     monkeypatch.setattr(config, "LLM_API_KEY", "k1")
     monkeypatch.setattr(config, "EMBED_BASE_URL", "http://llama.example/v1")
+    monkeypatch.setattr(config, "LLM_STRUCTURED_EXTRA", {"chat_template_kwargs": {"enable_thinking": False}})
     ollama.take_stats()
 
     assert ollama.available()
@@ -431,4 +432,6 @@ def test_openai_compatible_backend(monkeypatch):
     structured_body = seen[2][2]
     assert structured_body["response_format"]["json_schema"]["schema"] == {"type": "object"}
     assert structured_body["model"] == "m" and "format" not in structured_body and "keep_alive" not in structured_body
+    assert structured_body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in seen[3][2]  # free-form chat may think
     assert ollama.take_stats() == {"calls": 1, "load_s": 0.0, "in_tok": 10, "in_s": 0.1, "out_tok": 3, "out_s": 0.05}
