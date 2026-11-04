@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import db, ollama, story  # noqa: E402
+from app import config, db, ollama, story  # noqa: E402
 
 
 def main() -> None:
@@ -40,7 +40,7 @@ def main() -> None:
                 system, user = story._build_prompt(s, arts, None, force_full=True)
                 out = ollama.structured(story._SCHEMA, [{"role": "system", "content": system},
                                                         {"role": "user", "content": user}],
-                                        temperature=0.2, prose_fallback=True)
+                                        temperature=0.2, prose_fallback=True, model=config.STORY_MODEL)
                 after = story.sanitize_metrics(out.get("metrics") if isinstance(out, dict) else {})
             for key in ("urgency_level", "impact_scale", "status"):
                 old[key][before.get(key)] += 1

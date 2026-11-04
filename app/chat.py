@@ -1,6 +1,6 @@
 """Per-story chat: system-prompt story context + autonomous web-search agent.
 
-Design (see findings.md, "Per-story chat"):
+Design:
 - The story's context goes into the SYSTEM prompt so the model stays anchored
   to that story rather than answering as a free-form generalist.
 - When ``web_search`` is enabled (default), the agent decides by itself whether
@@ -237,6 +237,8 @@ def stream(story: dict, history: list[dict], user_question: str, web_search: boo
     messages WITHOUT the new user message; ``web_search`` enables autonomous web research.
     """
     steps = [] if steps is None else steps
+    search_configured = bool(config.SEARCHNGX_BASE_URL)
+    web_search = web_search and search_configured
     context = (yield from _gather_context(story, user_question, steps)) if web_search else ""
 
     system = story_system_prompt(story, about)
@@ -244,6 +246,8 @@ def stream(story: dict, history: list[dict], user_question: str, web_search: boo
         system += f"\n\nWEB RESEARCH (fresh, from searchngx — may help answer):\n{context}"
     elif web_search and any(s["kind"] == "search" and s["status"] in ("warn", "error") for s in steps):
         system += "\n\nA web search was run for this message but returned nothing usable; say so if relevant."
+    elif not search_configured:
+        system += "\n\nWeb search is not available on this server; answer from the story context."
     elif not web_search:
         system += ("\n\nWeb search is off for this message. If the user asks for one, tell them to "
                    "enable the 'Web search' toggle next to the input and ask again.")

@@ -382,8 +382,53 @@ def test_ollama_timings_are_collected_per_thread():
 
     ollama.take_stats()
     ollama._record({"load_duration": 2e9, "prompt_eval_count": 900, "prompt_eval_duration": 5e8,
-                    "eval_count": 300, "eval_duration": 6e9})
-    ollama._record({"prompt_eval_count": 100, "prompt_eval_duration": 1e8, "eval_count": 20, "eval_duration": 4e8})
+                    "eval_count": 300, "eval_duration": 6e9}, "m")
+    ollama._record({"prompt_eval_count": 100, "prompt_eval_duration": 1e8, "eval_count": 20, "eval_duration": 4e8},
+                   "m")
     assert ollama.take_stats() == {"calls": 2, "load_s": 2.0, "in_tok": 1000, "in_s": 0.6,
                                    "out_tok": 320, "out_s": 6.4}
     assert ollama.take_stats()["calls"] == 0
+
+
+def test_openai_compatible_backend(monkeypatch):
+    import json
+
+    import httpx
+
+    from app import ollama
+
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else None
+        seen.append((request.url.path, request.headers.get("authorization"), body))
+        if request.url.path.endswith("/models"):
+            return httpx.Response(404)  # routers may not serve it; still reachable
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"index": 1, "embedding": [2.0]}, {"index": 0, "embedding": [1.0]}]})
+        content = '{"quality": 7}' if "response_format" in body else "hi"
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}],
+                                         "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+                                         "timings": {"prompt_ms": 100, "predicted_ms": 50}})
+
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(ollama, "_clients", {})
+    router = "https://router.example/api/ai-router/w/r/openai/v1"
+    monkeypatch.setattr(config, "LLM_BASE_URL", router)
+    monkeypatch.setattr(config, "LLM_API_KEY", "k1")
+    monkeypatch.setattr(config, "EMBED_BASE_URL", "http://llama.example/v1")
+    ollama.take_stats()
+
+    assert ollama.available()
+    assert ollama.structured({"type": "object"}, [{"role": "user", "content": "q"}], model="m") == {"quality": 7}
+    assert ollama.chat([{"role": "user", "content": "q"}]) == "hi"
+    assert ollama.embed_texts(["a", "b"]) == [[1.0], [2.0]]
+    path = "/api/ai-router/w/r/openai/v1"
+    assert [(p, auth) for p, auth, _ in seen] == [
+        (f"{path}/models", "Bearer k1"), ("/v1/models", None), (f"{path}/chat/completions", "Bearer k1"),
+        (f"{path}/chat/completions", "Bearer k1"), ("/v1/embeddings", None)]
+    structured_body = seen[2][2]
+    assert structured_body["response_format"]["json_schema"]["schema"] == {"type": "object"}
+    assert structured_body["model"] == "m" and "format" not in structured_body and "keep_alive" not in structured_body
+    assert ollama.take_stats() == {"calls": 1, "load_s": 0.0, "in_tok": 10, "in_s": 0.1, "out_tok": 3, "out_s": 0.05}

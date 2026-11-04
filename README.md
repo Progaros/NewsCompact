@@ -7,14 +7,18 @@ preferences, votes, read state, story chats and personal briefs are per user.
 Everything lives in one SQLite file (`news.db`, including the `sqlite-vec`
 embedding table) plus HTTP calls to Ollama and SearXNG.
 
+![Stories page: Quick Heads Up brief and ranked story cards](docs/screenshot.png)
+
 ## Quickstart & Deployment
 
 Requirements: [uv](https://docs.astral.sh/uv/) (Python 3.14) and an Ollama
-instance (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`) serving:
-- chat model `qwen3:27b`
-- embedding model `qwen3-embedding:0.6b-CPU` (1024-dim)
+instance (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`) serving a chat model
+(`NEWS_CHAT_MODEL`, default `qwen3:14b`) and an embedding model (`NEWS_EMBED_MODEL`,
+default `qwen3-embedding:0.6b`, 1024-dim). Prompts and thresholds were tuned on a Qwen3 27B
+(Q3 quant) + `qwen3-embedding:0.6b`; see [Swapping models](#swapping-models) before using others.
 
 ```bash
+cp .env.example .env           # set NEWS_AUTH_PASSWORD, models, optional services
 uv sync
 uv run python main.py          # foreground → http://127.0.0.1:8787
 scripts/start.sh               # or detached (log: server.log, rotated + gzipped; pid: news.pid)
@@ -29,15 +33,45 @@ active, `start.sh` / `shutdown.sh` go through `systemctl --user` (a server kille
 systemd's back is restarted by `Restart=on-failure`). The unit logs to the journal unless `.env`
 sets `NEWS_LOG_FILE=server.log`.
 
-Put settings in a gitignored `.env` next to `main.py` (`start.sh` sources it):
+Put settings in a gitignored `.env` next to `main.py` (`start.sh` sources it; template: [.env.example](.env.example)):
 
 ```bash
 NEWS_AUTH_PASSWORD='long random password (>= 20 chars)'
 NEWS_PUBLIC_BASE=https://news.example.org   # Secure cookie, HSTS, CSRF Origin check
-NEWS_HOST=127.0.0.1                         # when nginx runs on the same host
+NEWS_HOST=0.0.0.0                           # only without a local reverse proxy (default 127.0.0.1)
 ```
 
-- **Login is required**: startup fails unless `NEWS_AUTH_PASSWORD` is set or an admin already has a stored password. `admin` signs in with `NEWS_AUTH_PASSWORD` (until setting a custom password in ⚙ Preferences). Admins manage feeds (`/feeds`) and users (`/admin`: create, promote/demote, reset password, delete).
+- **Login is required**: startup fails unless `NEWS_AUTH_PASSWORD` is set or an admin already has a stored password. `admin` (user 1) signs in with `NEWS_AUTH_PASSWORD` (until setting a custom password in ⚙ Preferences). Admins manage feeds (`/feeds`) and users (`/admin`: create, promote/demote, reset password, delete). A fresh install has no feeds: add them on `/feeds`.
+- **Optional services**: SearXNG for web search in story chats (`NEWS_SEARCHNGX_BASE_URL`; empty = no web search), [ntfy](https://ntfy.sh) pushes of the daily brief (`NEWS_HEADS_UP_NTFY_URL`), and an Umami/Tianji-style analytics script (`NEWS_ANALYTICS_SCRIPT_URL`, `NEWS_ANALYTICS_WEBSITE_ID`).
+
+### Swapping models
+
+Every LLM call goes through one of four roles; each can use its own Ollama model (empty = `NEWS_CHAT_MODEL`):
+
+| Role | Variable | Used for | Notes |
+| --- | --- | --- | --- |
+| Chat | `NEWS_CHAT_MODEL` | story chat, heads-up brief, default for the roles below | free text, thinking allowed |
+| Verifier | `NEWS_VERIFY_MODEL` | clustering decision (`EXACT_MATCH` … `UNRELATED`), recall merge, tag synonyms | most quality-critical; schema-constrained, temperature 0 |
+| Assessor | `NEWS_ASSESS_MODEL` | article quality 1–10 + breaking flag | runs on every article; a small model is often fine |
+| Story writer | `NEWS_STORY_MODEL` | headline, summary, tags, metrics, update significance | longest prompts (up to `NEWS_CONTEXT_BUDGET_CHARS`) |
+| Embeddings | `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | clustering candidates, merge, split, search | thresholds are tuned to `qwen3-embedding` |
+
+Structured calls use Ollama's native `/api/chat` with a JSON schema (`format`) and `think: false`, so the model must support structured outputs. Each model that differs from the others needs its own VRAM (`NEWS_OLLAMA_KEEP_ALIVE` keeps all of them loaded).
+
+**Other servers**: set `NEWS_LLM_BASE_URL` to any OpenAI-compatible base URL ending in `/v1` (llama.cpp `llama serve`: `http://127.0.0.1:9931/v1`; [Tianji AI Router](https://tianji.dev/docs/ai-router/usage): `https://<tianji>/api/ai-router/<workspaceId>/<routerId>/openai/v1`; Ollama itself: `http://127.0.0.1:11434/v1`) and, if needed, `NEWS_LLM_API_KEY` (sent as `Authorization: Bearer`). All LLM roles then use `/chat/completions`, structured calls with `response_format: {type: json_schema}`. Embeddings stay on Ollama unless `NEWS_EMBED_BASE_URL` (+ `NEWS_EMBED_API_KEY`) points to a server with `/embeddings` (llama.cpp with a pooling model; the Tianji router has none). Thinking models can't be told `think: false` over the OpenAI API: disable reasoning on the server (or route to a non-thinking model) if structured replies come back empty. Run `model_check.py` after switching.
+
+Before switching, compare the candidate with the current model on the bundled fictional test cases (no database needed):
+
+```bash
+uv run python scripts/benchmark/model_check.py --save current.json                       # current models
+uv run python scripts/benchmark/model_check.py --model qwen3:8b --baseline current.json  # all LLM roles
+uv run python scripts/benchmark/model_check.py --verify-model gemma3:12b --only verify --baseline current.json
+uv run python scripts/benchmark/model_check.py --embed-model bge-m3 --only embed
+```
+
+It prints per-role scores (verifier merge F1 and class accuracy, quality ordering and breaking accuracy, valid Prompt 2 replies and update-significance accuracy, embedding AUC and recall at the retrieval threshold), the median latency, and PASS / WARN / FAIL against minimum bars (exit code 1 on FAIL). It is a smoke test: for the verifier, also run `scripts/benchmark/benchmark_clustering.py --labels <pairs> --llm` on labeled pairs from your own database.
+
+A new embedding model changes the cosine scale: re-check `NEWS_CLUSTER_*`, `NEWS_MERGE_SIM_THRESHOLD`, `NEWS_SPLIT_*` and `NEWS_SEARCH_MIN_SIM` (`scripts/search_probe.py`), and with a different dimension start with a new database or re-embed all articles (the `Article_Vectors` table is created with `NEWS_EMBED_DIM`).
 
 ### Reverse proxy (`nginx`, HTTPS)
 
@@ -73,9 +107,9 @@ flowchart LR
 
   subgraph Pipeline ["2 · Serial GPU Pipeline (newest first, low-trust last)"]
     Embed[Batch embed<br/>16 × title + 100w] --> KNN[vec0 KNN + AnchorCache<br/>48 h active / stale revive]
-    KNN --> Verify[27B event verifier<br/>EXACT · CONT · SAME_TOPIC]
-    Verify --> Harness[27B harness<br/>quality 1–10 + breaking]
-    Harness --> P2[27B Prompt 2<br/>headline · summary · metrics · news_at]
+    KNN --> Verify[LLM event verifier<br/>EXACT · CONT · SAME_TOPIC]
+    Verify --> Harness[LLM assessor<br/>quality 1–10 + breaking]
+    Harness --> P2[LLM Prompt 2<br/>headline · summary · metrics · news_at]
   end
 
   subgraph Idle ["3 · Idle & Serving"]
@@ -95,7 +129,7 @@ flowchart LR
 1. **Ingest** (`app/ingest.py`, `app/dedup.py`): fetches the enabled feeds concurrently (disabled feeds are not fetched at all; ETag / Last-Modified, except validators with non-ASCII bytes; 5 MB cap; a bot wall that answers the browser UA with a 403 or a redirect without `Location` is retried with the feed-reader UA `NEWS_FEED_USER_AGENT`; a failing feed is retried after a doubling delay up to `NEWS_FEED_BACKOFF_MAX_HOURS`; on shutdown queued feeds are skipped and a half-read feed is fetched in full next run). Normalizes bodies (`content_quality.clean_body`; Reddit/HN items keep post text + up to `NEWS_SOCIAL_MAX_COMMENTS` comments); a longer `<content:encoded>` beats a teaser description. Enabled feeds with short descriptions fetch the linked article HTML (`trafilatura` → `newspaper3k` → `BeautifulSoup`; link-list extractions such as related-article sidebars are rejected) via a DNS-pinned client that connects only to vetted global IPs. Cross-feed duplicates (canonical URL or ≥ 5-word title within 72 h) attach directly to the original's story without LLM calls.
 2. **Pipeline** (`app/pipeline.py`, `app/clustering.py`, `app/harness.py`, `app/story.py`): processes pending articles newest-first (feeds with a general trust `< 0.5` like most of Reddit wait until higher-trust backlog clears; `broken` bodies are skipped). Before each batch it self-heals: placeholder stories, and bodies one feed served identically under ≥ 3 titles (site chrome) are re-extracted and re-processed.
    - **Embed**: title + first 100 body words (title-only unless `ok`), batched in chunks of `NEWS_EMBED_BATCH` (16) and stored as the article is processed.
-   - **Cluster**: `vec0` KNN retrieves candidates scored by max cosine similarity to non-broken member anchors (`AnchorCache`). The 27B verifier classifies top candidates (`≥ 0.55` within 48 h, or `≥ 0.62` stale revival); `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` join, `SAME_TOPIC_DISTINCT_EVENT` is saved in `StoryLink` as a related story.
+   - **Cluster**: `vec0` KNN retrieves candidates scored by max cosine similarity to non-broken member anchors (`AnchorCache`). The LLM verifier (`NEWS_VERIFY_MODEL`) classifies top candidates (`≥ 0.55` within 48 h, or `≥ 0.62` stale revival); `EXACT_MATCH` / `CONTINUING_DEVELOPMENT` join, `SAME_TOPIC_DISTINCT_EVENT` is saved in `StoryLink` as a related story.
    - **Harness**: scores article quality (1–10, capped at `NEWS_TITLE_QUALITY_MAX` for non-`ok` bodies) and `breaking` in one schema-constrained call. Thin articles joining a junk story skip Harness & Prompt 2, and so do word-for-word copies (`≥ NEWS_COPY_SKIP_SIM` = 0.9 cosine to a full-text member that already contains every word; one new word means a possible new fact, so the article runs normally). Copies take the member's quality.
    - **Prompt 2**: generates/updates headline, 2–4 sentence summary, tags, `location`, `language`, and anchored `metrics` (`urgency_level`, `impact_scale`, `status`), retrying once on malformed JSON; a summary over `NEWS_SUMMARY_MAX_CHARS` is sent back once for shortening, then cut at a sentence end. Story quality is the **trust-weighted median** of member articles. Incremental rewrites rate `update_significance` (0–3): `≥ 1` advances `news_at` (recency), `≥ 2` (or urgency jump / Breaking) advances `material_at` (resurfaces read stories).
 3. **Recall merge** (`app/merge.py`): when the queue is empty, up to 5 recently updated stories are checked against neighbours (`≥ 0.62` cosine to stories updated within 96 h, or `≥ 3` shared rare headline terms in `_TermIndex` to catch cross-language/title-only pairs). Only `EXACT_MATCH` merges (the larger story keeps its id; a user who voted on both keeps the newer vote, and material updates of the absorbed story still resurface read stories); non-merge verdicts are cached in `StoryLink` so unchanged pairs are never re-verified.
@@ -166,7 +200,10 @@ flowchart TD
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` / `NEWS_OLLAMA_KEEP_ALIVE` | `http://127.0.0.1:11434` / `15m` | Ollama server / model keep-alive |
-| `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` | Qwen3.8-27B / qwen3-embedding:0.6b | LLM and 1024-dim embedding model |
+| `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | `qwen3:14b` / `qwen3-embedding:0.6b` / `1024` | Default LLM and embedding model (see [Swapping models](#swapping-models)) |
+| `NEWS_VERIFY_MODEL` / `NEWS_ASSESS_MODEL` / `NEWS_STORY_MODEL` | empty (= `NEWS_CHAT_MODEL`) | Per-role LLMs: event verifier, article quality, story writer |
+| `NEWS_LLM_BASE_URL` / `NEWS_LLM_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (llama.cpp, Tianji AI Router, …) for all LLM calls, Bearer key |
+| `NEWS_EMBED_BASE_URL` / `NEWS_EMBED_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint for embeddings |
 | `NEWS_WORKER_INTERVAL` / `NEWS_PIPELINE_BATCH` / `NEWS_EMBED_BATCH` | `300` / `50` / `16` | Ingest interval (s) / pipeline batch / texts per embed call |
 | `NEWS_PIPELINE_MAX_FAILURES` / `NEWS_BACKLOG_LOW_TRUST_BELOW` | `3` / `0.5` | Dead-letter threshold / trust cutoff processed last in backlog |
 | `NEWS_PIPELINE_MAX_TIMEOUTS` / `NEWS_PIPELINE_TIMEOUT_BACKOFF_MINUTES` | `6` / `15` | Ollama timeouts don't count as failures: the article retries after a doubling delay and the run pauses; parked after this many in a row |
@@ -191,15 +228,16 @@ flowchart TD
 | `NEWS_W_AFFINITY` / `NEWS_W_GEO` / `NEWS_TAG_WEIGHT_SCALE` / `NEWS_TAG_MUTE_WEIGHT` | `0.30` / `0.08` / `4` / `-10` | "For you": tag affinity and location weight, tanh scale of tag weights, mute threshold |
 | `NEWS_VOTE_WEIGHT` / `NEWS_CHAT_WEIGHT` / `NEWS_VOTE_HALF_LIFE_DAYS` | `2` / `1` / `up=60,down=90,chat=90` | Learned (inferred) tag weights from 👍/👎 and story chats |
 | `NEWS_TAG_MERGE_ENABLED` / `NEWS_TAG_MERGE_REVIEW_SIM` / `NEWS_TAG_MERGE_AUTO_SIM` / `NEWS_TAG_MERGE_MAX_VERIFY` | `1` / `0.80` / `0.90` / `30` | Daily tag synonym pass (`scripts/merge_tags.py`): review / auto-merge cosine, LLM calls per run |
-| `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | `Munich` / `Germany` / `de` | Server defaults for home distance scoring |
-| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `11` / `https://ntfy.sh/your-topic` / `07:00` | Brief cache TTL / ntfy endpoint / daily brief of the first admin until schedules are saved in ⚙ (each schedule is sent at most once a day, `ReportSent`) |
-| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` / `NEWS_CHAT_SEARCH_MAX_SECONDS` | `https://searx.example.org/` / `8` / `120` | SearXNG URL and safety caps on autonomous chat search (turns, time) |
+| `NEWS_USER_CITY` / `NEWS_USER_COUNTRY` / `NEWS_USER_LANGUAGE` | empty | Server defaults for home distance scoring (users set their own in ⚙) |
+| `NEWS_HEADS_UP_TTL_MINUTES` / `NEWS_HEADS_UP_NTFY_URL` / `NEWS_HEADS_UP_NTFY_TIMES` | `11` / empty (off) / `07:00` | Brief cache TTL / ntfy endpoint / daily brief of the first admin until schedules are saved in ⚙ (each schedule is sent at most once a day, `ReportSent`) |
+| `NEWS_SEARCHNGX_BASE_URL` / `NEWS_CHAT_SEARCH_MAX_TURNS` / `NEWS_CHAT_SEARCH_MAX_SECONDS` | empty (off) / `8` / `120` | SearXNG URL and safety caps on autonomous chat search (turns, time) |
+| `NEWS_ANALYTICS_SCRIPT_URL` / `NEWS_ANALYTICS_WEBSITE_ID` | empty (off) | Analytics script added to every page (its origin is allowed in the CSP) |
 | `NEWS_CHAT_MAX_TOKENS` / `NEWS_CHAT_STORY_MAX_ARTICLES` | `4096` / `30` | Chat answer budget (thinking included) / newest article lines in the chat system prompt |
 | `NEWS_CHAT_MAX_JOBS_PER_USER` / `NEWS_CHAT_READ_PARALLEL` | `3` / `4` | Background answers per user / search-result pages read at once |
 | `NEWS_SEARCH_SEMANTIC_WEIGHT` / `NEWS_SEARCH_MIN_SIM` / `NEWS_SEARCH_SIM_MARGIN` | `0.5` / `0.5` / `0.15` | Story search: weight of meaning matches in RRF (words = 1) / their cosine floor / max distance to the best one |
 | `NEWS_SEARCH_SEMANTIC_TIMEOUT` / `NEWS_SEARCH_EMBED_MAX_INFLIGHT` / `NEWS_SEARCH_PRIORITY_BOOST` | `1.5` / `2` / `0.15` | Wait for the query embedding (s) / concurrent embeddings (busy → words only) / priority boost on fused scores |
 | `NEWS_AUTH_PASSWORD` / `NEWS_AUTH_SESSION_HOURS` | empty / `7200` | Owner login password (required unless an admin has a stored password; startup fails otherwise) / session TTL in hours (default ~10 months) |
-| `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `0.0.0.0` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind, public base URL, SQLite path |
+| `NEWS_HOST` / `NEWS_PORT` / `NEWS_PUBLIC_BASE` / `NEWS_DB_PATH` | `127.0.0.1` / `8787` / `http://127.0.0.1:8787` / `news.db` | Server bind (`0.0.0.0` = all interfaces), public base URL, SQLite path |
 | `NEWS_LOG_FILE` / `NEWS_LOG_MAX_MB` / `NEWS_LOG_BACKUPS` | empty / `10` / `10` | Rotating gzipped log (`start.sh` sets `server.log`) |
 | `NEWS_COPY_SKIP_SIM` | `0.9` | Word-for-word copies above this cosine skip Harness & Prompt 2 (`> 1` = off) |
 
@@ -221,7 +259,7 @@ app/
   pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, diversity.py, tags.py, tag_merge.py
   heads_up.py, reports.py, chat.py, chat_jobs.py, searchngx.py, search.py, worker.py
   frontend/                     vanilla JS/CSS UI (index, list, chats, feeds, admin, share)
-scripts/                start.sh, shutdown.sh, pipeline_report.py, compare_rankings.py, recluster_stories.py, split_stories.py, rescore_metrics.py, merge_tags.py, search_probe.py, benchmark/
+scripts/                start.sh, shutdown.sh, pipeline_report.py, compare_rankings.py, recluster_stories.py, split_stories.py, rescore_metrics.py, merge_tags.py, search_probe.py, benchmark/ (model_check.py, benchmark_clustering.py)
 tests/                  pytest suite (API, security, pipeline, merge, split, scoring, search, read, reports, ingest, migrations, frontend JS syntax via tree-sitter)
-docs/                   algorithms.md (ranking), plan.md (changelog), todo.md, findings.md, performance.md, future_ideas.md
+docs/                   algorithms.md (ranking), performance.md (2026-10 AI quality audit), project_plan.md (original design), future_ideas.md, screenshot.png
 ```

@@ -1,11 +1,9 @@
 # Performance & AI quality analysis
 
-> Historical audit (2026-10-11). Most ranked items have since been implemented —
-> see [`plan.md`](./plan.md) → Changelog; open ones are in [`todo.md`](./todo.md).
+> Historical audit (2026-10-11). Most ranked items have since been implemented.
 
 Quality audit of every AI-driven component, with evidence from the live DB,
-`server.log`, and spot-reads. Companion to [`findings.md`](./findings.md)
-(raw load/utilisation numbers live there) — this doc is about **whether the
+`server.log`, and spot-reads. This doc is about **whether the
 AI output is good**, where it fails, and what to improve (ranked,
 quality-preserving or quality-improving). All data as of 2026-10-11.
 
@@ -59,12 +57,12 @@ pipeline — the 2,445 NULL rows are the unprocessed backlog, **not** "ok".
 
 ### 1.3 Embeddings + clustering (app/pipeline.py)
 
-`qwen3-embedding:0.6b-CPU` (1024-dim), title-first text (title + first 100
+`qwen3-embedding:0.6b` (1024-dim), title-first text (title + first 100
 body words; non-ok bodies → title only). Member-anchor KNN (2026-10-11):
 join if max cosine to any non-junk member ≥ 0.64 (48 h window), revive at
 0.62 (no window). Supersedes star/centroid mode — the centroid kept
 *drifting* even with junk excluded (story 7: 23-article mush → 4-member
-OpenAI core; see findings.md "Member-anchor clustering"). Known trade:
+OpenAI core). Known trade:
 generic-band stories (e.g. 295, Local AI) now fragment to tight cores
 (their members sit in the 0.53–0.59 band the 0.6b embedder can't
 separate) instead of merging across topics.
@@ -176,8 +174,7 @@ compress the given summaries).
    regression if the model or a prompt changed.
 10. **Single serial LLM stream** — one article at a time; harness and
     Prompt2 for article N+1 can't overlap. ~99% of wall time is remote
-    Ollama latency, so the app is a thin client of one GPU (see
-    findings.md "Load & utilisation" for the measured split).
+    Ollama latency, so the app is a thin client of one GPU.
 
 ---
 

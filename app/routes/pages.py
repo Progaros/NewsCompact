@@ -1,12 +1,14 @@
 """Static pages (HTML shells; data comes from the JSON API)."""
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi import Path as FastPath
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
+from .. import config
 from ..web import NO_CACHE
 from .share import SHARE_TOKEN
 
@@ -15,8 +17,20 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 router = APIRouter()
 
 
-def _page(name: str) -> FileResponse:
-    return FileResponse(FRONTEND / name, headers=NO_CACHE)
+def _analytics_tag() -> str:
+    if not config.ANALYTICS_SCRIPT_URL:
+        return ""
+    site = (f' data-website-id="{html.escape(config.ANALYTICS_WEBSITE_ID)}"'
+            if config.ANALYTICS_WEBSITE_ID else "")
+    return f'  <script async defer src="{html.escape(config.ANALYTICS_SCRIPT_URL)}"{site}></script>\n'
+
+
+def _page(name: str) -> FileResponse | HTMLResponse:
+    tag = _analytics_tag()
+    if not tag:
+        return FileResponse(FRONTEND / name, headers=NO_CACHE)
+    page = (FRONTEND / name).read_text(encoding="utf-8").replace("</head>", tag + "</head>", 1)
+    return HTMLResponse(page, headers=NO_CACHE)
 
 
 @router.get("/")

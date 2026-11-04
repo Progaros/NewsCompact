@@ -226,7 +226,7 @@ const Auth = (() => {
     const join = (v) => (Array.isArray(v) ? v.join(", ") : "");
     return `
       <label class="field">About you <span class="hint">a few words about yourself (job, interests, where you live) — used to make your heads-up and story chat more personal; never shared</span>
-        <textarea name="about" rows="3" maxlength="1000" placeholder="e.g. Software developer in Munich, follows AI, security and local politics">${esc(prefs.about || "")}</textarea></label>
+        <textarea name="about" rows="3" maxlength="1000" placeholder="e.g. Teacher in Hamburg, follows climate, education and local politics">${esc(prefs.about || "")}</textarea></label>
       <div class="field-row">
         <label class="field">Home city <span class="hint">stories there rank higher</span>
           <input name="home_city" maxlength="80" value="${esc(prefs.home_city || "")}" placeholder="${esc(home.home_city || "")}" /></label>
@@ -236,9 +236,9 @@ const Auth = (() => {
           <input name="language" maxlength="3" pattern="[A-Za-z]{2,3}" value="${esc(prefs.language || "")}" placeholder="${esc(home.language || "")}" /></label>
       </div>
       <label class="field">Interest regions <span class="hint">comma-separated; stories whose tags name one rank higher in “For you” (location score)</span>
-        <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, bavaria" /></label>
+        <input name="interest_regions" value="${esc(join(prefs.interest_regions))}" placeholder="europe, scandinavia" /></label>
       <label class="field">Locations <span class="hint">comma-separated, same effect</span>
-        <input name="locations" value="${esc(join(prefs.locations))}" placeholder="munich" /></label>
+        <input name="locations" value="${esc(join(prefs.locations))}" placeholder="hamburg" /></label>
       <label class="field">Minimum story quality <span class="hint">0 = show everything</span>
         <input name="min_quality" type="number" min="0" max="10" step="0.5" value="${esc(prefs.min_quality ?? 0)}" /></label>
       <label class="check pref-check"><input type="checkbox" name="show_votes" ${prefs.show_votes === false ? "" : "checked"} />

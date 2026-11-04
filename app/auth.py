@@ -1,6 +1,6 @@
 """Login: user name + password → cookie session, for several users.
 
-Design decisions (see findings.md, "Authentication & API security"):
+Design decisions:
 - Sessions live in the AuthSession table keyed by the SHA-256 of the cookie token
   (the token itself is never stored), so they survive restarts. Expiry is fixed
   (AUTH_SESSION_HOURS); the table is capped at _MAX_SESSIONS (oldest dropped).

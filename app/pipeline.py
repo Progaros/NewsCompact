@@ -376,7 +376,7 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
             return result
         tags.load_aliases(conn)  # new stories store canonical tags
     if not ollama.available():
-        log.warning("ollama at %s unreachable; pipeline paused", config.OLLAMA_BASE_URL)
+        log.warning("model server at %s unreachable; pipeline paused", ollama.endpoint())
         return result
     try:
         _drain(result, tried, emit, should_stop)

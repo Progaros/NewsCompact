@@ -8,7 +8,7 @@ Last verified against the code: 2026-10-26 (ranking v2.1).
 ## Stack at a glance
 
 - FastAPI + SQLite (WAL, ~200 MB `news.db`), `sqlite-vec` for embeddings (cosine, 1024-dim `qwen3-embedding:0.6b-CPU`)
-- LLM via Ollama: `qwen3:27b` at `http://127.0.0.1:11434` (env `CHAT_MODEL`)
+- LLM via Ollama (tuned on a Qwen3 27B, Q3 quant) at `OLLAMA_BASE_URL` (env `NEWS_CHAT_MODEL`, per-role overrides `NEWS_VERIFY_MODEL` / `NEWS_ASSESS_MODEL` / `NEWS_STORY_MODEL`)
 - Two LLM prompts per article: **Prompt 1** (`app/harness.py`) = quality assessment; **Prompt 2** (`app/story.py`) = story build/update
 - Config: `app/config.py`, all overridable via `NEWS_*` env vars
 

@@ -28,6 +28,10 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "HEADS_UP_NTFY_URL", "")
     monkeypatch.setattr(config, "AUTH_PASSWORD", TEST_PASSWORD)
     monkeypatch.setattr(config, "TAG_MERGE_ENABLED", False)
+    monkeypatch.setattr(config, "SEARCHNGX_BASE_URL", "https://searx.example/")
+    monkeypatch.setattr(config, "USER_CITY", "Munich")
+    monkeypatch.setattr(config, "USER_COUNTRY", "Germany")
+    monkeypatch.setattr(config, "USER_LANGUAGE", "de")
     db.init_db()
     return config.DB_PATH
 

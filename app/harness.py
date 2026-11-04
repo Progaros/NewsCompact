@@ -64,7 +64,7 @@ _CLASSIFICATIONS_SCHEMA = {
 }
 
 
-def _call(system: str, user: str, schema: dict[str, Any], *, max_tokens: int = 100,
+def _call(system: str, user: str, schema: dict[str, Any], *, model: str, max_tokens: int = 100,
           timeout: float | None = None) -> dict[str, Any]:
     result = ollama.structured(
         schema,
@@ -72,6 +72,7 @@ def _call(system: str, user: str, schema: dict[str, Any], *, max_tokens: int = 1
         temperature=0,
         num_predict=max_tokens,
         timeout=timeout or config.HARNESS_TIMEOUT,
+        model=model,
     )
     if not isinstance(result, dict):
         raise ValueError(f"harness expected an object, got {type(result).__name__}")
@@ -106,6 +107,7 @@ def assess_article(title: str, content: str) -> dict[str, Any]:
             },
             "required": ["quality", "breaking"],
         },
+        model=config.ASSESS_MODEL,
     )
     quality = max(1, min(10, int(res["quality"])))
     if not full:
@@ -141,6 +143,7 @@ def classify_event_candidates(new_title: str, new_text: str,
         "allowed classifications exactly as defined.",
         prompt,
         _CLASSIFICATIONS_SCHEMA,
+        model=config.VERIFY_MODEL,
         max_tokens=400,
         timeout=config.CLUSTER_VERIFY_TIMEOUT_SECONDS,
     )
@@ -172,6 +175,7 @@ def classify_event_pairs(pairs: list[dict[str, Any]]) -> dict[str, str]:
         "every pair and no extra text.",
         _pairs_text(pairs),
         _CLASSIFICATIONS_SCHEMA,
+        model=config.VERIFY_MODEL,
         max_tokens=400,
         timeout=config.CLUSTER_VERIFY_TIMEOUT_SECONDS,
     )
@@ -203,6 +207,7 @@ def analyze_event_pairs(pairs: list[dict[str, Any]]) -> dict[str, dict[str, str]
         "independently and return no extra text.",
         _pairs_text(pairs),
         schema,
+        model=config.VERIFY_MODEL,
         max_tokens=60,
         timeout=config.CLUSTER_VERIFY_TIMEOUT_SECONDS,
     )

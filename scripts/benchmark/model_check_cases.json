@@ -1,0 +1,257 @@
+{
+  "_note": "Fictional news (invented countries, companies and people) for scripts/benchmark/model_check.py. Expected values list every acceptable answer.",
+  "verify": [
+    {
+      "id": "port-strike",
+      "article": {
+        "title": "Valmora dock workers walk out in 48-hour strike over crane automation",
+        "text": "Around 4,000 dock workers at the port of Valmora stopped work at 6 a.m. on Monday, starting a 48-hour strike called by the Estravan Port Workers Union. The union opposes the port authority's plan to replace 30 manned cranes with remote-controlled ones by 2028, which it says would cost up to 900 jobs. Container ships were queuing outside the harbour by midday, and the port authority said around 60 vessels would be delayed. Union chair Mira Tobel said further strikes were possible if talks did not resume."
+      },
+      "candidates": [
+        {"headline": "Valmora port workers strike against automated cranes",
+         "summary": "Dock workers in Valmora began a two-day strike on Monday over the port authority's plan to automate 30 cranes. Ships are delayed and the union threatens further action.",
+         "expected": ["EXACT_MATCH"]},
+        {"headline": "Harlund dock workers strike over pay in Kessaria",
+         "summary": "Port workers in the Kessarian city of Harlund walked out over a wage dispute, halting container traffic for a day.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]},
+        {"headline": "Valmora FC signs striker Andor Pell from Kessarian champions",
+         "summary": "The football club Valmora FC signed forward Andor Pell on a three-year contract for an undisclosed fee.",
+         "expected": ["UNRELATED"]}
+      ]
+    },
+    {
+      "id": "port-strike-reaction",
+      "article": {
+        "title": "Estravan government calls for mediation as port strike delays 60 ships",
+        "text": "Estrava's transport minister Lio Caradin on Monday urged the port authority of Valmora and the dock workers' union to accept a state mediator, hours after the 48-hour strike over crane automation began. Caradin said the delays to around 60 container ships were hurting exporters and offered to host talks in the capital on Wednesday. The union welcomed the offer but said the automation plan had to be on the table. The port authority said it would study the proposal."
+      },
+      "candidates": [
+        {"headline": "Valmora port workers strike against automated cranes",
+         "summary": "Dock workers in Valmora began a two-day strike on Monday over the port authority's plan to automate 30 cranes. Ships are delayed and the union threatens further action.",
+         "expected": ["CONTINUING_DEVELOPMENT"]},
+        {"headline": "Estrava's parliament passes pension reform",
+         "summary": "Estrava's parliament approved a pension reform raising the retirement age to 67 by 2035 in a 212-180 vote.",
+         "expected": ["UNRELATED", "SAME_TOPIC_DISTINCT_EVENT"]}
+      ]
+    },
+    {
+      "id": "quake",
+      "article": {
+        "title": "Magnitude 6.4 earthquake strikes northern Kessaria, dozens injured",
+        "text": "A magnitude 6.4 earthquake struck northern Kessaria early on Tuesday, the national seismological institute said. The quake hit at 4:12 a.m. local time at a depth of 10 kilometres, about 25 kilometres west of the town of Orsen. Regional authorities reported at least 37 people injured and several buildings collapsed in Orsen's old town. Rescue teams were searching the rubble, and schools in the province were closed for the day. Aftershocks of up to magnitude 4.8 were recorded."
+      },
+      "candidates": [
+        {"headline": "Strong earthquake hits northern Kessaria near Orsen",
+         "summary": "A strong earthquake struck near the town of Orsen in northern Kessaria early on Tuesday. Buildings collapsed and dozens of people were injured.",
+         "expected": ["EXACT_MATCH", "CONTINUING_DEVELOPMENT"]},
+        {"headline": "Moderate quake shakes southern Kessaria in March, no deaths",
+         "summary": "A magnitude 5.1 earthquake hit the southern coast of Kessaria in March, damaging a few houses and injuring three people.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]}
+      ]
+    },
+    {
+      "id": "quake-followup",
+      "article": {
+        "title": "Kessaria quake death toll rises to 12 as rescuers search Orsen ruins",
+        "text": "The death toll from Tuesday's magnitude 6.4 earthquake in northern Kessaria has risen to 12, the interior ministry said on Wednesday. Rescuers pulled two survivors from a collapsed apartment block in Orsen overnight. The government declared a state of emergency for the province and released 50 million kessars in emergency aid. Around 1,200 residents spent the night in tents set up in the town's football stadium."
+      },
+      "candidates": [
+        {"headline": "Strong earthquake hits northern Kessaria near Orsen",
+         "summary": "A strong earthquake struck near the town of Orsen in northern Kessaria early on Tuesday. Buildings collapsed and dozens of people were injured.",
+         "expected": ["CONTINUING_DEVELOPMENT", "EXACT_MATCH"]}
+      ]
+    },
+    {
+      "id": "software-release",
+      "article": {
+        "title": "Lumenix 5.0 brings built-in vector search to the open-source database",
+        "text": "The Lumenix project released version 5.0 of its open-source database on Thursday. The headline feature is built-in vector search, which lets developers store embeddings next to regular tables and query them with a new NEAREST operator. The release also drops support for the legacy storage engine and requires a migration for databases created before version 3. Project lead Sana Vey said the vector index was benchmarked at up to 40,000 queries per second on a single server."
+      },
+      "candidates": [
+        {"headline": "Lumenix database adds vector search in version 5.0",
+         "summary": "The open-source database Lumenix released version 5.0 with native vector search and removed its legacy storage engine.",
+         "expected": ["EXACT_MATCH"]},
+        {"headline": "Critical vulnerability patched in Lumenix 4.2",
+         "summary": "The Lumenix project fixed a remote code execution flaw in version 4.2 and urged administrators to update immediately.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]},
+        {"headline": "Orbital Dynamics launches weather satellite",
+         "summary": "The company Orbital Dynamics launched a weather satellite into polar orbit on Thursday.",
+         "expected": ["UNRELATED"]}
+      ]
+    },
+    {
+      "id": "same-entity-other-event",
+      "article": {
+        "title": "Lumenix founder Sana Vey steps down as project lead",
+        "text": "Sana Vey, who founded the Lumenix database project eleven years ago, announced on Monday that she is stepping down as project lead at the end of the year. In a blog post she said she wanted to spend more time on research and would remain on the project's steering committee. The steering committee will elect a successor in December. Vey's announcement came three weeks after the release of Lumenix 5.0."
+      },
+      "candidates": [
+        {"headline": "Lumenix database adds vector search in version 5.0",
+         "summary": "The open-source database Lumenix released version 5.0 with native vector search and removed its legacy storage engine.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]}
+      ]
+    },
+    {
+      "id": "rate-hike-de",
+      "article": {
+        "title": "Zentralbank von Estrava erhöht Leitzins auf 4,5 Prozent",
+        "text": "Die Zentralbank von Estrava hat am Donnerstag ihren Leitzins um einen halben Prozentpunkt auf 4,5 Prozent angehoben. Es ist die dritte Erhöhung in diesem Jahr. Notenbankchef Orin Malek begründete den Schritt mit der Inflation, die im September auf 6,1 Prozent gestiegen war. Die Entscheidung im Zentralbankrat fiel mit sieben zu zwei Stimmen. Die Landeswährung legte nach der Ankündigung gegenüber dem Euro um 0,8 Prozent zu."
+      },
+      "candidates": [
+        {"headline": "Estrava's central bank raises key rate to 4.5%",
+         "summary": "Estrava's central bank lifted its key interest rate by half a point to 4.5% on Thursday, its third hike this year, citing September inflation of 6.1%.",
+         "expected": ["EXACT_MATCH"]},
+        {"headline": "Estrava's central bank holds rates steady in June",
+         "summary": "In June, Estrava's central bank left its key rate unchanged at 3.5% and said it would watch inflation closely.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]}
+      ]
+    },
+    {
+      "id": "rate-hike-reaction",
+      "article": {
+        "title": "Opposition demands inquiry after Estrava's third rate hike",
+        "text": "Estrava's main opposition party on Friday called for a parliamentary inquiry into the central bank's decision to raise its key rate to 4.5 percent. Party leader Dara Venn said homeowners with variable mortgages would pay hundreds of kessars more each month and accused the bank of reacting too late to inflation. The finance ministry said the central bank was independent and the government would not comment on its decisions."
+      },
+      "candidates": [
+        {"headline": "Estrava's central bank raises key rate to 4.5%",
+         "summary": "Estrava's central bank lifted its key interest rate by half a point to 4.5% on Thursday, its third hike this year, citing September inflation of 6.1%.",
+         "expected": ["CONTINUING_DEVELOPMENT"]}
+      ]
+    },
+    {
+      "id": "wildfire-two-places",
+      "article": {
+        "title": "Wildfire forces evacuation of 3,000 residents near Tarvos",
+        "text": "A wildfire in the hills north of Tarvos forced authorities to evacuate around 3,000 residents on Saturday as strong winds pushed the flames towards three villages. More than 400 firefighters and six aircraft were deployed. The regional fire service said the blaze had burned 2,500 hectares since it started on Friday evening. No injuries were reported so far. The cause of the fire is unknown."
+      },
+      "candidates": [
+        {"headline": "Wildfire near Merel destroys 40 homes",
+         "summary": "A forest fire near the coastal town of Merel, 300 kilometres south of Tarvos, destroyed 40 homes this week before it was contained on Thursday.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]}
+      ]
+    },
+    {
+      "id": "wildfire-followup",
+      "article": {
+        "title": "Tarvos wildfire contained after five days, police suspect arson",
+        "text": "Firefighters have contained the wildfire north of Tarvos that forced 3,000 people from their homes last weekend, the regional fire service said on Wednesday. The fire burned around 4,100 hectares and destroyed 18 houses. Police said they had arrested a 34-year-old man suspected of starting the fire deliberately at two locations. Evacuated residents of the three villages were allowed to return home from Thursday."
+      },
+      "candidates": [
+        {"headline": "Wildfire forces evacuation of 3,000 near Tarvos",
+         "summary": "A wildfire in the hills north of Tarvos forced around 3,000 residents to evacuate on Saturday as winds pushed the flames towards three villages.",
+         "expected": ["CONTINUING_DEVELOPMENT", "EXACT_MATCH"]},
+        {"headline": "Wildfire near Merel destroys 40 homes",
+         "summary": "A forest fire near the coastal town of Merel, 300 kilometres south of Tarvos, destroyed 40 homes this week before it was contained on Thursday.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT"]}
+      ]
+    },
+    {
+      "id": "recall",
+      "article": {
+        "title": "Velora baby formula recalled over salmonella contamination",
+        "text": "Estrava's food safety agency on Tuesday ordered the recall of three batches of Velora infant formula after salmonella was found during routine testing at the company's plant in Harlund. The affected tins carry best-before dates in March 2027. Parents were told not to use the product and to return it to the store for a refund. Velora said it had stopped production on the line concerned and no illnesses had been reported."
+      },
+      "candidates": [
+        {"headline": "Food agency orders recall of Velora infant formula",
+         "summary": "Three batches of Velora baby formula are being recalled after salmonella was detected in tests at the Harlund plant.",
+         "expected": ["EXACT_MATCH"]},
+        {"headline": "Velora reports record quarterly profit",
+         "summary": "Food maker Velora reported a record second-quarter profit, driven by strong sales of its infant nutrition products in Asia.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT", "UNRELATED"]}
+      ]
+    },
+    {
+      "id": "rail-strike-de",
+      "article": {
+        "title": "Bahnstreik in Estrava: Lokführer legen Fernverkehr für 24 Stunden lahm",
+        "text": "Die Lokführergewerkschaft von Estrava hat für Freitag einen 24-stündigen Streik im Fernverkehr angekündigt. Hintergrund ist ein Tarifstreit um Arbeitszeiten und Zulagen. Die staatliche Bahn rechnet mit dem Ausfall von rund 80 Prozent der Fernzüge und hat einen Notfahrplan veröffentlicht. Der Regionalverkehr soll weitgehend normal laufen. Fahrgäste können ihre Tickets kostenlos umbuchen."
+      },
+      "candidates": [
+        {"headline": "Valmora port workers strike against automated cranes",
+         "summary": "Dock workers in Valmora began a two-day strike on Monday over the port authority's plan to automate 30 cranes. Ships are delayed and the union threatens further action.",
+         "expected": ["SAME_TOPIC_DISTINCT_EVENT", "UNRELATED"]}
+      ]
+    }
+  ],
+  "assess": [
+    {
+      "id": "pension-vote", "band": "high", "breaking": false,
+      "title": "Estrava's parliament passes pension reform in 212-180 vote",
+      "text": "Estrava's parliament on Wednesday approved a pension reform that raises the statutory retirement age from 65 to 67 in steps between 2027 and 2035. The bill passed by 212 votes to 180, with 8 abstentions. Labour minister Teo Arval said the change would save about 3.2 billion kessars a year by 2035 according to the finance ministry's estimate, and that workers in physically demanding jobs could still retire at 63 with full benefits. The opposition announced a challenge before the constitutional court, arguing the transition was too short. Unions, which organised three national strike days against the plan, said they would support the legal challenge. The reform still needs the signature of the president, who has 15 days to sign or return it to parliament."
+    },
+    {
+      "id": "study", "band": "high", "breaking": false,
+      "title": "Study of 48,000 adults links night-shift work to higher diabetes risk",
+      "text": "A study of 48,000 adults followed for twelve years found that people who regularly worked night shifts had a 19 percent higher risk of developing type 2 diabetes than day workers, after adjusting for age, body weight, smoking and income. The research, published on Monday in a peer-reviewed medical journal by a team at the University of Valmora, used national health records and employer data. The authors said the study showed an association, not proof of cause, and that self-reported diet data were a limitation. Lead author Dr. Ines Morrow said the results supported regular health checks for shift workers. Previous, smaller studies had found increases between 10 and 40 percent."
+    },
+    {
+      "id": "quake-report", "band": "high", "breaking": true,
+      "title": "Magnitude 6.4 earthquake strikes northern Kessaria, dozens injured",
+      "text": "A magnitude 6.4 earthquake struck northern Kessaria early on Tuesday, the national seismological institute said. The quake hit at 4:12 a.m. local time at a depth of 10 kilometres, about 25 kilometres west of the town of Orsen. Regional authorities reported at least 37 people injured and several buildings collapsed in Orsen's old town. Rescue teams were searching the rubble for people believed to be trapped, and schools in the province were closed. Aftershocks of up to magnitude 4.8 were recorded and residents were told to stay out of damaged buildings."
+    },
+    {
+      "id": "chemical-plant", "band": "mid", "breaking": true,
+      "title": "Explosion at chemical plant in Harlund, residents told to stay indoors",
+      "text": "A large explosion hit a chemical plant in the industrial district of Harlund on Thursday afternoon, sending a thick black cloud over the city. The fire brigade told residents within a radius of five kilometres to stay indoors and keep windows closed. Police said several workers were injured, without giving a number. The cause of the explosion was not yet known, and the plant operator did not respond to requests for comment. Several roads and a railway line near the site were closed."
+    },
+    {
+      "id": "clickbait", "band": "low", "breaking": false,
+      "title": "You won't BELIEVE what this star did at the airport!!!",
+      "text": "Fans are going absolutely crazy after a famous star was spotted doing something totally unexpected at the airport! Some people say it was the most shocking moment of the year, while others think it was just a joke. Nobody knows for sure what really happened, but the internet is losing its mind. Was it a publicity stunt? A secret message? You will have to see it to believe it. Click through our gallery of 25 photos to find out more and tell us in the comments what you think!"
+    },
+    {
+      "id": "advertorial", "band": "low", "breaking": false,
+      "title": "These 10 gadgets will change your life this summer",
+      "text": "Summer is here and we have found the ten must-have gadgets that everyone is talking about! From the amazing self-cooling bottle to the incredible pocket fan that will blow you away, these products are flying off the shelves. Don't miss out: use our exclusive discount code SUMMER25 to save 25 percent today only. Stocks are limited, so hurry! Our team loves every single one of these products and we are sure you will too. Prices may change at any time."
+    },
+    {
+      "id": "rumour", "band": "low", "breaking": false,
+      "title": "Insiders: Lumenix may be planning something huge",
+      "text": "According to some people on social media, the Lumenix project might maybe be preparing a big surprise very soon. Nobody could confirm anything, and the project did not say anything either, but several anonymous accounts hinted that it could be the biggest change ever, or possibly nothing at all. Some think it could be connected to a company, others believe it might just be a rumour. We will keep you updated if anything happens, or if nothing happens."
+    }
+  ],
+  "story": [
+    {
+      "id": "wildfire-full", "mode": "full",
+      "articles": [
+        {"title": "Wildfire forces evacuation of 3,000 residents near Tarvos",
+         "text": "A wildfire in the hills north of Tarvos, Estrava, forced authorities to evacuate around 3,000 residents on Saturday as strong winds pushed the flames towards three villages. More than 400 firefighters and six aircraft were deployed. The regional fire service said the blaze had burned 2,500 hectares since it started on Friday evening. No injuries were reported so far."},
+        {"title": "Tarvos fire: winds expected to ease on Sunday",
+         "text": "Firefighters battling the wildfire north of Tarvos said on Saturday evening that weather forecasts gave them hope, with winds expected to ease on Sunday. The fire had grown to 2,800 hectares. Evacuated residents were housed in schools and a sports hall in Tarvos. The regional government requested two additional firefighting aircraft from neighbouring Kessaria."}
+      ],
+      "expect": {"language": ["en"], "location": ["tarvos"], "status": ["Breaking", "Ongoing"],
+                 "impact_scale": ["Local", "Regional"], "urgency": [5, 9]}
+    },
+    {
+      "id": "rate-hike-full-de", "mode": "full",
+      "articles": [
+        {"title": "Zentralbank von Estrava erhöht Leitzins auf 4,5 Prozent",
+         "text": "Die Zentralbank von Estrava hat am Donnerstag ihren Leitzins um einen halben Prozentpunkt auf 4,5 Prozent angehoben. Es ist die dritte Erhöhung in diesem Jahr. Notenbankchef Orin Malek begründete den Schritt mit der Inflation, die im September auf 6,1 Prozent gestiegen war. Die Entscheidung im Zentralbankrat fiel mit sieben zu zwei Stimmen."},
+        {"title": "Leitzinserhöhung: Banken in Estrava verteuern Kredite",
+         "text": "Nach der Leitzinserhöhung der Zentralbank von Estrava auf 4,5 Prozent haben die drei größten Banken des Landes am Freitag angekündigt, die Zinsen für variable Immobilienkredite ab November anzuheben. Verbraucherschützer rechnen für einen durchschnittlichen Kredit mit Mehrkosten von rund 120 Kessar im Monat."}
+      ],
+      "expect": {"language": ["de"], "location": ["estrava"], "status": ["Ongoing", "Breaking", "Resolved"],
+                 "impact_scale": ["National"], "urgency": [3, 7]}
+    },
+    {
+      "id": "wildfire-major-update", "mode": "incremental",
+      "story": {"headline": "Wildfire forces evacuation of 3,000 near Tarvos",
+                "summary": "A wildfire in the hills north of Tarvos forced around 3,000 residents to evacuate on Saturday as strong winds pushed the flames towards three villages. More than 400 firefighters and six aircraft are fighting the blaze, which has burned 2,800 hectares. No injuries have been reported."},
+      "articles": [
+        {"title": "Tarvos wildfire contained after five days, police arrest arson suspect",
+         "text": "Firefighters have contained the wildfire north of Tarvos that forced 3,000 people from their homes last weekend, the regional fire service said on Wednesday. The fire burned around 4,100 hectares and destroyed 18 houses. Police said they had arrested a 34-year-old man suspected of starting the fire deliberately at two locations. Evacuated residents were allowed to return home from Thursday."}
+      ],
+      "expect": {"significance": [2, 3]}
+    },
+    {
+      "id": "wildfire-repeat", "mode": "incremental",
+      "story": {"headline": "Wildfire forces evacuation of 3,000 near Tarvos",
+                "summary": "A wildfire in the hills north of Tarvos forced around 3,000 residents to evacuate on Saturday as strong winds pushed the flames towards three villages. More than 400 firefighters and six aircraft are fighting the blaze, which has burned 2,800 hectares. No injuries have been reported."},
+      "articles": [
+        {"title": "Thousands evacuated as fire rages near Tarvos",
+         "text": "Around three thousand people had to leave their homes near Tarvos on Saturday because of a wildfire in the hills north of the town. Hundreds of firefighters supported by aircraft are trying to stop the flames, which strong winds were driving towards several villages. So far nobody has been hurt, officials said. Wildfires are common in the region in late summer."}
+      ],
+      "expect": {"significance": [0, 1]}
+    }
+  ]
+}

@@ -240,7 +240,8 @@ def _ask(schema: dict[str, Any], messages: list[dict[str, str]], story_id: int) 
     """Prompt 2 call; an unparseable reply is retried once."""
     for attempt in range(2):
         try:
-            out = ollama.structured(schema, messages, temperature=0.2, num_predict=1536, prose_fallback=True)
+            out = ollama.structured(schema, messages, temperature=0.2, num_predict=1536, prose_fallback=True,
+                                    model=config.STORY_MODEL)
             if isinstance(out, list):  # prose fallback may wrap the object in an array
                 out = next((x for x in out if isinstance(x, dict)), None)
             if not isinstance(out, dict):

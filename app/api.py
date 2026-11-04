@@ -37,10 +37,13 @@ def _is_public(request: Request) -> bool:
     return path.startswith("/api/stories/") and "/chat" not in path
 
 
+_ANALYTICS_ORIGIN = ("{0.scheme}://{0.netloc}".format(urlsplit(config.ANALYTICS_SCRIPT_URL))
+                     if config.ANALYTICS_SCRIPT_URL else "")
+_EXTRA_SRC = f" {_ANALYTICS_ORIGIN}" if _ANALYTICS_ORIGIN else ""
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self' https://analytics.example.org; style-src 'self'; img-src 'self' data: https:; "
-        "connect-src 'self' https://analytics.example.org; object-src 'none'; base-uri 'none'; form-action 'self'; "
+        f"default-src 'self'; script-src 'self'{_EXTRA_SRC}; style-src 'self'; img-src 'self' data: https:; "
+        f"connect-src 'self'{_EXTRA_SRC}; object-src 'none'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",

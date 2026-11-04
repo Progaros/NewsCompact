@@ -1,7 +1,4 @@
-"""Application settings, all overridable via environment variables.
-
-Background for the tuned values (thresholds, weights) lives in docs/findings.md.
-"""
+"""Application settings, all overridable via environment variables."""
 from __future__ import annotations
 
 import os
@@ -38,7 +35,7 @@ def _weights(name: str, default: str) -> dict[str, float]:
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(_env("NEWS_DB_PATH", str(BASE_DIR / "news.db")))
 PID_FILE = Path(_env("NEWS_PID_FILE", str(BASE_DIR / "news.pid")))
-HOST = _env("NEWS_HOST", "0.0.0.0")
+HOST = _env("NEWS_HOST", "127.0.0.1")  # 0.0.0.0 = reachable from the network
 PORT = _int("NEWS_PORT", 8787)
 PUBLIC_BASE = _env("NEWS_PUBLIC_BASE", "http://127.0.0.1:8787")
 # Reverse proxies whose X-Forwarded-For/-Proto are trusted (comma-separated IPs, "*" = any).
@@ -49,10 +46,27 @@ LOG_FILE = _env("NEWS_LOG_FILE", "")
 LOG_MAX_MB = _float("NEWS_LOG_MAX_MB", 10)
 LOG_BACKUPS = _int("NEWS_LOG_BACKUPS", 10)
 
-# --- Ollama (models are fixed for this deployment) -------------------------
+# --- Ollama ------------------------------------------------------------------
+# Prompts and thresholds were calibrated on a Qwen3 27B (Q3) + qwen3-embedding:0.6b; check a
+# replacement with scripts/benchmark/model_check.py before switching (README "Swapping models").
 OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-CHAT_MODEL = _env("NEWS_CHAT_MODEL", "qwen3:27b")
-EMBED_MODEL = _env("NEWS_EMBED_MODEL", "qwen3-embedding:0.6b-CPU")
+# OpenAI-compatible endpoint ending in /v1 (llama.cpp `llama serve`, an AI router such as Tianji,
+# Ollama's own /v1) for all LLM calls instead of Ollama's native API; empty = Ollama native.
+LLM_BASE_URL = _env("NEWS_LLM_BASE_URL", "")
+LLM_API_KEY = _env("NEWS_LLM_API_KEY", "")  # sent as Bearer token
+# Same for embeddings (POST /embeddings); empty = Ollama native at OLLAMA_BASE_URL.
+EMBED_BASE_URL = _env("NEWS_EMBED_BASE_URL", "")
+EMBED_API_KEY = _env("NEWS_EMBED_API_KEY", "")
+# Default LLM: story chat, heads-up brief, and every role below that is left empty.
+CHAT_MODEL = _env("NEWS_CHAT_MODEL", "qwen3:14b")
+# Event verifier: does an article/story belong to a story (clustering, recall merge, tag synonyms).
+VERIFY_MODEL = _env("NEWS_VERIFY_MODEL", "") or CHAT_MODEL
+# Article quality 1-10 + breaking flag ("harness").
+ASSESS_MODEL = _env("NEWS_ASSESS_MODEL", "") or CHAT_MODEL
+# Prompt 2: story headline, summary, tags, metrics.
+STORY_MODEL = _env("NEWS_STORY_MODEL", "") or CHAT_MODEL
+# Changing the embedding model or its dimension needs a re-embed of all articles (vec0 table).
+EMBED_MODEL = _env("NEWS_EMBED_MODEL", "qwen3-embedding:0.6b")
 EMBED_DIM = _int("NEWS_EMBED_DIM", 1024)
 # Keeps both models loaded between worker cycles (Ollama's default 5 min is
 # shorter than a cycle, so the first call of each cycle paid a reload). "" = server default.
@@ -236,13 +250,14 @@ SOURCE_TRUST_DEFAULT = 1.0
 OUTLET_GROUPS = {k.strip(): v.strip() for k, _, v in (p.partition("=") for p in _list(
     "NEWS_OUTLET_GROUPS",
     "deutschlandfunkkultur.de=deutschlandfunk.de,act.eff.org=eff.org,wid.cert-bund.de=bsi.bund.de")) if v.strip()}
-USER_CITY = _env("NEWS_USER_CITY", "Munich")
-USER_COUNTRY = _env("NEWS_USER_COUNTRY", "Germany")
-USER_LANGUAGE = _env("NEWS_USER_LANGUAGE", "de")
+# Server-wide home for distance scoring until a user sets one in ⚙ Preferences (empty = none).
+USER_CITY = _env("NEWS_USER_CITY", "")
+USER_COUNTRY = _env("NEWS_USER_COUNTRY", "")
+USER_LANGUAGE = _env("NEWS_USER_LANGUAGE", "")
 
 # --- Heads-up brief + scheduled ntfy reports ---------------------------------
 HEADS_UP_TTL_MINUTES = _int("NEWS_HEADS_UP_TTL_MINUTES", 11)
-HEADS_UP_NTFY_URL = _env("NEWS_HEADS_UP_NTFY_URL", "https://ntfy.sh/your-topic")  # empty disables all pushes
+HEADS_UP_NTFY_URL = _env("NEWS_HEADS_UP_NTFY_URL", "")  # e.g. https://ntfy.sh/<topic>; empty disables all pushes
 HEADS_UP_NTFY_TITLE = _env("NEWS_HEADS_UP_NTFY_TITLE", "News Heads Up")
 # Daily brief times (server-local HH:MM) until schedules are saved in ⚙ Preferences.
 HEADS_UP_NTFY_TIMES = _list("NEWS_HEADS_UP_NTFY_TIMES", "07:00")
@@ -293,8 +308,12 @@ SEARCH_PRIORITY_BOOST = _float("NEWS_SEARCH_PRIORITY_BOOST", 0.15)
 SEARCH_INSTRUCT = _env("NEWS_SEARCH_INSTRUCT",
                        "Given a news search query, retrieve news articles about the topic, event or names it mentions")
 
-# --- searchngx (SearXNG web search for chat) ---------------------------------
-SEARCHNGX_BASE_URL = _env("NEWS_SEARCHNGX_BASE_URL", "https://searx.example.org/")
+# --- Optional analytics (e.g. Umami/Tianji): script tag on every page, origin added to the CSP ---
+ANALYTICS_SCRIPT_URL = _env("NEWS_ANALYTICS_SCRIPT_URL", "")
+ANALYTICS_WEBSITE_ID = _env("NEWS_ANALYTICS_WEBSITE_ID", "")
+
+# --- searchngx (SearXNG web search for chat; empty URL disables web search) ---
+SEARCHNGX_BASE_URL = _env("NEWS_SEARCHNGX_BASE_URL", "")
 SEARCHNGX_API_KEY = _env("NEWS_SEARCHNGX_API_KEY", "")
 SEARCHNGX_ENDPOINT = _env("NEWS_SEARCHNGX_ENDPOINT", "search")
 SEARCHNGX_CATEGORIES = _env("NEWS_SEARCHNGX_CATEGORIES", "general,news")

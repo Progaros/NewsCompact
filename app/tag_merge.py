@@ -119,7 +119,8 @@ def verify(a: str, b: str, examples: dict[str, list[str]]) -> dict[str, Any]:
 
     out = ollama.structured(_SCHEMA, [{"role": "system", "content": _SYSTEM},
                                       {"role": "user", "content": f"{block('A', a)}\n\n{block('B', b)}"}],
-                            num_predict=200, timeout=config.CLUSTER_VERIFY_TIMEOUT_SECONDS)
+                            num_predict=200, timeout=config.CLUSTER_VERIFY_TIMEOUT_SECONDS,
+                            model=config.VERIFY_MODEL)
     relation = out.get("relation") if out.get("relation") in RELATIONS else "AMBIGUOUS"
     try:
         confidence = max(0.0, min(1.0, float(out.get("confidence", 0))))

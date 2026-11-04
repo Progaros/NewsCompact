@@ -1,10 +1,14 @@
-"""Ollama HTTP client (one shared pooled connection).
+"""LLM / embedding HTTP client (pooled connections).
 
-- embeddings: native /api/embed
-- free-form chat: OpenAI-compatible /v1/chat/completions (with retries)
-- schema-constrained chat: native /api/chat with ``format`` + ``think: false``
-  (on Qwen3 thinking models, thinking tokens otherwise eat num_predict and
+Two backends, chosen per base URL:
+
+- Ollama native (default, ``OLLAMA_BASE_URL``): embeddings via /api/embed, free-form chat via
+  its OpenAI layer /v1/chat/completions, schema-constrained chat via /api/chat with ``format``
+  + ``think: false`` (on Qwen3 thinking models, thinking tokens otherwise eat num_predict and
   ``format`` is silently ignored).
+- OpenAI-compatible (``NEWS_LLM_BASE_URL`` / ``NEWS_EMBED_BASE_URL``, ending in /v1): llama.cpp
+  ``llama serve``, AI routers such as Tianji, hosted APIs. /chat/completions with
+  ``response_format: json_schema`` for structured calls, /embeddings, optional Bearer key.
 """
 from __future__ import annotations
 
@@ -21,20 +25,47 @@ import httpx
 from . import config
 
 log = logging.getLogger("news.ollama")
-_client: httpx.Client | None = None
+_clients: dict[tuple[str, str], httpx.Client] = {}
 _client_lock = threading.Lock()
 _stats = threading.local()
 _STAT_KEYS = ("load_duration", "prompt_eval_count", "prompt_eval_duration", "eval_count", "eval_duration")
 
 
-def _http() -> httpx.Client:
-    global _client
+def _client(base_url: str, api_key: str) -> httpx.Client:
     with _client_lock:
-        if _client is None:
-            # trust_env=False: Ollama is a LAN host; an http(s)_proxy env var must not reroute it.
-            _client = httpx.Client(base_url=config.OLLAMA_BASE_URL, timeout=config.OLLAMA_TIMEOUT,
-                                   trust_env=False)
-        return _client
+        c = _clients.get((base_url, api_key))
+        if c is None:
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            # trust_env=False: the model server is usually a LAN host; an http(s)_proxy env var must not reroute it.
+            c = _clients[(base_url, api_key)] = httpx.Client(
+                base_url=base_url, headers=headers, timeout=config.OLLAMA_TIMEOUT, trust_env=False)
+        return c
+
+
+def _openai() -> bool:
+    return bool(config.LLM_BASE_URL)
+
+
+def _http() -> httpx.Client:
+    """Client for LLM calls."""
+    if _openai():
+        return _client(config.LLM_BASE_URL, config.LLM_API_KEY)
+    return _client(config.OLLAMA_BASE_URL, "")
+
+
+def _embed_http() -> httpx.Client:
+    if config.EMBED_BASE_URL:
+        return _client(config.EMBED_BASE_URL, config.EMBED_API_KEY)
+    return _client(config.OLLAMA_BASE_URL, "")
+
+
+def _chat_path() -> str:
+    return "/chat/completions" if _openai() else "/v1/chat/completions"
+
+
+def endpoint() -> str:
+    """Where LLM calls go (for logs)."""
+    return config.LLM_BASE_URL or config.OLLAMA_BASE_URL
 
 
 def _keep_alive(payload: dict[str, Any]) -> dict[str, Any]:
@@ -43,26 +74,43 @@ def _keep_alive(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-# Errors meaning "Ollama is unreachable" (as opposed to a bad/slow answer).
+# Errors meaning "the model server is unreachable" (as opposed to a bad/slow answer).
 UNAVAILABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
 
 
-def available() -> bool:
+def _reachable(c: httpx.Client, openai: bool) -> bool:
+    # OpenAI-compatible servers and routers may not serve /models; any non-5xx answer means "up".
     try:
-        _http().get("/api/version", timeout=5).raise_for_status()
-        return True
+        r = c.get("/models" if openai else "/api/version", timeout=5)
     except httpx.HTTPError:
         return False
+    return r.status_code < 500 if openai else r.is_success
+
+
+def available() -> bool:
+    if not _reachable(_http(), _openai()):
+        return False
+    if _embed_http() is _http():
+        return True
+    return _reachable(_embed_http(), bool(config.EMBED_BASE_URL))
 
 
 # --- embeddings ------------------------------------------------------------
-def embed_texts(texts: list[str], *, timeout: float | None = None) -> list[list[float]]:
+def embed_texts(texts: list[str], *, timeout: float | None = None,
+                model: str | None = None) -> list[list[float]]:
     if not texts:
         return []
-    r = _http().post("/api/embed", json=_keep_alive({"model": config.EMBED_MODEL, "input": texts}),
-                     **({"timeout": timeout} if timeout else {}))
-    r.raise_for_status()
-    out = r.json().get("embeddings", [])
+    model = model or config.EMBED_MODEL
+    kwargs = {"timeout": timeout} if timeout else {}
+    if config.EMBED_BASE_URL:
+        r = _embed_http().post("/embeddings", json={"model": model, "input": texts}, **kwargs)
+        r.raise_for_status()
+        data = sorted(r.json().get("data") or [], key=lambda d: d.get("index", 0))
+        out = [d["embedding"] for d in data]
+    else:
+        r = _embed_http().post("/api/embed", json=_keep_alive({"model": model, "input": texts}), **kwargs)
+        r.raise_for_status()
+        out = r.json().get("embeddings", [])
     if len(out) != len(texts):
         raise RuntimeError(f"embed count mismatch: got {len(out)} for {len(texts)} inputs")
     return out
@@ -74,9 +122,9 @@ def embed_one(text: str) -> list[float]:
 
 # --- free-form chat --------------------------------------------------------
 def chat(messages: list[dict[str, Any]], *, temperature: float = 0.2,
-         max_tokens: int | None = None) -> str:
+         max_tokens: int | None = None, model: str | None = None) -> str:
     payload: dict[str, Any] = {
-        "model": config.CHAT_MODEL,
+        "model": model or config.CHAT_MODEL,
         "messages": messages,
         "stream": False,
         "temperature": temperature,
@@ -85,7 +133,7 @@ def chat(messages: list[dict[str, Any]], *, temperature: float = 0.2,
         payload["max_tokens"] = max_tokens
     for attempt in range(3):
         try:
-            r = _http().post("/v1/chat/completions", json=payload)
+            r = _http().post(_chat_path(), json=payload)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
         except (httpx.HTTPError, KeyError, IndexError):
@@ -131,13 +179,13 @@ class _ThinkSplitter:
 
 
 def chat_stream(messages: list[dict[str, Any]], *, temperature: float = 0.2,
-                max_tokens: int | None = None) -> Iterator[tuple[str, str]]:
+                max_tokens: int | None = None, model: str | None = None) -> Iterator[tuple[str, str]]:
     """Like :func:`chat`, but yields ``("thinking" | "content", text)`` chunks as they arrive.
 
     Thinking comes from ``delta.reasoning`` (Ollama's OpenAI layer) or inline ``<think>`` tags.
     """
     payload: dict[str, Any] = {
-        "model": config.CHAT_MODEL,
+        "model": model or config.CHAT_MODEL,
         "messages": messages,
         "stream": True,
         "temperature": temperature,
@@ -145,7 +193,7 @@ def chat_stream(messages: list[dict[str, Any]], *, temperature: float = 0.2,
     if max_tokens:
         payload["max_tokens"] = max_tokens
     split = _ThinkSplitter()
-    with _http().stream("POST", "/v1/chat/completions", json=payload) as r:
+    with _http().stream("POST", _chat_path(), json=payload) as r:
         r.raise_for_status()
         for line in r.iter_lines():
             if not line.startswith("data:"):
@@ -191,7 +239,7 @@ def chat_json(messages: list[dict[str, Any]], **kwargs: Any) -> Any:
 
 
 # --- schema-constrained chat ----------------------------------------------
-def _record(body: dict[str, Any]) -> None:
+def _record(body: dict[str, Any], model: str) -> None:
     """Add Ollama's own timings (ns) of one /api/chat reply to this thread's totals."""
     acc = getattr(_stats, "acc", None)
     if acc is None:
@@ -201,7 +249,7 @@ def _record(body: dict[str, Any]) -> None:
         acc[k] += body.get(k) or 0
     if (body.get("load_duration") or 0) > 1e9:
         log.info("ollama loaded %s in %.1fs (evicted by another model or keep_alive expiry)",
-                 config.CHAT_MODEL, body["load_duration"] / 1e9)
+                 model, body["load_duration"] / 1e9)
 
 
 def take_stats() -> dict[str, float]:
@@ -213,29 +261,53 @@ def take_stats() -> dict[str, float]:
             "out_tok": acc["eval_count"], "out_s": acc["eval_duration"] / 1e9}
 
 
+def _openai_stats(body: dict[str, Any]) -> dict[str, Any]:
+    """OpenAI ``usage`` (+ llama.cpp ``timings`` in ms) in Ollama's stat keys."""
+    usage, timings = body.get("usage") or {}, body.get("timings") or {}
+    return {"prompt_eval_count": usage.get("prompt_tokens"), "eval_count": usage.get("completion_tokens"),
+            "prompt_eval_duration": (timings.get("prompt_ms") or 0) * 1e6,
+            "eval_duration": (timings.get("predicted_ms") or 0) * 1e6}
+
+
 def structured(schema: dict[str, Any], messages: list[dict[str, Any]], *,
                temperature: float = 0.0, num_predict: int = 1024,
-               timeout: float | None = None, prose_fallback: bool = False) -> Any:
+               timeout: float | None = None, prose_fallback: bool = False,
+               model: str | None = None) -> Any:
     """Return the parsed JSON the model emitted under ``schema``.
 
     With ``prose_fallback`` an empty constrained reply is retried as a plain
-    /v1 chat and parsed leniently (the known ``think`` interaction).
+    chat and parsed leniently (the known ``think`` interaction).
     """
-    payload = _keep_alive({
-        "model": config.CHAT_MODEL,
-        "messages": messages,
-        "format": schema,
-        "stream": False,
-        "think": False,
-        "options": {"temperature": temperature, "num_predict": num_predict},
-    })
-    r = _http().post("/api/chat", json=payload, timeout=timeout or httpx.USE_CLIENT_DEFAULT)
-    r.raise_for_status()
-    body = r.json()
-    _record(body)
-    content = (body.get("message") or {}).get("content") or ""
+    model = model or config.CHAT_MODEL
+    timeout_arg = timeout or httpx.USE_CLIENT_DEFAULT
+    if _openai():
+        r = _http().post("/chat/completions", timeout=timeout_arg, json={
+            "model": model,
+            "messages": messages,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "reply", "schema": schema}},
+            "stream": False,
+            "temperature": temperature,
+            "max_tokens": num_predict,
+        })
+        r.raise_for_status()
+        body = r.json()
+        _record(_openai_stats(body), model)
+        content = (((body.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+    else:
+        r = _http().post("/api/chat", timeout=timeout_arg, json=_keep_alive({
+            "model": model,
+            "messages": messages,
+            "format": schema,
+            "stream": False,
+            "think": False,
+            "options": {"temperature": temperature, "num_predict": num_predict},
+        }))
+        r.raise_for_status()
+        body = r.json()
+        _record(body, model)
+        content = (body.get("message") or {}).get("content") or ""
     if not content.strip():
         if prose_fallback:
-            return chat_json(messages, temperature=temperature, max_tokens=num_predict)
+            return chat_json(messages, temperature=temperature, max_tokens=num_predict, model=model)
         raise ValueError("constrained chat returned empty content")
     return extract_json(content)

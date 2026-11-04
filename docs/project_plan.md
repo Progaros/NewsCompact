@@ -1,9 +1,8 @@
 # AI News Aggregator: Detailed Project Plan & Architecture
 
 > **Status:** original design spec (2026-09-27), kept as-is. This file is *not*
-> updated as the project evolves — for current state see
-> [`README.md`](../README.md) (usage) and [`plan.md`](./plan.md) (progress/changelog);
-> technical discoveries are in [`findings.md`](./findings.md).
+> updated as the project evolves — for the current state see
+> [`README.md`](../README.md).
 
 ## 1. System Overview
 
@@ -14,7 +13,7 @@ A robust, local-first web application designed to ingest large volumes of RSS fe
 *   **Backend:** Python (FastAPI). Chosen for its native asynchronous capabilities, which are essential for I/O-bound tasks like concurrently fetching dozens of RSS feeds and interacting with HTTP-based LLM APIs.
 *   **Database:** **SQLite with the `sqlite-vec` extension** acting as a unified relational and vector database. This entirely eliminates network overhead, avoids data synchronization bugs between a traditional DB and a standalone vector DB (like ChromaDB), and allows the backend to remain extremely lightweight in a single portable file.
 *   **AI Engine (Local via Ollama):**
-    *   **Text/Chat Model:** Local Ollama instance (`qwen3:27b`) via HTTP (http://127.0.0.1:11434/v1) for summarization, classification, and scoring.
+    *   **Text/Chat Model:** Local Ollama instance (Qwen3 27B, Q3 quant) via HTTP (`OLLAMA_BASE_URL` + `/v1`) for summarization, classification, and scoring.
     *   **Embedding Model:** `qwen3-embedding:0.6b-CPU` via local Ollama for semantic search and clustering. Fast enough for CPU generation while providing high-quality dense vectors.
 *   **Frontend:** A modern, lightweight Single Page Application (SPA) built with Vanilla HTML/CSS/JS. It will utilize the native `Fetch API` and Web Components to encapsulate UI logic without the overhead of heavy frameworks like React or Vue.
 
