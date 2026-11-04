@@ -2,6 +2,8 @@
 name = "news-aggregator-ai"
 version = "0.1.0"
 description = "Local-first RSS aggregator that clusters, summarizes and ranks news stories with a local Ollama LLM"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "beautifulsoup4>=4.15.0",

@@ -285,3 +285,7 @@ scripts/                start.sh, shutdown.sh, pipeline_report.py, compare_ranki
 tests/                  pytest suite (API, security, pipeline, merge, split, scoring, search, read, reports, ingest, migrations, frontend JS syntax via tree-sitter)
 docs/                   algorithms.md (ranking), performance.md (2026-10 AI quality audit), project_plan.md (original design), future_ideas.md, screenshot.png
 ```
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE): free to use, modify and share for any noncommercial purpose (personal, hobby, research, education, nonprofits, public institutions). Commercial use needs a separate license; ask via [GitHub](https://github.com/Progaros).
