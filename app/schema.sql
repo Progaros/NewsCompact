@@ -1,6 +1,5 @@
 -- Schema for the AI News Aggregator (applied idempotently by app/db.py).
 -- Timestamps are naive UTC strings 'YYYY-MM-DD HH:MM:SS'.
--- Columns added after the first release are also listed in db._MIGRATIONS.
 
 PRAGMA foreign_keys = ON;
 
@@ -27,6 +26,12 @@ CREATE TABLE IF NOT EXISTS FeedCategory (
     trust REAL NOT NULL
 );
 
+INSERT OR IGNORE INTO FeedCategory (name, trust) VALUES
+    ('News DACH', 0.9), ('News World', 0.9), ('Business & Finance', 0.85), ('Institutions', 1.0),
+    ('Tech', 0.8), ('Security & Privacy', 0.9), ('Science & Health', 0.85), ('Culture & Society', 0.7),
+    ('Gaming', 0.7), ('Munich & Bavaria', 0.8), ('Journals', 0.9), ('Wikipedia', 0.8),
+    ('Hacker News', 0.5), ('Reddit', 0.2), ('Reviews', 0.5);
+
 CREATE TABLE IF NOT EXISTS Article (
     id                INTEGER PRIMARY KEY,
     feed_id           INTEGER NOT NULL REFERENCES Feed(id) ON DELETE CASCADE,
@@ -41,7 +46,7 @@ CREATE TABLE IF NOT EXISTS Article (
     created_at        TEXT DEFAULT (datetime('now')),   -- first seen (ingest)
     quality           REAL,
     pipeline_failures INTEGER,
-    pipeline_timeouts INTEGER,   -- consecutive Ollama timeouts (retried with backoff)
+    pipeline_timeouts INTEGER,   -- consecutive model timeouts (retried with backoff)
     retry_after       TEXT,      -- not picked up by the pipeline before this time
     processed_at      TEXT,      -- pipeline finished (story written)
     t_embed_s         REAL,      -- per-stage wall times of the successful run
@@ -55,9 +60,12 @@ CREATE TABLE IF NOT EXISTS Article (
     title_key         TEXT       -- normalized title (dedup.title_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_article_story   ON Article(story_id);
-CREATE INDEX IF NOT EXISTS idx_article_feed    ON Article(feed_id);
-CREATE INDEX IF NOT EXISTS idx_article_created ON Article(created_at);
+CREATE INDEX IF NOT EXISTS idx_article_story     ON Article(story_id);
+CREATE INDEX IF NOT EXISTS idx_article_feed      ON Article(feed_id);
+CREATE INDEX IF NOT EXISTS idx_article_created   ON Article(created_at);
+CREATE INDEX IF NOT EXISTS idx_article_url_key   ON Article(url_key);
+CREATE INDEX IF NOT EXISTS idx_article_title_key ON Article(title_key);
+CREATE INDEX IF NOT EXISTS idx_article_duplicate ON Article(duplicate_of);
 
 CREATE TABLE IF NOT EXISTS Story (
     id            INTEGER PRIMARY KEY,
@@ -75,6 +83,18 @@ CREATE TABLE IF NOT EXISTS Story (
 );
 
 CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);
+CREATE INDEX IF NOT EXISTS idx_story_news    ON Story(news_at);
+
+-- Ranking filters on news_at alone: any story that has a headline must have one.
+CREATE TRIGGER IF NOT EXISTS story_news_at_insert AFTER INSERT ON Story
+WHEN NEW.news_at IS NULL AND NEW.headline IS NOT NULL BEGIN
+    UPDATE Story SET news_at = COALESCE(NEW.updated_at, datetime('now')) WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS story_news_at_update AFTER UPDATE OF headline ON Story
+WHEN NEW.news_at IS NULL AND NEW.headline IS NOT NULL BEGIN
+    UPDATE Story SET news_at = COALESCE(NEW.updated_at, datetime('now')) WHERE id = NEW.id;
+END;
 
 -- Ids of merged-away stories -> the story that absorbed them, so /s/<id> links survive merges.
 -- New stories never reuse an aliased id (clustering.decide_story).
@@ -135,6 +155,8 @@ CREATE TABLE IF NOT EXISTS FeedbackLog (
     created_at TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_user  ON FeedbackLog(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_user_story ON FeedbackLog(user_id, story_id) WHERE story_id IS NOT NULL;
 
 -- Stories marked read, per user. A story is unread again once
 -- COALESCE(Story.material_at, Story.created_at) > read_at.
@@ -255,3 +277,53 @@ CREATE TABLE IF NOT EXISTS TagVector (
     tag       TEXT PRIMARY KEY,
     embedding BLOB NOT NULL
 );
+
+-- One FTS5 row per story (app/search.py): its own text plus its article titles, kept in sync by triggers.
+CREATE VIRTUAL TABLE IF NOT EXISTS StorySearch USING fts5(
+    headline, tags, summary, titles,
+    tokenize = 'unicode61 remove_diacritics 2', prefix = '3'
+);
+
+CREATE TRIGGER IF NOT EXISTS story_search_insert AFTER INSERT ON Story BEGIN
+    DELETE FROM StorySearch WHERE rowid = NEW.id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS story_search_update AFTER UPDATE OF headline, summary, tags ON Story BEGIN
+    DELETE FROM StorySearch WHERE rowid = NEW.id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS story_search_delete AFTER DELETE ON Story BEGIN
+    DELETE FROM StorySearch WHERE rowid = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS article_search_insert AFTER INSERT ON Article WHEN NEW.story_id IS NOT NULL BEGIN
+    DELETE FROM StorySearch WHERE rowid = NEW.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.story_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS article_search_update AFTER UPDATE OF story_id, title ON Article
+WHEN OLD.story_id IS NOT NEW.story_id OR OLD.title IS NOT NEW.title BEGIN
+    DELETE FROM StorySearch WHERE rowid = OLD.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = OLD.story_id;
+    DELETE FROM StorySearch WHERE rowid = NEW.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.story_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS article_search_delete AFTER DELETE ON Article WHEN OLD.story_id IS NOT NULL BEGIN
+    DELETE FROM StorySearch WHERE rowid = OLD.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = OLD.story_id;
+END;

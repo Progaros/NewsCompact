@@ -47,22 +47,20 @@ LOG_FILE = _env("NEWS_LOG_FILE", "")
 LOG_MAX_MB = _float("NEWS_LOG_MAX_MB", 10)
 LOG_BACKUPS = _int("NEWS_LOG_BACKUPS", 10)
 
-# --- Ollama ------------------------------------------------------------------
-# Prompts and thresholds were calibrated on a Qwen3 27B (Q3) + qwen3-embedding:0.6b; check a
+# --- Model server (llama.cpp /v1 or Ollama) ----------------------------------
+# Prompts and thresholds were calibrated on Qwen3 27B (IQ3_XXS) + Qwen3-Embedding 0.6B; check a
 # replacement with scripts/benchmark/model_check.py before switching (README "Swapping models").
-OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-# OpenAI-compatible endpoint ending in /v1 (e.g. llama.cpp `llama-server`) for all LLM calls
-# instead of Ollama's native API; empty = Ollama native.
+# OpenAI-compatible /v1 endpoints (`llama serve` / `llama-server`); empty = Ollama native at OLLAMA_BASE_URL.
 LLM_BASE_URL = _env("NEWS_LLM_BASE_URL", "")
 LLM_API_KEY = _env("NEWS_LLM_API_KEY", "")  # sent as Bearer token
-# JSON merged into OpenAI-compatible structured calls, the counterpart of Ollama's think=false;
-# llama-server / vLLM with Qwen3: {"chat_template_kwargs": {"enable_thinking": false}}
+# JSON merged into OpenAI-compatible structured calls (counterpart of Ollama's think=false);
+# llama.cpp / vLLM with Qwen3: {"chat_template_kwargs": {"enable_thinking": false}}
 LLM_STRUCTURED_EXTRA: dict = json.loads(_env("NEWS_LLM_STRUCTURED_EXTRA", "") or "{}")
-# Same for embeddings (POST /embeddings); empty = Ollama native at OLLAMA_BASE_URL.
 EMBED_BASE_URL = _env("NEWS_EMBED_BASE_URL", "")
 EMBED_API_KEY = _env("NEWS_EMBED_API_KEY", "")
+OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # Default LLM: story chat, heads-up brief, and every role below that is left empty.
-CHAT_MODEL = _env("NEWS_CHAT_MODEL", "qwen3:14b")
+CHAT_MODEL = _env("NEWS_CHAT_MODEL", "qwen3-27b-IQ3")
 # Event verifier: does an article/story belong to a story (clustering, recall merge, tag synonyms).
 VERIFY_MODEL = _env("NEWS_VERIFY_MODEL", "") or CHAT_MODEL
 # Article quality 1-10 + breaking flag ("harness").
@@ -70,10 +68,9 @@ ASSESS_MODEL = _env("NEWS_ASSESS_MODEL", "") or CHAT_MODEL
 # Prompt 2: story headline, summary, tags, metrics.
 STORY_MODEL = _env("NEWS_STORY_MODEL", "") or CHAT_MODEL
 # Changing the embedding model or its dimension needs a re-embed of all articles (vec0 table).
-EMBED_MODEL = _env("NEWS_EMBED_MODEL", "qwen3-embedding:0.6b")
+EMBED_MODEL = _env("NEWS_EMBED_MODEL", "qwen3-embedding")
 EMBED_DIM = _int("NEWS_EMBED_DIM", 1024)
-# Keeps both models loaded between worker cycles (Ollama's default 5 min is
-# shorter than a cycle, so the first call of each cycle paid a reload). "" = server default.
+# Keeps models loaded between worker cycles when using Ollama ("" = server default).
 OLLAMA_KEEP_ALIVE = _env("NEWS_OLLAMA_KEEP_ALIVE", "15m")
 OLLAMA_TIMEOUT = _float("NEWS_OLLAMA_TIMEOUT", 300)
 HARNESS_TIMEOUT = _float("NEWS_HARNESS_TIMEOUT", 120)

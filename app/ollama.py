@@ -2,13 +2,13 @@
 
 Two backends, chosen per base URL:
 
-- Ollama native (default, ``OLLAMA_BASE_URL``): embeddings via /api/embed, free-form chat via
-  its OpenAI layer /v1/chat/completions, schema-constrained chat via /api/chat with ``format``
-  + ``think: false`` (on Qwen3 thinking models, thinking tokens otherwise eat num_predict and
-  ``format`` is silently ignored).
 - OpenAI-compatible (``NEWS_LLM_BASE_URL`` / ``NEWS_EMBED_BASE_URL``, ending in /v1): llama.cpp
-  ``llama-server``, vLLM, hosted APIs. /chat/completions with ``response_format: json_schema``
-  for structured calls, /embeddings, optional Bearer key.
+  (``llama serve`` / ``llama-server``), vLLM, hosted APIs. /chat/completions with
+  ``response_format: json_schema`` (+ ``NEWS_LLM_STRUCTURED_EXTRA``) for structured calls,
+  /embeddings for embeddings, optional Bearer key.
+- Ollama native (when ``NEWS_LLM_BASE_URL`` / ``NEWS_EMBED_BASE_URL`` are unset, via
+  ``OLLAMA_BASE_URL``): embeddings via /api/embed, free-form chat via /v1/chat/completions,
+  schema-constrained chat via /api/chat with ``format`` + ``think: false``.
 """
 from __future__ import annotations
 

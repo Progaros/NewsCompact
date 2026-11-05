@@ -11,11 +11,7 @@ embedding table) plus HTTP calls to Local LLM and SearXNG.
 
 ## Quickstart & Deployment
 
-Requirements: [uv](https://docs.astral.sh/uv/) (Python 3.14) and an Ollama
-instance (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`) serving a chat model
-(`NEWS_CHAT_MODEL`, default `qwen3:14b`) and an embedding model (`NEWS_EMBED_MODEL`,
-default `qwen3-embedding:0.6b`, 1024-dim). Prompts and thresholds were tuned on a Qwen3 27B
-(Q3 quant) + `qwen3-embedding:0.6b`; see [Swapping models](#swapping-models) before using others.
+Requirements: [uv](https://docs.astral.sh/uv/) (Python 3.14) and a local model server — either **llama.cpp** (`llama serve` / `llama-server` via `NEWS_LLM_BASE_URL` and `NEWS_EMBED_BASE_URL`) or **Ollama** (`OLLAMA_BASE_URL`) — serving a chat model (`NEWS_CHAT_MODEL`, default `qwen3-27b-IQ3`) and an embedding model (`NEWS_EMBED_MODEL`, default `qwen3-embedding`, 1024-dim). Prompts and thresholds were tuned on Qwen3 27B (IQ3_XXS) + Qwen3-Embedding 0.6B; see [Model backends & swapping models](#model-backends--swapping-models) before using others.
 
 ```bash
 cp .env.example .env           # set NEWS_AUTH_PASSWORD, models, optional services
@@ -44,9 +40,9 @@ NEWS_HOST=0.0.0.0                           # only without a local reverse proxy
 - **Login is required**: startup fails unless `NEWS_AUTH_PASSWORD` is set or an admin already has a stored password. `admin` (user 1) signs in with `NEWS_AUTH_PASSWORD` (until setting a custom password in ⚙ Preferences). Admins manage feeds (`/feeds`) and users (`/admin`: create, promote/demote, reset password, delete). A fresh install has no feeds: add them on `/feeds`.
 - **Optional services**: SearXNG for web search in story chats (`NEWS_SEARCHNGX_BASE_URL`; empty = no web search), [ntfy](https://ntfy.sh) pushes of the daily brief (`NEWS_HEADS_UP_NTFY_URL`), and an Umami/Tianji-style analytics script (`NEWS_ANALYTICS_SCRIPT_URL`, `NEWS_ANALYTICS_WEBSITE_ID`).
 
-### Swapping models
+### Model backends & swapping models
 
-Every LLM call goes through one of four roles; each can use its own Ollama model (empty = `NEWS_CHAT_MODEL`):
+Every LLM call goes through one of four roles; each can use its own model (empty = `NEWS_CHAT_MODEL`):
 
 | Role | Variable | Used for | Notes |
 | --- | --- | --- | --- |
@@ -54,40 +50,40 @@ Every LLM call goes through one of four roles; each can use its own Ollama model
 | Verifier | `NEWS_VERIFY_MODEL` | clustering decision (`EXACT_MATCH` … `UNRELATED`), recall merge, tag synonyms | most quality-critical; schema-constrained, temperature 0 |
 | Assessor | `NEWS_ASSESS_MODEL` | article quality 1–10 + breaking flag | runs on every article; a small model is often fine |
 | Story writer | `NEWS_STORY_MODEL` | headline, summary, tags, metrics, update significance | longest prompts (up to `NEWS_CONTEXT_BUDGET_CHARS`) |
-| Embeddings | `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | clustering candidates, merge, split, search | thresholds are tuned to `qwen3-embedding` |
+| Embeddings | `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | clustering candidates, merge, split, search | thresholds are tuned to `Qwen3-Embedding-0.6B` |
 
-Structured calls use Ollama's native `/api/chat` with a JSON schema (`format`) and `think: false`, so the model must support structured outputs. Each model that differs from the others needs its own VRAM (`NEWS_OLLAMA_KEEP_ALIVE` keeps all of them loaded).
+**Option A — `llama.cpp` (`llama serve` / `llama-server`, OpenAI-compatible `/v1`)**: set `NEWS_LLM_BASE_URL` and `NEWS_EMBED_BASE_URL` to base URLs ending in `/v1` (plus optional `NEWS_LLM_API_KEY` / `NEWS_EMBED_API_KEY` sent as `Authorization: Bearer`). All LLM roles use `/chat/completions`, structured calls with `response_format: {type: json_schema}`, and embeddings use `/embeddings`. `NEWS_LLM_STRUCTURED_EXTRA` (JSON) is merged into structured requests to disable thinking (`{"chat_template_kwargs": {"enable_thinking": false}}` for Qwen3 with `--jinja`), while free-form chat answers can still think.
 
-**Replacing Ollama (`llama.cpp` / OpenAI-compatible `/v1`)**: set `NEWS_LLM_BASE_URL` and `NEWS_EMBED_BASE_URL` to base URLs ending in `/v1` (plus optional `NEWS_LLM_API_KEY` / `NEWS_EMBED_API_KEY` sent as `Authorization: Bearer`). All LLM roles then use `/chat/completions`, structured calls with `response_format: {type: json_schema}`, and embeddings use `/embeddings`. Ollama's `think: false` has no OpenAI equivalent: `NEWS_LLM_STRUCTURED_EXTRA` (JSON) is merged into structured requests, e.g. `{"chat_template_kwargs": {"enable_thinking": false}}` for Qwen3 on `llama-server` / vLLM, so chat answers can still think.
-
-Example — replacing Ollama with `llama-server` (chat model on the GPU, embeddings on the CPU):
+Example (LLM on the GPU `:11434`, embeddings on the CPU `:11430`):
 
 ```bash
-llama-server -m Qwen3-27B-Q3_K_M.gguf --alias qwen3-27b -ngl 99 -c 81920 -np 1 --jinja --port 8080
-llama-server -m Qwen3-Embedding-0.6B-Q8_0.gguf --alias qwen3-embedding --embedding --pooling last \
-  -ngl 0 -c 8192 -ub 8192 --port 8081
+llama serve -hf RentedNoodle/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-Uncensored:IQ3_XXS \
+  --alias qwen3-27b-IQ3 --parallel 1 --jinja --host 0.0.0.0 --port 11434
+llama serve -hf Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0 --alias qwen3-embedding \
+  --embedding --pooling last -ngl 0 -c 8192 -b 8192 -ub 8192 --host 0.0.0.0 --port 11430
 ```
 
 ```bash
-NEWS_LLM_BASE_URL=http://127.0.0.1:8080/v1
-NEWS_CHAT_MODEL=qwen3-27b
+NEWS_LLM_BASE_URL=http://127.0.0.1:11434/v1
+NEWS_CHAT_MODEL=qwen3-27b-IQ3
 NEWS_LLM_STRUCTURED_EXTRA='{"chat_template_kwargs":{"enable_thinking":false}}'
-NEWS_EMBED_BASE_URL=http://127.0.0.1:8081/v1
+NEWS_EMBED_BASE_URL=http://127.0.0.1:11430/v1
 NEWS_EMBED_MODEL=qwen3-embedding
 ```
 
-Prompt 2 sends up to `NEWS_CONTEXT_BUDGET_CHARS` (200k chars ≈ 50k tokens), so the chat server needs that context per slot (`-c` / `-np`). Before switching embeddings, check that the new server returns the same vectors as the old Ollama model (else stored and new vectors don't compare): `model_check.py --embed-vs-ollama <old Ollama model> --only embed` (cosine ≥ 0.99 = no re-embed needed), then run `model_check.py` to smoke-test all roles.
+Prompt 2 sends up to `NEWS_CONTEXT_BUDGET_CHARS` (200k chars ≈ 50k tokens), so the chat server needs sufficient context per slot.
 
-Before switching, compare the candidate with the current model on the bundled fictional test cases (no database needed):
+**Option B — Ollama native**: leave `NEWS_LLM_BASE_URL` and `NEWS_EMBED_BASE_URL` empty and set `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`), `NEWS_CHAT_MODEL` (e.g. `qwen3:14b`) and `NEWS_EMBED_MODEL` (`qwen3-embedding:0.6b`). Structured calls use `/api/chat` with `format` and `think: false`, embeddings use `/api/embed`, and `NEWS_OLLAMA_KEEP_ALIVE` keeps models loaded between worker cycles.
+
+Before switching models or backends, smoke-test all roles on the bundled fictional test cases (no database needed):
 
 ```bash
-uv run python scripts/benchmark/model_check.py --save current.json                       # current models
-uv run python scripts/benchmark/model_check.py --model qwen3:8b --baseline current.json  # all LLM roles
-uv run python scripts/benchmark/model_check.py --verify-model gemma3:12b --only verify --baseline current.json
-uv run python scripts/benchmark/model_check.py --embed-model bge-m3 --only embed
+uv run --env-file .env python scripts/benchmark/model_check.py --save current.json
+uv run --env-file .env python scripts/benchmark/model_check.py --model qwen3:8b --baseline current.json
+uv run --env-file .env python scripts/benchmark/model_check.py --embed-vs-ollama qwen3-embedding:0.6b --only embed
 ```
 
-It prints per-role scores (verifier merge F1 and class accuracy, quality ordering and breaking accuracy, valid Prompt 2 replies and update-significance accuracy, embedding AUC and recall at the retrieval threshold), the median latency, and PASS / WARN / FAIL against minimum bars (exit code 1 on FAIL). It is a smoke test: for the verifier, also run `scripts/benchmark/benchmark_clustering.py --labels <pairs> --llm` on labeled pairs from your own database.
+It prints per-role scores (verifier merge F1 and class accuracy, quality ordering and breaking accuracy, valid Prompt 2 replies and update-significance accuracy, embedding AUC and recall at the retrieval threshold), the median latency, and PASS / WARN / FAIL against minimum bars (exit code 1 on FAIL). `--embed-vs-ollama` checks that `NEWS_EMBED_BASE_URL` returns vectors compatible with an Ollama model (cosine ≥ 0.99 = no re-embed needed). For the verifier, also run `scripts/benchmark/benchmark_clustering.py --labels <pairs> --llm` on labeled pairs from your own database.
 
 A new embedding model changes the cosine scale: re-check `NEWS_CLUSTER_*`, `NEWS_MERGE_SIM_THRESHOLD`, `NEWS_SPLIT_*` and `NEWS_SEARCH_MIN_SIM` (`scripts/search_probe.py`), and with a different dimension start with a new database or re-embed all articles (the `Article_Vectors` table is created with `NEWS_EMBED_DIM`).
 
@@ -221,11 +217,11 @@ flowchart TD
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `OLLAMA_BASE_URL` / `NEWS_OLLAMA_KEEP_ALIVE` | `http://127.0.0.1:11434` / `15m` | Ollama server / model keep-alive |
-| `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | `qwen3:14b` / `qwen3-embedding:0.6b` / `1024` | Default LLM and embedding model (see [Swapping models](#swapping-models)) |
+| `NEWS_LLM_BASE_URL` / `NEWS_LLM_API_KEY` / `NEWS_LLM_STRUCTURED_EXTRA` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (`llama serve` / `llama-server`, …) for all LLM calls, Bearer key, extra JSON for structured calls |
+| `NEWS_EMBED_BASE_URL` / `NEWS_EMBED_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (`llama serve --embedding`, …) for embeddings |
+| `NEWS_CHAT_MODEL` / `NEWS_EMBED_MODEL` / `NEWS_EMBED_DIM` | `qwen3-27b-IQ3` / `qwen3-embedding` / `1024` | Default LLM and embedding model (see [Model backends & swapping models](#model-backends--swapping-models)) |
 | `NEWS_VERIFY_MODEL` / `NEWS_ASSESS_MODEL` / `NEWS_STORY_MODEL` | empty (= `NEWS_CHAT_MODEL`) | Per-role LLMs: event verifier, article quality, story writer |
-| `NEWS_LLM_BASE_URL` / `NEWS_LLM_API_KEY` / `NEWS_LLM_STRUCTURED_EXTRA` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (`llama-server`, …) for all LLM calls, Bearer key, extra JSON for structured calls |
-| `NEWS_EMBED_BASE_URL` / `NEWS_EMBED_API_KEY` | empty (Ollama native) | OpenAI-compatible `/v1` endpoint (`llama-server --embedding`, …) for embeddings |
+| `OLLAMA_BASE_URL` / `NEWS_OLLAMA_KEEP_ALIVE` | `http://127.0.0.1:11434` / `15m` | Ollama server / model keep-alive (used when `NEWS_LLM_BASE_URL` / `NEWS_EMBED_BASE_URL` are unset) |
 | `NEWS_WORKER_INTERVAL` / `NEWS_PIPELINE_BATCH` / `NEWS_EMBED_BATCH` | `300` / `50` / `16` | Ingest interval (s) / pipeline batch / texts per embed call |
 | `NEWS_PIPELINE_MAX_FAILURES` / `NEWS_BACKLOG_LOW_TRUST_BELOW` | `3` / `0.5` | Dead-letter threshold / trust cutoff processed last in backlog |
 | `NEWS_PIPELINE_MAX_TIMEOUTS` / `NEWS_PIPELINE_TIMEOUT_BACKOFF_MINUTES` | `6` / `15` | Ollama timeouts don't count as failures: the article retries after a doubling delay and the run pauses; parked after this many in a row |
@@ -265,7 +261,7 @@ flowchart TD
 
 ## Database & Layout
 
-`news.db` (SQLite WAL, foreign keys, `sqlite-vec`, auto-migrated via `PRAGMA user_version` in `app/db.py`). Copy it while the server runs with `uv run python -c "import sqlite3; sqlite3.connect('news.db').execute(\"VACUUM INTO 'news-copy.db'\")"` (a plain `cp` of a live WAL database can tear):
+`news.db` (SQLite WAL, foreign keys, `sqlite-vec`, initialized idempotently by `app/db.py` + `app/schema.sql`). Copy it while the server runs with `uv run python -c "import sqlite3; sqlite3.connect('news.db').execute(\"VACUUM INTO 'news-copy.db'\")"` (a plain `cp` of a live WAL database can tear):
 - **Shared tables**: `Feed` (incl. general `trust`), `FeedCategory` (trust per category), `Article` (timings, `content_class`, `quality`, `duplicate_of`), `Article_Vectors` (`vec0 FLOAT[1024]`), `Story` (`headline`, `summary`, `tags`, `metrics`, `quality_score`, `news_at`, `material_at`, `merge_checked_at`), `StoryLink` (pair verdicts for merge skip + related stories), `StoryAlias` (merged-away ids → surviving story), `StoryUpdate` (new facts per rated update), `ArticleTombstone`, `TagAlias` + `TagVector` (tag synonyms and their embedding cache), `StorySearch` (FTS5, kept in sync by triggers), `ReportSent` (scheduled ntfy reports sent today).
 - **Per-user tables**: `AppUser`, `AuthSession` (hashed tokens), `UserProfile` (weights, feed overrides, exclusions, `about`, `home_*`, ntfy schedules), `StoryRead`, `FeedbackLog`, `MarkChange` (time of the last read/vote change, so stale offline replays lose), `ChatSession` (`seen_id` = unread tracking) + `ChatMessage` (branching tree + agent `steps`), `ShareLink`.
 
@@ -276,14 +272,14 @@ app/
   routes/                       One APIRouter per area (stories, chat, auth, profile, share, admin, feeds, ...); no SQL
   auth.py, users.py, bus.py     scrypt/session auth, user administration, SSE bus
   stories.py, chat_history.py, share.py, feeds.py   Story payloads & read marks, chat tree, share links, feed management
-  db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, migrations (one-off review data: tag_review.py, feed_review.py), env config
+  db.py, schema.sql, config.py  SQLite + sqlite-vec bootstrap, schema, env config
   ingest.py, content_quality.py, dedup.py, retention.py
   pipeline.py, clustering.py, merge.py, split.py, harness.py, story.py, scoring.py, diversity.py, tags.py, tag_merge.py
   heads_up.py, reports.py, chat.py, chat_jobs.py, searchngx.py, search.py, worker.py
   frontend/                     vanilla JS/CSS UI (index, list, chats, feeds, admin, share)
 scripts/                start.sh, shutdown.sh, pipeline_report.py, compare_rankings.py, recluster_stories.py, split_stories.py, rescore_metrics.py, merge_tags.py, search_probe.py, benchmark/ (model_check.py, benchmark_clustering.py)
-tests/                  pytest suite (API, security, pipeline, merge, split, scoring, search, read, reports, ingest, migrations, frontend JS syntax via tree-sitter)
-docs/                   algorithms.md (ranking), performance.md (2026-10 AI quality audit), project_plan.md (original design), future_ideas.md, screenshot.png
+tests/                  pytest suite (API, security, pipeline, merge, split, scoring, search, read, reports, ingest, frontend JS syntax via tree-sitter)
+docs/                   algorithms.md (ranking), future_ideas.md, screenshot.png
 ```
 
 ## License

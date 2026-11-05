@@ -7,8 +7,8 @@ Last verified against the code: 2026-10-26 (ranking v2.1).
 
 ## Stack at a glance
 
-- FastAPI + SQLite (WAL, ~200 MB `news.db`), `sqlite-vec` for embeddings (cosine, 1024-dim `qwen3-embedding:0.6b-CPU`)
-- LLM via Ollama (tuned on a Qwen3 27B, Q3 quant) at `OLLAMA_BASE_URL` (env `NEWS_CHAT_MODEL`, per-role overrides `NEWS_VERIFY_MODEL` / `NEWS_ASSESS_MODEL` / `NEWS_STORY_MODEL`)
+- FastAPI + SQLite (WAL, ~200 MB `news.db`), `sqlite-vec` for embeddings (cosine, 1024-dim `Qwen3-Embedding-0.6B` on CPU)
+- Local LLM (`Qwen3 27B` IQ3_XXS on GPU) + embeddings via `llama.cpp` (`NEWS_LLM_BASE_URL` / `NEWS_EMBED_BASE_URL`) or Ollama (`OLLAMA_BASE_URL`), with `NEWS_CHAT_MODEL` and optional per-role overrides (`NEWS_VERIFY_MODEL` / `NEWS_ASSESS_MODEL` / `NEWS_STORY_MODEL`)
 - Two LLM prompts per article: **Prompt 1** (`app/harness.py`) = quality assessment; **Prompt 2** (`app/story.py`) = story build/update
 - Config: `app/config.py`, all overridable via `NEWS_*` env vars
 
@@ -50,7 +50,7 @@ list     = MMR rerank of the top 50 (app/diversity.py)                 # both vi
 | soft_cap | linear to 0.8, then `0.8 + 0.2·tanh((x-0.8)/0.2)` — no ties among the best stories |
 
 - **Mute**: a tag at weight ≤ -10 hides its stories from "For you" (hard filter, not a penalty); an explicit tag filter still shows them.
-- **Tag list vs learned weights**: `UserProfile.tag_weights` is only what the user set. 👍/👎 (±2/√n per tag, half-life up 60 d / down 90 d) and story chats (+1/√n, 90 d) are derived at ranking time from `FeedbackLog`/`ChatSession` (`inferred_weights`, never stored). Migration v8 removed weights that votes alone had written (179 → 71 tags on the owner profile).
+- **Tag list vs learned weights**: `UserProfile.tag_weights` is only what the user set. 👍/👎 (±2/√n per tag, half-life up 60 d / down 90 d) and story chats (+1/√n, 90 d) are derived at ranking time from `FeedbackLog`/`ChatSession` (`inferred_weights`, never stored).
 - **For Everyone** = `public` only (no tags, no location, the general source trust from the Feeds page).
 - **Archive** = older than `STORY_ACTIVE_DAYS`, newest first, not scored.
 - Every knob is `NEWS_*` env-overridable (`app/config.py`, "Ranking v2"). Weights are starting hypotheses, not validated constants.
@@ -80,8 +80,8 @@ Other consumers: heads-up brief = top 5 of the same ranking (personal: unread or
 
 - Static aliases: unambiguous EN/DE pairs (`ki→ai`, `munchen→munich`, `politik→politics`, `wirtschaft→economy`, …). Tags with several meanings (`tags.AMBIGUOUS_TAGS`: `bayern` = state or club, `sicherheit` = security or safety, `entwicklung`, `beziehung(en)`, `netzwerk`, `storage`) never merge: the pass doesn't propose them and approved rows with them are ignored.
 - `TagAlias` table, applied at read time by `normalize_tag`, so stored stories and tag lists follow without rewrites; merged tag weights keep the strongest value, never the sum.
-- Daily worker pass (`TAG_MERGE_*`): tags on ≥ 3 stories or on a tag list → `qwen3-embedding` (cached in `TagVector`) → cosine kNN ≥ 0.80 → LLM verifier (`SAME_CONCEPT | BROADER | NARROWER | RELATED | AMBIGUOUS | UNRELATED`). Auto-approve only `SAME_CONCEPT` with cosine ≥ 0.90 and confidence ≥ 0.9; other `SAME_CONCEPT` → pending; everything else → rejected (not asked again). Review: `scripts/merge_tags.py list|approve|reject|add`. The first hand review (2026-10-28: 60 approved, 15 rejected, `smart home → everything smart home` revoked) is migration v11 (`app/tag_review.py`).
-- Thresholds are **uncalibrated** (Ollama was unreachable from the dev machine). Calibrate with `scripts/merge_tags.py neighbours --min-sim 0.7` and `propose --dry-run` before trusting auto-approval.
+- Daily worker pass (`TAG_MERGE_*`): tags on ≥ 3 stories or on a tag list → `qwen3-embedding` (cached in `TagVector`) → cosine kNN ≥ 0.80 → LLM verifier (`SAME_CONCEPT | BROADER | NARROWER | RELATED | AMBIGUOUS | UNRELATED`). Auto-approve only `SAME_CONCEPT` with cosine ≥ 0.90 and confidence ≥ 0.9; other `SAME_CONCEPT` → pending; everything else → rejected (not asked again). Review: `scripts/merge_tags.py list|approve|reject|add`.
+- Calibrate thresholds if needed with `scripts/merge_tags.py neighbours --min-sim 0.7` and `propose --dry-run`.
 
 ## Available data (raw material for expanding the algorithm)
 

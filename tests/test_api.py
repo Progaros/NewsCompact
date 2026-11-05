@@ -564,3 +564,19 @@ def test_auth_allowlist(client, story, monkeypatch):
     assert client.post("/api/auth/login", json={"password": "secret"}).status_code == 200
     assert get("/api/feeds") == 200
     auth._failures.clear()
+
+
+def test_init_db_recovers_interrupted_chat_steps(story):
+    with db.get_conn() as conn:
+        assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+        assert conn.execute("SELECT trust FROM FeedCategory WHERE name = 'Reddit'").fetchone()[0] == 0.2
+        sid = conn.execute("INSERT INTO ChatSession (user_id, story_id) VALUES (1, ?)", (story,)).lastrowid
+        mid = conn.execute(
+            "INSERT INTO ChatMessage (session_id, role, content, steps) VALUES (?, 'assistant', '', ?)",
+            (sid, '[{"id": 0, "kind": "search", "title": "Searching", "status": "running"}]'),
+        ).lastrowid
+    db.init_db()
+    with db.get_conn() as conn:
+        steps = db.json_list(conn.execute("SELECT steps FROM ChatMessage WHERE id = ?", (mid,)).fetchone()[0])
+    assert steps[0]["status"] == "warn" and "(stopped)" in steps[0]["title"]
+    assert steps[-1]["kind"] == "stopped"

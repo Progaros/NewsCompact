@@ -1,4 +1,4 @@
-"""Quick check whether an LLM / embedding model is good enough for this app (needs Ollama, no database).
+"""Quick check whether an LLM / embedding model is good enough for this app (no database needed).
 
 Runs the production prompts (app/harness.py, app/story.py) on the fictional cases in
 model_check_cases.json and scores each role:
@@ -7,19 +7,18 @@ model_check_cases.json and scores each role:
   assess  article quality + breaking flag: high-vs-low quality ordering, breaking accuracy
   story   Prompt 2: schema-valid replies, summary length, language/location/metrics, update significance
   embed   embedding model: dimension, AUC of same-event vs other-event pairs, share of
-          same-event pairs above the retrieval threshold (the thresholds were tuned on qwen3-embedding)
+          same-event pairs above the retrieval threshold (tuned on Qwen3-Embedding-0.6B)
 
 It is a smoke test, not a calibration: a model that fails here won't work, one that passes
 should still be compared on your own data (benchmark_clustering.py --llm). Run it with the
 current models first and --save the result, then compare a candidate with --baseline.
 
 Examples:
-    uv run python scripts/benchmark/model_check.py --save current.json
-    uv run python scripts/benchmark/model_check.py --model qwen3:8b --baseline current.json
-    uv run python scripts/benchmark/model_check.py --verify-model gemma3:12b --only verify
-    uv run python scripts/benchmark/model_check.py --embed-model bge-m3 --only embed
-    NEWS_EMBED_BASE_URL=http://127.0.0.1:8081/v1 NEWS_EMBED_MODEL=qwen3-embedding \
-      uv run python scripts/benchmark/model_check.py --embed-vs-ollama qwen3-embedding:0.6b --only embed
+    uv run --env-file .env python scripts/benchmark/model_check.py --save current.json
+    uv run --env-file .env python scripts/benchmark/model_check.py --model qwen3:8b --baseline current.json
+    uv run --env-file .env python scripts/benchmark/model_check.py --verify-model gemma3:12b --only verify
+    uv run --env-file .env python scripts/benchmark/model_check.py --embed-model bge-m3 --only embed
+    uv run --env-file .env python scripts/benchmark/model_check.py --embed-vs-ollama qwen3-embedding:0.6b --only embed
 """
 from __future__ import annotations
 
