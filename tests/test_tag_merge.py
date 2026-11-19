@@ -93,3 +93,19 @@ def test_ambiguous_tags_never_merge(fake):
     finally:
         del CONCEPTS["bayern"], CONCEPTS["bayern munich"]
     assert not any("bayern" in pair for pair in fake["verified"])  # not even asked
+
+
+def test_admin_tag_alias_api_lists_and_reviews(client, fake):
+    tag_merge.run()
+    r = client.get("/api/admin/tag-aliases?status=pending")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["counts"]["pending"] >= 1
+    pair = body["aliases"][0]
+    res = client.post("/api/admin/tag-aliases/review", json={
+        "alias": pair["alias"], "canonical": pair["canonical"], "status": "approved",
+    })
+    assert res.status_code == 200 and res.json()["changed"] == 1
+    after = client.get("/api/admin/tag-aliases?status=pending").json()
+    assert after["counts"]["pending"] == body["counts"]["pending"] - 1
+    assert after["counts"]["approved"] == body["counts"]["approved"] + 1

@@ -244,3 +244,37 @@ def test_failing_feed_backs_off_and_recovers(feed_id, monkeypatch):
     with db.get_conn() as conn:
         assert tuple(conn.execute("SELECT fetch_failures, next_fetch_at, last_error FROM Feed").fetchone()) == (
             0, None, None)
+
+
+def test_extract_content_empty_html_returns_empty():
+    assert ingest.extract_content("", "https://example.com/empty") == ""
+    assert ingest.extract_content("   \n\t  ", "https://example.com/ws") == ""
+
+
+def test_ingest_all_caps_per_host_concurrency(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(config, "FETCH_CONCURRENCY", 6)
+    monkeypatch.setattr(config, "FETCH_PER_HOST_CONCURRENCY", 1)
+    with db.get_conn() as conn:
+        for i in range(4):
+            conn.execute("INSERT INTO Feed (title, xml_url, enabled) VALUES (?, ?, 1)",
+                         (f"Same {i}", f"https://same-host.example/feed{i}.xml"))
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow_fetch(url, *_a):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return _response(_rss())
+
+    monkeypatch.setattr(ingest, "fetch", slow_fetch)
+    ingest.ingest_all()
+    assert peak == 1

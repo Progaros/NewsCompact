@@ -18,7 +18,9 @@ import socket
 import threading
 import urllib.request
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any
+from urllib.parse import urlsplit
 
 import feedparser
 import httpcore
@@ -27,6 +29,8 @@ import httpx
 from . import config, content_quality, db, dedup
 
 log = logging.getLogger("news.ingest")
+# trafilatura logs empty/non-HTML pages at ERROR; ingest handles fallbacks and logs at DEBUG.
+logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
 
 _client: httpx.Client | None = None
 _client_lock = threading.Lock()
@@ -233,6 +237,8 @@ def _usable(text: str | None) -> bool:
 
 def extract_content(html: str, url: str) -> str:
     """Best-effort article text via the extraction fallback chain ("" if nothing usable)."""
+    if not html or not html.strip():
+        return ""
     try:
         from trafilatura import extract
 
@@ -333,37 +339,39 @@ def ingest_feed(feed: dict[str, Any], should_stop: Callable[[], bool] = lambda: 
 
     new = 0
     too_old = _retention_cutoff()
-    with db.get_conn() as conn:
-        if r.status_code != 304:
-            parsed = feedparser.parse(r.content, resolve_relative_uris=False, sanitize_html=False)
-            entries = parsed.entries[: config.MAX_ITEMS_PER_FEED]
-            for entry in entries:
-                if should_stop():
-                    return new  # Feed row (ETag) untouched: the rest comes with the next run
-                link = (entry.get("link") or "").strip() or None
-                title = (entry.get("title") or "").strip()
-                if not link and not title:
-                    continue
+    if r.status_code != 304:
+        parsed = feedparser.parse(r.content, resolve_relative_uris=False, sanitize_html=False)
+        entries = parsed.entries[: config.MAX_ITEMS_PER_FEED]
+        for entry in entries:
+            if should_stop():
+                return new  # Feed row (ETag) untouched: the rest comes with the next run
+            link = (entry.get("link") or "").strip() or None
+            title = (entry.get("title") or "").strip()
+            if not link and not title:
+                continue
+            published = _published_utc(entry)
+            if published and too_old and published < too_old:
+                continue  # would be deleted by retention right away
+            ukey, tkey = dedup.url_key(link), dedup.title_key(title)
+            with db.get_conn() as conn:
                 if link and conn.execute(
                     "SELECT 1 FROM Article WHERE url = ? UNION ALL SELECT 1 FROM ArticleTombstone WHERE url = ?",
                     (link, link),
                 ).fetchone():
                     continue
-                published = _published_utc(entry)
-                if published and too_old and published < too_old:
-                    continue  # would be deleted by retention right away
-                ukey, tkey = dedup.url_key(link), dedup.title_key(title)
                 original = dedup.find_original(conn, ukey, tkey)
-                content = content_quality.clean_body(_entry_description(entry))
-                post, comments = content_quality.split_post(content)
-                if (feed["enabled"] and original is None and _worth_fetching(link)
-                        and len(post.split()) < config.EXTRACT_MIN_DESC_WORDS):
-                    try:
-                        page = content_quality.clean_body(fetch_page_text(link))
-                        if page:
-                            content = f"{page}\n\n{comments}" if comments else page
-                    except Exception as e:  # noqa: BLE001
-                        log.debug("page fetch failed %s: %s", link, e)
+            # Fetch full-text page outside any DB connection so network I/O never holds SQLite.
+            content = content_quality.clean_body(_entry_description(entry))
+            post, comments = content_quality.split_post(content)
+            if (feed["enabled"] and original is None and _worth_fetching(link)
+                    and len(post.split()) < config.EXTRACT_MIN_DESC_WORDS):
+                try:
+                    page = content_quality.clean_body(fetch_page_text(link))
+                    if page:
+                        content = f"{page}\n\n{comments}" if comments else page
+                except Exception as e:  # noqa: BLE001
+                    log.debug("page fetch failed %s: %s", link, e)
+            with db.get_conn() as conn:
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO Article (feed_id, title, url, author, content_raw, "
                     "content_class, hero_image_url, published_date, created_at, url_key, title_key, "
@@ -378,6 +386,8 @@ def ingest_feed(feed: dict[str, Any], should_stop: Callable[[], bool] = lambda: 
                     first = dedup.find_original(conn, ukey, tkey)
                     if first is not None and first != cur.lastrowid:
                         conn.execute("UPDATE Article SET duplicate_of = ? WHERE id = ?", (first, cur.lastrowid))
+
+    with db.get_conn() as conn:
         conn.execute(
             "UPDATE Feed SET last_fetched_at = ?, etag = ?, last_modified = ?, last_error = NULL, "
             "fetch_failures = 0, next_fetch_at = NULL WHERE id = ?",
@@ -399,9 +409,23 @@ def ingest_all(on_new: Callable[[], None] | None = None,
             sql += f" LIMIT {int(config.MAX_FEEDS_PER_RUN)}"
         feeds = [dict(r) for r in conn.execute(sql)]
 
+    per_host = config.FETCH_PER_HOST_CONCURRENCY
+    host_sems: dict[str, threading.Semaphore] = {}
+    if per_host > 0:
+        for f in feeds:
+            host = (urlsplit(f["xml_url"]).hostname or "").lower()
+            if host and host not in host_sems:
+                host_sems[host] = threading.Semaphore(per_host)
+
+    def _run_feed(f: dict[str, Any]) -> int:
+        host = (urlsplit(f["xml_url"]).hostname or "").lower()
+        sem = host_sems.get(host)
+        with (sem if sem is not None else nullcontext()):
+            return ingest_feed(f, should_stop)
+
     total = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.FETCH_CONCURRENCY) as ex:
-        futures = {ex.submit(ingest_feed, f, should_stop): f for f in feeds}
+        futures = {ex.submit(_run_feed, f): f for f in feeds}
         for fut in concurrent.futures.as_completed(futures):
             try:
                 n = fut.result()

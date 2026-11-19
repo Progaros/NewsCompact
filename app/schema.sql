@@ -60,8 +60,9 @@ CREATE TABLE IF NOT EXISTS Article (
     title_key         TEXT       -- normalized title (dedup.title_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_article_story     ON Article(story_id);
-CREATE INDEX IF NOT EXISTS idx_article_feed      ON Article(feed_id);
+CREATE INDEX IF NOT EXISTS idx_article_story       ON Article(story_id);
+CREATE INDEX IF NOT EXISTS idx_article_story_stats ON Article(story_id, duplicate_of, created_at DESC, feed_id, quality, content_class);
+CREATE INDEX IF NOT EXISTS idx_article_feed        ON Article(feed_id);
 CREATE INDEX IF NOT EXISTS idx_article_created   ON Article(created_at);
 CREATE INDEX IF NOT EXISTS idx_article_url_key   ON Article(url_key);
 CREATE INDEX IF NOT EXISTS idx_article_title_key ON Article(title_key);
@@ -196,6 +197,7 @@ CREATE TABLE IF NOT EXISTS StoryUpdate (
     event_at     TEXT                -- publication time of the triggering article (ranking); NULL = created_at
 );
 CREATE INDEX IF NOT EXISTS idx_storyupdate_story ON StoryUpdate(story_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_storyupdate_event ON StoryUpdate(COALESCE(event_at, created_at));
 
 -- URLs of deleted articles, so feeds that still list them don't re-ingest them.
 CREATE TABLE IF NOT EXISTS ArticleTombstone (

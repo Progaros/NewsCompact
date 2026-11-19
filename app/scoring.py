@@ -132,15 +132,21 @@ def feed_trust_list(conn: sqlite3.Connection, profile: dict[str, Any]) -> list[d
 
 
 _FEED_HOST_PREFIXES = ("www.", "feeds.", "feed.", "rss.", "nachrichtenfeeds.")
+_FEED_PROXY_HOSTS = frozenset({"feedburner.com"})
 
 
 def outlet_key(site_url: str | None, xml_url: str | None) -> str:
     """The publisher behind a feed: site host without feed subdomains, mapped through OUTLET_GROUPS."""
     for url in (site_url, xml_url):
-        host = (urlsplit(url or "").hostname or "").lower()
+        parts = urlsplit(url or "")
+        host = (parts.hostname or "").lower()
         if host:
             for prefix in _FEED_HOST_PREFIXES:
                 host = host.removeprefix(prefix)
+            if host in _FEED_PROXY_HOSTS:
+                slug = next((p for p in parts.path.split("/") if p), "")
+                if slug:
+                    return f"{host}/{slug.lower()}"
             return config.OUTLET_GROUPS.get(host, host)
     return ""
 
@@ -233,11 +239,14 @@ def source_stats(conn: sqlite3.Connection, trust: dict[int, float],
             latest[key] = max(latest.get(key, ""), r["created_at"] or "")
         quals.setdefault(sid, []).append((r["id"], r["duplicate_of"], r["quality"], w))
     now = _now()
+    heat_hl = config.VELOCITY_OUTLET_HALF_LIFE_HOURS
+    heat_cutoff = (now - dt.timedelta(hours=max(24.0, 10 * heat_hl))).strftime("%Y-%m-%d %H:%M:%S")
     out = {}
     for sid, fids in feeds.items():
         quality = median_quality(quals.get(sid, []))
-        heat = sum(w * _fade(_hours_since(newest[sid][k], now) or 0.0, config.VELOCITY_OUTLET_HALF_LIFE_HOURS)
-                   for k, w in outlets[sid].items() if newest[sid].get(k))
+        sid_newest = newest[sid]
+        heat = sum(w * _fade(_hours_since(ts, now) or 0.0, heat_hl)
+                   for k, w in outlets[sid].items() if (ts := sid_newest.get(k)) and ts >= heat_cutoff)
         out[sid] = {"feeds": len(fids), "outlets": len(outlets[sid]), "trust": sum(outlets[sid].values()),
                     "quality": quality, "heat": heat}
     return out
@@ -434,14 +443,15 @@ def soft_cap(x: float) -> float:
 def score_story(story: sqlite3.Row, stats: dict[str, Any], profile: dict[str, Any], *,
                 personal: bool = True, dynamics: dict[str, float] | None = None,
                 freq: tuple[int, dict[str, int]] | None = None,
-                now: dt.datetime | None = None) -> tuple[dict[str, Any], float]:
+                now: dt.datetime | None = None,
+                tags: list[str] | None = None) -> tuple[dict[str, Any], float]:
     """Return ``(breakdown, score 0..100)`` for one story.
 
     ``stats`` = the story's ``source_stats`` entry, ``dynamics`` its ``story_dynamics`` entry,
     ``freq`` = ``tag_frequencies`` (specificity of inferred weights). ``personal=False``
     (default view) leaves out tags and location.
     """
-    tags = story_tags(story)
+    tags = story_tags(story) if tags is None else tags
     metrics = db.json_dict(story["metrics"])
     quality = stats.get("quality")
     q = _clamp01(_float(quality if quality is not None else story["quality_score"], 5.0) / 10.0)
@@ -610,10 +620,11 @@ def ranked_stories(conn: sqlite3.Connection, profile: dict[str, Any] | None = No
         quality = st["quality"] if st["quality"] is not None else (s["quality_score"] or 0)
         if quality < min_quality:
             continue
-        if wanted_tag and wanted_tag not in story_tags(s):
+        tags = story_tags(s) if wanted_tag else None
+        if wanted_tag and wanted_tag not in tags:
             continue
         relevance, display = score_story(s, st, profile, personal=personal, dynamics=dynamics.get(s["id"]),
-                                         freq=freq, now=now)
+                                         freq=freq, now=now, tags=tags)
         if relevance["muted"] and not wanted_tag:
             continue
         state = reads.get(s["id"], {"read": None})

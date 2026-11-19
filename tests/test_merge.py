@@ -177,3 +177,24 @@ def test_shared_headline_terms_find_duplicates_embeddings_miss(feed_id, llm, mon
     with db.get_conn() as conn:
         rows = conn.execute("SELECT news_at > datetime('now', '-2 hours') FROM Story").fetchall()
     assert len(rows) == 1 and rows[0][0] == 1  # the merged story keeps the newest news time
+
+
+def test_link_stories_resolves_alias_and_skips_deleted_story(feed_id):
+    from app import clustering
+
+    with db.get_conn() as conn:
+        s1 = conn.execute("INSERT INTO Story (headline) VALUES ('One')").lastrowid
+        s2 = conn.execute("INSERT INTO Story (headline) VALUES ('Two')").lastrowid
+        s3 = conn.execute("INSERT INTO Story (headline) VALUES ('Three')").lastrowid
+        conn.execute("INSERT INTO StoryAlias (old_id, story_id) VALUES (?, ?)", (99999, s2))
+        # Linking to a deleted/missing story must not raise IntegrityError.
+        clustering.link_stories(conn, s1, 88888, "SAME_TOPIC_DISTINCT_EVENT", "article")
+        assert conn.execute("SELECT count(*) FROM StoryLink").fetchone()[0] == 0
+        # Linking to an aliased story resolves to the surviving story.
+        clustering.link_stories(conn, s1, 99999, "SAME_TOPIC_DISTINCT_EVENT", "article")
+        rows = conn.execute("SELECT a, b FROM StoryLink").fetchall()
+        assert [tuple(r) for r in rows] == [tuple(sorted((s1, s2)))]
+        # Linking an alias that resolves to the same story is a no-op.
+        clustering.link_stories(conn, s2, 99999, "SAME_TOPIC_DISTINCT_EVENT", "article")
+        assert conn.execute("SELECT count(*) FROM StoryLink").fetchone()[0] == 1
+        assert s3 is not None

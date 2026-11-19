@@ -92,6 +92,8 @@ PIPELINE_TIMEOUT_BACKOFF_MINUTES = _float("NEWS_PIPELINE_TIMEOUT_BACKOFF_MINUTES
 
 # --- Ingestion -------------------------------------------------------------
 FETCH_CONCURRENCY = _int("NEWS_FETCH_CONCURRENCY", 16)
+# Cap simultaneous feed fetches to the same host (prevents hammering self-hosted proxies like upvoterss).
+FETCH_PER_HOST_CONCURRENCY = _int("NEWS_FETCH_PER_HOST_CONCURRENCY", 2)
 FETCH_TIMEOUT = _float("NEWS_FETCH_TIMEOUT", 20)
 USER_AGENT = _env(
     "NEWS_USER_AGENT",
@@ -215,9 +217,11 @@ READER_FACTOR = _weights("NEWS_READER_FACTOR", "read=0.2,updated=0.5,updated_maj
 OFFLINE_MARK_MAX_HOURS = 24
 # List-level MMR rerank of the first DIVERSITY_POOL stories: λ·score - (1-λ)·max similarity
 # to a story placed above; cosines below DIVERSITY_SIM_FLOOR count as unrelated.
-DIVERSITY_POOL = _int("NEWS_DIVERSITY_POOL", 50)
+# Single-outlet stories also decay by DIVERSITY_OUTLET_DECAY^n per earlier story from the same outlet.
+DIVERSITY_POOL = _int("NEWS_DIVERSITY_POOL", 150)
 DIVERSITY_LAMBDA = _float("NEWS_DIVERSITY_LAMBDA", 0.82)
 DIVERSITY_SIM_FLOOR = _float("NEWS_DIVERSITY_SIM_FLOOR", 0.5)
+DIVERSITY_OUTLET_DECAY = _float("NEWS_DIVERSITY_OUTLET_DECAY", 0.82)
 DIVERSITY_LINK_SIM = _weights("NEWS_DIVERSITY_LINK_SIM",
                               "CONTINUING_DEVELOPMENT=0.95,SAME_TOPIC_DISTINCT_EVENT=0.75")
 # Personal: value = public + W_AFFINITY·tag_affinity (-1..1) + W_GEO·geo (0..1)

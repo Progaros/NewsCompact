@@ -71,8 +71,9 @@ _SIGNIFICANCE_GUIDE = (
 _SYSTEM_INCREMENTAL = (
     "You are updating an active news story. Review the Current Summary and the "
     "New Article. If the New Article introduces material updates, rewrite the "
-    "summary in 2-4 factual sentences to incorporate them while keeping the key "
-    "facts already in it. If it adds no new "
+    "summary in 2-4 concise factual sentences (never more than 5 sentences) to "
+    "incorporate them, replacing older minor details rather than appending new "
+    "sentences onto the Current Summary. If it adds no new "
     "facts, return the Current Summary exactly as written. Headline: return the Current "
     "Headline unchanged unless the New Article is a notable or major development "
     "(update_significance 2-3); then rewrite it so it names the story's core event and where "
@@ -291,7 +292,6 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
     schema = _RATED_SCHEMA if rated else _SCHEMA
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     out = _ask(schema, messages, story_id)
-    _log_violations(story_id, out)
     summary = (out.get("summary") or "").strip()
     if len(summary) > config.SUMMARY_MAX_CHARS:
         try:
@@ -305,6 +305,7 @@ def update_story(conn: sqlite3.Connection, story_id: int, *, breaking: bool = Fa
         except (ValueError, httpx.HTTPError) as e:
             log.warning("Prompt2 shortening failed for story %s: %s", story_id, e)
         out["summary"] = clip_summary(summary)
+    _log_violations(story_id, out)
 
     metrics = sanitize_metrics(out.get("metrics"))
     if breaking:

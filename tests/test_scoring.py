@@ -144,6 +144,9 @@ def test_feed_subdomains_and_outlet_groups_are_one_outlet(monkeypatch):
     assert scoring.outlet_key(None, "https://nachrichtenfeeds.br.de/rdf") == "br.de"
     assert scoring.outlet_key("https://www.deutschlandfunkkultur.de/", None) == "deutschlandfunk.de"
     assert scoring.outlet_key(None, "https://googleprojectzero.blogspot.com/feeds") == "googleprojectzero.blogspot.com"
+    assert scoring.outlet_key(None, "https://feeds.feedburner.com/netzwelt") == "feedburner.com/netzwelt"
+    assert scoring.outlet_key(None, "https://feeds.feedburner.com/IntelligenceOnline") == "feedburner.com/intelligenceonline"
+    assert scoring.outlet_key("https://www.intelligenceonline.com", "https://feeds.feedburner.com/IntelligenceOnline") == "intelligenceonline.com"
 
 
 def test_region_hits_match_whole_words():
@@ -249,6 +252,49 @@ def test_diversity_moves_linked_story_below_a_different_one(feed_id):
         out = diversity.rerank(conn, items)
     assert [i["story"]["id"] for i in out] == [a, c, b]
     assert out[2]["relevance"]["similar_to"]["id"] == a
+
+
+def test_diversity_decays_repeated_single_outlet_but_not_multi_outlet(monkeypatch):
+    from app import diversity
+
+    monkeypatch.setattr(config, "DIVERSITY_OUTLET_DECAY", 0.8)
+    with db.get_conn() as conn:
+        f_ax1 = _feed(conn, "arXiv AI", "Journals", site="https://arxiv.org/list/cs.AI")
+        f_ax2 = _feed(conn, "arXiv CR", "Journals", site="https://arxiv.org/list/cs.CR")
+        f_other = _feed(conn, "Heise", "Tech", site="https://www.heise.de/")
+        ax1, ax2, other, multi = (_story(conn, h) for h in ("Paper 1", "Paper 2", "News", "Big paper"))
+        _attach(conn, ax1, f_ax1, "p1", 8)
+        _attach(conn, ax2, f_ax2, "p2", 8)
+        _attach(conn, other, f_other, "n1", 7)
+        _attach(conn, multi, f_ax1, "m1", 8)
+        _attach(conn, multi, f_other, "m2", 8)
+        items = [{"story": {"id": sid, "headline": f"h{sid}"}, "display": score, "relevance": {}}
+                 for sid, score in ((ax1, 100), (ax2, 95), (multi, 90), (other, 88))]
+        out = diversity.rerank(conn, items)
+    # ax1 stays #1; ax2 is decayed (95 * 0.8 = 76) below both multi (unpenalized, 90) and other (88).
+    assert [i["story"]["id"] for i in out] == [ax1, multi, other, ax2]
+
+
+def test_diversity_story_vectors_batches_and_invalidates_cache(feed_id):
+    from app import diversity
+
+    with db.get_conn() as conn:
+        sid = _story(conn, "Vec story")
+        a1 = add_article(feed_id, "a1", content="word " * 120)
+        conn.execute("UPDATE Article SET story_id = ?, content_class = 'ok' WHERE id = ?", (sid, a1))
+        v1 = [1.0] + [0.0] * (config.EMBED_DIM - 1)
+        conn.execute(f"INSERT INTO {db.VECTOR_TABLE} (article_id, embedding) VALUES (?, ?)",
+                     (a1, db.pack_floats(v1)))
+        first = diversity.story_vectors(conn, [sid])[sid]
+        cached = diversity.story_vectors(conn, [sid])[sid]
+        assert first == cached
+        a2 = add_article(feed_id, "a2", content="word " * 120)
+        conn.execute("UPDATE Article SET story_id = ?, content_class = 'ok' WHERE id = ?", (sid, a2))
+        v2 = [0.0, 1.0] + [0.0] * (config.EMBED_DIM - 2)
+        conn.execute(f"INSERT INTO {db.VECTOR_TABLE} (article_id, embedding) VALUES (?, ?)",
+                     (a2, db.pack_floats(v2)))
+        updated = diversity.story_vectors(conn, [sid])[sid]
+        assert updated != first and updated[1] > 0.5
 
 
 def test_compare_rankings_script_demotes_minor_updates(feed_id):

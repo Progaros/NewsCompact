@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from . import clustering, config, db
+from . import config, db
 
 log = logging.getLogger("news.retention")
 
@@ -39,7 +39,7 @@ def run() -> dict[str, int]:
         try:
             conn.executemany("INSERT OR IGNORE INTO ArticleTombstone (url) VALUES (?)",
                              [(r["url"],) for r in articles if r["url"]])
-            clustering.delete_embeddings(conn, [r["id"] for r in articles])
+            # article_vector_delete trigger removes matching Article_Vectors rows on DELETE.
             conn.executemany("DELETE FROM Article WHERE id = ?", [(r["id"],) for r in articles])
             conn.executemany("DELETE FROM Story WHERE id = ?", [(sid,) for sid in stories])
             conn.execute("DELETE FROM ArticleTombstone WHERE deleted_at < ?", (_ago(_TOMBSTONE_DAYS),))

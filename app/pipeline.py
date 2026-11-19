@@ -357,6 +357,9 @@ def process_article(art: dict[str, Any], emit: Callable[[dict], None] | None = N
     return "ok"
 
 
+_server_unreachable = False
+
+
 # --- batch -----------------------------------------------------------------
 def process_pending(*, emit: Callable[[dict], None] | None = None,
                     should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
@@ -365,6 +368,7 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
 
     Each article is tried at most once per call.
     """
+    global _server_unreachable
     repair_placeholder_stories()
     repair_boilerplate_bodies()
     reap_orphaned_stories()
@@ -376,8 +380,15 @@ def process_pending(*, emit: Callable[[dict], None] | None = None,
             return result
         tags.load_aliases(conn)  # new stories store canonical tags
     if not ollama.available():
-        log.warning("model server at %s unreachable; pipeline paused", ollama.endpoint())
+        if not _server_unreachable:
+            log.warning("model server at %s unreachable; pipeline paused", ollama.endpoint())
+            _server_unreachable = True
+        else:
+            log.debug("model server at %s still unreachable; pipeline paused", ollama.endpoint())
         return result
+    if _server_unreachable:
+        log.info("model server at %s reachable again; resuming pipeline", ollama.endpoint())
+        _server_unreachable = False
     try:
         _drain(result, tried, emit, should_stop)
     finally:

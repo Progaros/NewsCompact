@@ -73,12 +73,12 @@ def delete_embeddings(conn: sqlite3.Connection, article_ids: list[int]) -> None:
 
 
 def normalize(v: Vector) -> Vector:
-    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    n = math.sqrt(math.sumprod(v, v)) or 1.0
     return [x / n for x in v]
 
 
 def dot(a: Vector, b: Vector) -> float:
-    return sum(map(operator.mul, a, b))
+    return math.sumprod(a, b)
 
 
 def knn(conn: sqlite3.Connection, vec: Vector, k: int) -> list[tuple[int, float]]:
@@ -168,9 +168,16 @@ RELATED_CLASSES = ("SAME_TOPIC_DISTINCT_EVENT", "CONTINUING_DEVELOPMENT")
 def link_stories(conn: sqlite3.Connection, x: int, y: int, relation: str, source: str,
                  checked_at: str | None = None) -> None:
     """Remember a verifier verdict between two stories (StoryLink; latest verdict wins, except over a split)."""
+    def resolve(sid: int) -> int:
+        row = conn.execute("SELECT story_id FROM StoryAlias WHERE old_id = ?", (sid,)).fetchone()
+        return row[0] if row is not None else sid
+
+    x, y = resolve(x), resolve(y)
     if x == y:
         return
     a, b = sorted((x, y))
+    if conn.execute("SELECT count(*) FROM Story WHERE id IN (?, ?)", (a, b)).fetchone()[0] < 2:
+        return
     conn.execute(
         "INSERT INTO StoryLink (a, b, relation, source, checked_at) VALUES (?, ?, ?, ?, COALESCE(?, datetime('now'))) "
         "ON CONFLICT (a, b) DO UPDATE SET relation = excluded.relation, source = excluded.source, "

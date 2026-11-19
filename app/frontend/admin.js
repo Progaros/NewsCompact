@@ -3,6 +3,9 @@
 const listEl = document.getElementById("user-list");
 const statusEl = document.getElementById("user-status");
 const addForm = document.getElementById("add-user");
+const aliasSection = document.getElementById("tag-alias-section");
+const aliasCountEl = document.getElementById("tag-alias-count");
+const aliasListEl = document.getElementById("tag-alias-list");
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -83,9 +86,41 @@ function render(users) {
   });
 }
 
+async function loadAliases() {
+  const d = await api("GET", "/api/admin/tag-aliases?status=pending&limit=30");
+  if (!d) return;
+  const pending = d.counts?.pending || 0;
+  aliasCountEl.textContent = `(${pending} pending · ${d.counts?.approved || 0} approved)`;
+  aliasSection.hidden = pending === 0;
+  if (!pending) return;
+  aliasListEl.innerHTML = `<table class="feeds">
+    <thead><tr><th>Alias</th><th>Canonical</th><th>Relation</th><th>Sim / Conf</th><th></th></tr></thead>
+    <tbody>${d.aliases.map((a) => `
+      <tr data-alias="${esc(a.alias)}" data-canonical="${esc(a.canonical)}">
+        <td>${esc(a.alias)}</td>
+        <td><b>${esc(a.canonical)}</b></td>
+        <td class="muted">${esc(a.relation || a.method || "")}</td>
+        <td class="muted nowrap">${a.similarity != null ? Number(a.similarity).toFixed(2) : "—"} / ${a.confidence != null ? Number(a.confidence).toFixed(2) : "—"}</td>
+        <td class="nowrap">
+          <button type="button" class="btn approve">Approve</button>
+          <button type="button" class="btn reject">Reject</button>
+        </td>
+      </tr>`).join("")}</tbody></table>`;
+  aliasListEl.querySelectorAll("tr[data-alias]").forEach((row) => {
+    const payload = (status) => ({ alias: row.dataset.alias, canonical: row.dataset.canonical, status });
+    row.querySelector(".approve").onclick = async () => {
+      if (await api("POST", "/api/admin/tag-aliases/review", payload("approved"))) loadAliases();
+    };
+    row.querySelector(".reject").onclick = async () => {
+      if (await api("POST", "/api/admin/tag-aliases/review", payload("rejected"))) loadAliases();
+    };
+  });
+}
+
 async function load() {
   const d = await api("GET", "/api/admin/users");
   if (d) render(d.users);
+  loadAliases();
 }
 
 addForm.addEventListener("submit", async (e) => {
