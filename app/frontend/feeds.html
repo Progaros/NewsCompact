@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Feeds — AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="wide">
+  <news-topbar active="/feeds" status-id="feed-status"><button id="reload" class="btn" type="button">Reload</button></news-topbar>
+
+  <main>
+    <section class="heads-up">
+      <div class="heads-up-label">Add feed</div>
+      <form id="add-feed" class="add-feed">
+        <input name="xml_url" type="url" placeholder="https://example.com/rss.xml" required />
+        <input name="title" placeholder="Title (auto-fetched from URL if left empty)" />
+        <input name="category" list="catlist" placeholder="Category (pick existing or type new)" />
+        <button class="btn" type="submit">Add</button>
+      </form>
+      <datalist id="catlist"></datalist>
+      <p class="hint">
+        Disabling a feed stops fetching it entirely (no RSS rows, no AI processing), so its
+        24h / 7d numbers stop growing. Category totals only count enabled feeds. Re-enabling
+        fetches it again from the next ingest run on.
+      </p>
+      <p class="hint">
+        Trust (0–1) is how much a source counts as independent confirmation and how much its
+        articles weigh in story quality, for everyone. A feed without its own value uses its
+        category's (shown greyed out; clear the field to go back to it). Users can still override
+        both in ⚙ Preferences.
+      </p>
+    </section>
+
+    <div class="toolbar">
+      <input id="feed-search" type="search" placeholder="Filter feeds…" />
+      <label class="check"><input id="only-errors" type="checkbox" /> only failing</label>
+      <button id="collapse-all" class="btn" type="button">Collapse all</button>
+      <button id="expand-all" class="btn" type="button">Expand all</button>
+    </div>
+    <section class="table-wrap" id="feed-list" aria-label="Feeds">
+      <div class="empty">Loading feeds…</div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/feeds.js"></script>
+</body>
+</html>

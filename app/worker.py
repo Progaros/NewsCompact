@@ -1,0 +1,256 @@
+"""Background worker: an ingest loop and a pipeline loop on separate threads.
+
+Ingest runs every WORKER_INTERVAL_SECONDS (start-to-start). The pipeline
+thread sleeps until ingest stores new articles for an enabled feed (or a
+feed is enabled / a refresh is requested) and then drains the queue, so new
+articles no longer wait for the remaining feeds or the next cycle.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+from . import bus, config, db, ingest, media_analysis, merge, ollama, pipeline, podcast, retention, scoring, split, tag_merge
+
+log = logging.getLogger("news.worker")
+
+_ingest_lock = threading.Lock()
+_pipeline_lock = threading.Lock()
+_wake = threading.Event()
+_stop = threading.Event()
+_threads: list[threading.Thread] = []
+
+# Live status for /api/health and /list.
+status: dict[str, Any] = {
+    "ingest_running": False,
+    "ingest_last_started": None,
+    "ingest_last_seconds": None,
+    "ingest_last_new": None,
+    "pipeline_running": False,
+    "pipeline_last_finished": None,
+    "pipeline_last_processed": None,
+    "pipeline_last_seconds": None,
+    "merge_last_finished": None,
+    "merge_last_checked": None,
+    "merge_last_merged": None,
+    "merge_last_seconds": None,
+    "split_last_finished": None,
+    "split_last_checked": None,
+    "split_last_split": None,
+    "split_last_seconds": None,
+    "retention_last_run": None,
+    "retention_last_deleted_articles": None,
+    "retention_last_deleted_stories": None,
+    "backup_last_run": None,
+    "tag_merge_last_run": None,
+    "tag_merge_last_result": None,
+}
+_retention_due = 0.0  # monotonic time of the next retention run
+_backup_due = 0.0
+_tag_merge_due = 0.0
+
+
+def wake_pipeline() -> None:
+    _wake.set()
+
+
+def run_ingest() -> int:
+    with _ingest_lock:
+        status.update(ingest_running=True, ingest_last_started=db.utcnow())
+        t0 = time.perf_counter()
+        try:
+            new = ingest.ingest_all(on_new=wake_pipeline, should_stop=_stop.is_set)
+        except Exception:  # noqa: BLE001
+            log.exception("ingest failed")
+            new = 0
+        finally:
+            status["ingest_running"] = False
+        secs = time.perf_counter() - t0
+        status.update(ingest_last_seconds=round(secs, 1), ingest_last_new=new)
+        log.info("ingest done: %d new articles in %.1fs", new, secs)
+        return new
+
+
+def _run_retention() -> None:
+    global _retention_due
+    if time.monotonic() < _retention_due:
+        return
+    _retention_due = time.monotonic() + config.RETENTION_INTERVAL_HOURS * 3600
+    try:
+        result = retention.run()
+    except Exception:  # noqa: BLE001
+        log.exception("retention failed")
+        return
+    status.update(retention_last_run=db.utcnow(), retention_last_deleted_articles=result["articles"],
+                  retention_last_deleted_stories=result["stories"])
+
+
+def _run_backup() -> None:
+    global _backup_due
+    if config.BACKUP_KEEP_DAYS <= 0 or time.monotonic() < _backup_due:
+        return
+    _backup_due = time.monotonic() + config.BACKUP_INTERVAL_HOURS * 3600
+    try:
+        path = db.backup()
+    except Exception:  # noqa: BLE001
+        log.exception("database backup failed")
+        return
+    if path is not None:
+        status["backup_last_run"] = db.utcnow()
+        log.info("database backup ready: %s", path.name)
+
+
+def run_pipeline() -> dict[str, int]:
+    with _pipeline_lock:
+        _run_retention()
+        _run_backup()
+        status["pipeline_running"] = True
+        t0, cpu0 = time.perf_counter(), time.process_time()
+        try:
+            result = pipeline.process_pending(emit=bus.publish, should_stop=_stop.is_set)
+        except Exception:  # noqa: BLE001
+            log.exception("pipeline run failed")
+            result = {"processed": 0, "failed": 0}
+        secs = time.perf_counter() - t0
+        status.update(pipeline_last_finished=db.utcnow(), pipeline_last_processed=result["processed"],
+                      pipeline_last_seconds=round(secs, 1))
+        merged = _run_merge()
+        splits = _run_split()
+        _run_tag_merge()
+        _run_media_analysis()
+        status["pipeline_running"] = False
+        if result["processed"] or result["failed"]:
+            log.info("pipeline run: %d processed, %d failed in %.1fs (cpu %.1fs)",
+                     result["processed"], result["failed"], secs, time.process_time() - cpu0)
+        if result["processed"] or result["failed"] or merged or splits:
+            scoring.invalidate_ranking_cache()
+            bus.publish({"type": "cycle_done", **result, "merged": merged, "split": splits})
+        return result
+
+
+def _run_merge() -> int:
+    if _stop.is_set() or podcast.is_generating():
+        return 0
+    t0 = time.perf_counter()
+    try:
+        result = merge.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("merge pass failed")
+        return 0
+    status.update(merge_last_finished=db.utcnow(), merge_last_checked=result["checked"],
+                  merge_last_merged=result["merged"], merge_last_seconds=round(time.perf_counter() - t0, 1))
+    return result["merged"]
+
+
+def _run_split() -> int:
+    if _stop.is_set():
+        return 0
+    t0 = time.perf_counter()
+    try:
+        result = split.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("split pass failed")
+        return 0
+    status.update(split_last_finished=db.utcnow(), split_last_checked=result["checked"],
+                  split_last_split=result["split"], split_last_seconds=round(time.perf_counter() - t0, 1))
+    return result["split"]
+
+
+def _run_tag_merge() -> None:
+    """Tag synonym pass (embeddings + LLM verifier), at most once per TAG_MERGE_INTERVAL_HOURS."""
+    global _tag_merge_due
+    if not config.TAG_MERGE_ENABLED or _stop.is_set() or podcast.is_generating() or time.monotonic() < _tag_merge_due:
+        return
+    if not ollama.available():
+        return
+    _tag_merge_due = time.monotonic() + config.TAG_MERGE_INTERVAL_HOURS * 3600
+    try:
+        result = tag_merge.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("tag merge pass failed")
+        return
+    summary = {k: result[k] for k in ("candidates", "pairs", "approved", "pending", "rejected")}
+    status.update(tag_merge_last_run=db.utcnow(), tag_merge_last_result=summary)
+    log.info("tag merge: %s", summary)
+
+
+def _run_media_analysis() -> None:
+    """Budgeted (<10% LLM share) experimental outlet bias sampling during idle pipeline cycles."""
+    if not config.MEDIA_ANALYSIS_ENABLED or _stop.is_set() or podcast.is_generating():
+        return
+    if not ollama.available():
+        return
+    try:
+        res = media_analysis.run(should_stop=_stop.is_set)
+    except Exception:  # noqa: BLE001
+        log.exception("media analysis pass failed")
+        return
+    if res["analyzed"]:
+        log.info("media analysis: %d article(s) sampled (7d LLM share %.1f%%)",
+                 res["analyzed"], 100 * res["budget"]["share"])
+
+
+_refresh_lock = threading.Lock()
+_refreshing = False
+
+
+def refresh() -> dict[str, Any]:
+    """Manual refresh: ingest now, then drain the queue, on a background thread.
+
+    ``started`` is False while an earlier manual refresh is still running.
+    """
+    global _refreshing
+    with _refresh_lock:
+        if _refreshing:
+            return {"started": False}
+        _refreshing = True
+    threading.Thread(target=_run_refresh, name="news-refresh", daemon=True).start()
+    return {"started": True}
+
+
+def _run_refresh() -> None:
+    global _refreshing
+    try:
+        run_ingest()
+        run_pipeline()
+    finally:
+        with _refresh_lock:
+            _refreshing = False
+
+
+def _ingest_loop() -> None:
+    while not _stop.is_set():
+        started = time.monotonic()
+        run_ingest()
+        _stop.wait(max(0.0, config.WORKER_INTERVAL_SECONDS - (time.monotonic() - started)))
+
+
+def _pipeline_loop() -> None:
+    _wake.set()  # drain any backlog left from the previous run
+    while not _stop.is_set():
+        _wake.wait(timeout=config.WORKER_INTERVAL_SECONDS)
+        _wake.clear()
+        if not _stop.is_set():
+            run_pipeline()
+
+
+def start() -> None:
+    if _threads:
+        return
+    _stop.clear()
+    for name, target in (("ingest", _ingest_loop), ("pipeline", _pipeline_loop)):
+        t = threading.Thread(target=target, name=f"news-{name}", daemon=True)
+        t.start()
+        _threads.append(t)
+
+
+def stop(timeout: float = 5.0) -> None:
+    """Signal both loops; the pipeline finishes its current article at most."""
+    _stop.set()
+    _wake.set()
+    deadline = time.monotonic() + timeout
+    for t in _threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    _threads.clear()

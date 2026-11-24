@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Analytics — AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="wide">
+  <news-topbar active="/analytics" status-id="analytics-status"></news-topbar>
+
+  <main>
+    <div class="page-tabs" id="analytics-tabs" role="tablist" aria-label="Analytics sections">
+      <button type="button" class="pref-tab" role="tab" data-tab="outlets" aria-selected="true">Outlets &amp; Bias</button>
+      <button type="button" class="pref-tab" role="tab" data-tab="usage" aria-selected="false">AI Usage</button>
+      <button type="button" class="pref-tab" role="tab" data-tab="articles" aria-selected="false">Pipeline &amp; Articles</button>
+    </div>
+
+    <!-- Tab 1: Outlets & Bias -->
+    <div class="page-pane" data-pane="outlets" role="tabpanel">
+      <section class="stat-block">
+        <div class="stat-block-head">
+          <div class="heads-up-label">Outlet Analysis <span class="exp-badge">Experimental</span></div>
+          <div class="outlet-controls">
+            <span id="budget-pill" class="muted"></span>
+            <label class="stat-days">
+              <span class="muted">window</span>
+              <select id="outlet-days" aria-label="Window">
+                <option value="7">7 days</option>
+                <option value="30" selected>30 days</option>
+                <option value="90">90 days</option>
+              </select>
+            </label>
+            <button id="sample-btn" type="button" class="btn" hidden title="Analyze 5 unanalyzed full-text articles now">Sample 5 articles</button>
+          </div>
+        </div>
+        <p class="hint">Objective quality, speed, and blind-spot stats are computed from all articles (0 LLM cost). Political compass, tone, clickbait, and favored/criticized groups are collected via anonymized background sampling (check token share under <b>AI Usage</b>; disable via <code>NEWS_MEDIA_ANALYSIS_ENABLED=0</code>).</p>
+
+        <div class="compass-wrap">
+          <div id="compass-box" class="compass-box" aria-label="Political compass"></div>
+          <div id="outlet-detail" class="outlet-detail">
+            <div class="empty">Select an outlet on the compass or in the table below to inspect quality stats, favored/criticized groups, blind spots, and analyzed articles.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stat-block">
+        <div class="toolbar">
+          <input id="outlet-search" type="search" placeholder="Filter outlets, feeds, or topics…" maxlength="80" />
+          <select id="outlet-sort" aria-label="Sort outlets">
+            <option value="articles" selected>Most articles</option>
+            <option value="quality">Highest quality</option>
+            <option value="first">Fastest (first-to-report)</option>
+            <option value="analyzed">Most analyzed</option>
+            <option value="clickbait">Highest clickbait</option>
+          </select>
+        </div>
+        <div class="table-wrap">
+          <table class="feeds" id="outlets-table">
+            <thead>
+              <tr>
+                <th>Outlet</th>
+                <th class="num">Articles</th>
+                <th class="num">Full-text</th>
+                <th class="num">Quality</th>
+                <th class="num">First %</th>
+                <th class="num">Samples</th>
+                <th class="num">Clickbait</th>
+                <th>Compass (Econ / Soc)</th>
+                <th>Top favored / criticized</th>
+              </tr>
+            </thead>
+            <tbody id="outlets-body"><tr><td colspan="9" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Tab 2: AI Usage -->
+    <div class="page-pane" data-pane="usage" role="tabpanel" hidden>
+      <section class="stat-cards" id="stat-cards">
+        <div class="stat-card">
+          <div class="stat-label" id="llm-label">LLM tokens (30d)</div>
+          <div class="stat-value" id="llm-total">–</div>
+          <div class="stat-sub" id="llm-sub"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label" id="embed-label">Embedding tokens (30d)</div>
+          <div class="stat-value" id="embed-total">–</div>
+          <div class="stat-sub" id="embed-sub"></div>
+        </div>
+      </section>
+
+      <section class="stat-block">
+        <div class="stat-block-head">
+          <div class="heads-up-label">Daily tokens</div>
+          <label class="stat-days">
+            <span class="muted">window</span>
+            <select id="usage-days" aria-label="Window">
+              <option value="7">7 days</option>
+              <option value="30" selected>30 days</option>
+              <option value="90">90 days</option>
+            </select>
+          </label>
+        </div>
+        <div class="stat-legend">
+          <span class="leg"><i class="leg-swatch leg-llm"></i>LLM (in + out)</span>
+          <span class="leg"><i class="leg-swatch leg-embed"></i>Embedding</span>
+        </div>
+        <div class="stat-chart" id="stat-chart" aria-label="Daily token usage"></div>
+      </section>
+
+      <section class="stat-block">
+        <div class="heads-up-label">By role</div>
+        <div class="table-wrap">
+          <table class="feeds" id="role-table">
+            <thead><tr><th>Role</th><th class="num">Calls</th><th class="num">Input</th><th class="num">Output</th><th class="num">Tokens</th><th class="num">Share</th></tr></thead>
+            <tbody id="role-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="stat-block">
+        <div class="heads-up-label">Models</div>
+        <div class="table-wrap">
+          <table class="feeds" id="model-table">
+            <thead><tr><th>Model</th><th>Roles</th><th class="num">Calls</th><th class="num">Tokens</th></tr></thead>
+            <tbody id="model-body"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Tab 3: Pipeline & Articles -->
+    <div class="page-pane" data-pane="articles" role="tabpanel" hidden>
+      <div class="toolbar">
+        <input id="art-search" type="search" placeholder="Search title or feed…" maxlength="100" />
+        <select id="art-status-filter" aria-label="Status filter">
+          <option value="">all statuses</option>
+          <option value="assigned">assigned</option>
+          <option value="pending">pending</option>
+          <option value="skipped">skipped</option>
+          <option value="dead">dead</option>
+          <option value="duplicate">duplicate</option>
+        </select>
+        <button id="art-sort-toggle" class="btn" type="button">newest first</button>
+      </div>
+      <div class="table-wrap" id="article-list"><div class="empty">Loading articles…</div></div>
+      <div class="more-wrap"><button id="art-load-more" class="btn" type="button" hidden>Load more</button></div>
+    </div>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/analytics.js"></script>
+</body>
+</html>

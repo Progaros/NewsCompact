@@ -1,0 +1,140 @@
+import json
+
+import pytest
+
+from app import db, ollama, scoring, tag_merge, tags
+
+from conftest import topic_vector
+
+CONCEPTS = {"erderwarmung": "warming", "global warming": "warming", "datenschutz": "privacy",
+            "privacy": "privacy", "weather": "weather"}
+VERDICTS = {frozenset({"erderwarmung", "global warming"}): ("SAME_CONCEPT", 0.95, "global warming"),
+            frozenset({"datenschutz", "privacy"}): ("SAME_CONCEPT", 0.6, "privacy")}
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    calls = {"embedded": [], "verified": []}
+
+    def embed_texts(texts):
+        names = [t.split("Query: ", 1)[1] for t in texts]
+        calls["embedded"] += names
+        return [topic_vector(CONCEPTS.get(n, n)) for n in names]
+
+    def structured(schema, messages, **_kw):
+        user = messages[-1]["content"]
+        a = user.split("Tag A: ", 1)[1].split("\n", 1)[0]
+        b = user.split("Tag B: ", 1)[1].split("\n", 1)[0]
+        calls["verified"].append((a, b))
+        relation, confidence, canonical = VERDICTS.get(frozenset({a, b}), ("RELATED", 0.9, a))
+        return {"relation": relation, "confidence": confidence, "canonical": "A" if canonical == a else "B"}
+
+    monkeypatch.setattr(ollama, "embed_texts", embed_texts)
+    monkeypatch.setattr(ollama, "structured", structured)
+    with db.get_conn() as conn:
+        for tag in CONCEPTS:
+            for i in range(3):
+                conn.execute("INSERT INTO Story (headline, tags) VALUES (?, ?)", (f"{tag} story {i}", json.dumps([tag])))
+    yield calls
+    tags.set_aliases({})
+
+
+def test_only_confident_same_concept_pairs_merge(fake):
+    dry = tag_merge.run(apply=False)
+    assert dry["approved"] == 1 and dry["pending"] == 1
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT count(*) FROM TagAlias").fetchone()[0] == 0
+    assert tags.normalize_tag("Erderwärmung") == "erderwarmung"
+
+    result = tag_merge.run()
+    assert {(r["alias"], r["canonical"], r["status"]) for r in result["rows"]} == {
+        ("erderwarmung", "global warming", "approved"), ("datenschutz", "privacy", "pending")}
+    assert tags.normalize_tag("Erderwärmung") == "global warming"
+    assert tags.normalize_tag("Datenschutz") == "datenschutz"  # pending = no effect
+    assert "weather" not in {t for pair in fake["verified"] for t in pair}  # not similar enough
+
+    embedded, verified = len(fake["embedded"]), len(fake["verified"])
+    again = tag_merge.run()
+    assert again["pairs"] == 0 and len(fake["verified"]) == verified  # decided pairs aren't asked again
+    assert len(fake["embedded"]) == embedded  # vectors are cached
+
+
+def test_review_and_manual_aliases(fake):
+    tag_merge.run()
+    scoring.update_profile(tag_weights={"datenschutz": 4, "privacy": -2})
+    with db.get_conn() as conn:
+        with pytest.raises(ValueError):
+            tag_merge.review(conn, "global warming", "approved")  # nothing pending under that alias
+        assert tag_merge.review(conn, "datenschutz", "approved") == 1
+    assert tags.normalize_tag("Datenschutz") == "privacy"
+    assert scoring.get_user_profile()["tag_weights"] == {"privacy": 4.0}  # strongest wins, no sum
+
+    with db.get_conn() as conn:
+        assert tag_merge.add_manual(conn, "Unwetter", "Weather") == ("unwetter", "weather")
+        assert tags.normalize_tag("unwetter") == "weather"
+        tag_merge.review(conn, "unwetter", "rejected")
+        with pytest.raises(ValueError):
+            tag_merge.add_manual(conn, "weather", "Weather")
+    assert tags.normalize_tag("unwetter") == "unwetter"
+
+
+def test_ambiguous_tags_never_merge(fake):
+    tags.set_aliases({"sicherheit": "safety", "fc bayern": "bayern", "wien": "vienna"})
+    assert tags.normalize_tag("Sicherheit") == "sicherheit"
+    assert tags.normalize_tag("FC Bayern") == "fc bayern"
+    assert tags.normalize_tag("Wien") == "vienna"
+    CONCEPTS["bayern"] = CONCEPTS["bayern munich"] = "club"
+    try:
+        with db.get_conn() as conn:
+            for tag in ("bayern", "bayern munich"):
+                for i in range(3):
+                    conn.execute("INSERT INTO Story (headline, tags) VALUES (?, ?)", (f"{tag} {i}", json.dumps([tag])))
+        tag_merge.run()
+    finally:
+        del CONCEPTS["bayern"], CONCEPTS["bayern munich"]
+    assert not any("bayern" in pair for pair in fake["verified"])  # not even asked
+
+
+def test_admin_tag_alias_api_lists_and_reviews(client, fake):
+    tag_merge.run()
+    r = client.get("/api/admin/tag-aliases?status=pending")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["counts"]["pending"] >= 1
+    pair = body["aliases"][0]
+    res = client.post("/api/admin/tag-aliases/review", json={
+        "alias": pair["alias"], "canonical": pair["canonical"], "status": "approved",
+    })
+    assert res.status_code == 200 and res.json()["changed"] == 1
+    after = client.get("/api/admin/tag-aliases?status=pending").json()
+    assert after["counts"]["pending"] == body["counts"]["pending"] - 1
+    assert after["counts"]["approved"] == body["counts"]["approved"] + 1
+
+
+def test_db_patch_runs_once_and_batch_review(client):
+    from app import patches
+
+    with db.get_conn() as conn:
+        # Remove the patch record so we can verify it runs once and updates pending rows.
+        conn.execute("DELETE FROM DbPatch WHERE id = '2026-11-23-tag-alias-review'")
+        conn.execute(
+            "INSERT OR REPLACE INTO TagAlias (alias, canonical, status, similarity, confidence, method) "
+            "VALUES ('flughafen', 'airport', 'pending', 0.89, 1.0, 'llm'), "
+            "('food security', 'food insecurity', 'pending', 0.83, 0.95, 'llm'), "
+            "('alpha', 'beta', 'pending', 0.85, 0.9, 'llm')"
+        )
+        ran1 = patches.apply_pending(conn)
+        assert "2026-11-23-tag-alias-review" in ran1
+        assert conn.execute("SELECT status FROM TagAlias WHERE alias='flughafen'").fetchone()[0] == "approved"
+        assert conn.execute("SELECT status FROM TagAlias WHERE alias='food security'").fetchone()[0] == "rejected"
+        # Second call is a no-op because DbPatch recorded it.
+        assert patches.apply_pending(conn) == []
+
+    r = client.post("/api/admin/tag-aliases/review-batch", json={
+        "items": [{"alias": "alpha", "canonical": "beta", "status": "approved"}],
+    })
+    assert r.status_code == 200 and r.json()["changed"] == 1
+    assert client.get("/settings").status_code == 200
+    assert "settings.js" in client.get("/settings").text
+    redir = client.get("/admin", follow_redirects=False)
+    assert redir.status_code == 303 and redir.headers["location"] == "/settings#users"

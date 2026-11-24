@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Podcasts — AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <news-topbar active="/podcasts" status-id="podcast-status"></news-topbar>
+
+  <main>
+    <section class="stat-block podcast-public-banner" id="public-banner" hidden>
+      <div class="stat-block-head">
+        <div>
+          <div class="heads-up-label">Public News Podcasts</div>
+          <p class="hint podcast-public-hint">General news episodes generated for everyone — free of personal preferences or private data.</p>
+        </div>
+        <button type="button" class="btn" id="public-rss-copy">Copy public RSS</button>
+      </div>
+    </section>
+
+    <section class="stat-block podcast-builder signed-only" id="podcast-builder">
+      <div class="stat-block-head">
+        <div class="heads-up-label">New Podcast Episode</div>
+        <span id="tts-status" class="muted">checking TTS…</span>
+      </div>
+
+      <form id="podcast-form" class="podcast-form">
+        <div class="podcast-row">
+          <div class="podcast-field">
+            <span class="podcast-label">Length</span>
+            <div class="podcast-dur-row">
+              <div class="segmented" id="dur-presets" role="group" aria-label="Podcast duration presets">
+                <button type="button" data-min="3">3 min</button>
+                <button type="button" data-min="5">5 min</button>
+                <button type="button" data-min="15" class="active">15 min</button>
+                <button type="button" data-min="30">30 min</button>
+                <button type="button" data-min="60">1 h</button>
+                <button type="button" data-min="120">2 h</button>
+              </div>
+              <label class="podcast-custom-dur" title="Custom length in minutes (1–180)">
+                <input id="pod-minutes" type="number" min="1" max="180" step="1" value="15" aria-label="Custom length in minutes" />
+                <span class="muted">min</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="podcast-row">
+          <label class="podcast-field">
+            <span class="podcast-label">Language</span>
+            <select id="pod-lang" aria-label="Language">
+              <option value="auto" selected>Auto (profile)</option>
+              <option value="de">Deutsch</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label class="podcast-field">
+            <span class="podcast-label">Style</span>
+            <select id="pod-style" aria-label="Style">
+              <option value="informative" selected>Informative</option>
+              <option value="entertaining">Entertaining</option>
+              <option value="analytical">Analytical</option>
+              <option value="briefing">Executive briefing</option>
+            </select>
+          </label>
+          <label class="podcast-field">
+            <span class="podcast-label">Format</span>
+            <select id="pod-format" aria-label="Format">
+              <option value="solo" selected>Solo host</option>
+              <option value="dialogue">Two hosts (dialogue)</option>
+            </select>
+          </label>
+          <label class="podcast-field">
+            <span class="podcast-label">Feed</span>
+            <select id="pod-view" aria-label="Feed">
+              <option value="personal" selected>For you</option>
+              <option value="default">For everyone (public)</option>
+            </select>
+          </label>
+          <label class="podcast-field">
+            <span class="podcast-label">Top stories</span>
+            <input id="pod-stories" type="number" min="3" max="50" step="1" value="16" aria-label="Top stories" />
+          </label>
+        </div>
+
+        <div class="podcast-actions">
+          <label class="check">
+            <input id="pod-fact-check" type="checkbox" checked />
+            Fact-check script
+          </label>
+          <label class="check" id="notify-wrap" hidden>
+            <input id="pod-notify" type="checkbox" checked />
+            Notify via ntfy when ready
+          </label>
+          <label class="check">
+            <input id="pod-script-only" type="checkbox" />
+            Script only (no audio)
+          </label>
+          <span class="spacer"></span>
+          <button id="pod-generate" type="submit" class="btn primary">Generate podcast</button>
+        </div>
+        <p id="tts-hint" class="hint podcast-hint" hidden></p>
+      </form>
+
+      <div class="podcast-rss-bar" id="rss-bar" hidden>
+        <span class="muted">Subscribe in your podcast app:</span>
+        <button type="button" class="link" id="rss-copy">Copy private RSS</button>
+        <button type="button" class="link" id="rss-rotate" title="Invalidate old link and create a new private URL">Rotate private link</button>
+        <span class="muted">·</span>
+        <button type="button" class="link" id="rss-public-copy" title="Public RSS with only 'For everyone' episodes">Copy public RSS</button>
+      </div>
+    </section>
+
+    <section class="podcast-list" id="podcast-list" aria-label="Podcast episodes" aria-busy="true">
+      <div class="skel-card" aria-hidden="true"><div class="skel-line skel-title"></div><div class="skel-line skel-kicker"></div><div class="skel-line skel-player"></div></div>
+      <div class="skel-card" aria-hidden="true"><div class="skel-line skel-title"></div><div class="skel-line skel-kicker"></div><div class="skel-line skel-player"></div></div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/podcasts.js"></script>
+</body>
+</html>

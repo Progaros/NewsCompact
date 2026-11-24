@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <news-topbar active="/" status-id="status"></news-topbar>
+
+  <main>
+    <section class="heads-up" aria-label="Quick heads up">
+      <div class="heads-up-head">
+        <div class="heads-up-label">Quick Heads Up <span id="heads-up-state" class="heads-up-state"></span></div>
+        <div class="heads-up-actions">
+          <button id="refresh-btn" class="refresh-btn" type="button" hidden title="Reload stories">↻ Refresh</button>
+          <button id="regen-brief" class="refresh-btn signed-only" type="button" title="Generate a fresh news brief now">↻ Regenerate</button>
+          <button id="share-brief" class="refresh-btn signed-only" type="button" title="Copy a link to this brief (personal briefs get a long private link)">🔗</button>
+        </div>
+      </div>
+      <p id="heads-up-text">Loading brief…</p>
+    </section>
+
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search stories and article titles…" maxlength="100" />
+      <div class="segmented" id="view-toggle" role="group" aria-label="Ranking">
+        <button id="view-personal" type="button" title="Ranked with your interests, regions, location and source trust">For you</button>
+        <button id="view-default" type="button" title="The default ranking everyone sees">Everyone</button>
+      </div>
+      <div class="segmented" role="group" aria-label="Story scope">
+        <button id="scope-active" class="active" type="button">Active</button>
+        <button id="scope-archive" type="button">Archive</button>
+      </div>
+      <button id="show-read" class="toggle" type="button" aria-pressed="false" title="Also show stories you marked as read">
+        <span class="toggle-track" aria-hidden="true"></span>Show read
+      </button>
+    </div>
+    <div id="filter-chips" class="chips" hidden></div>
+    <button id="new-btn" class="new-btn" type="button" hidden title="Reload the feed"></button>
+
+    <section class="feed" id="feed" aria-label="Stories" aria-busy="true">
+      <div class="skel-card" aria-hidden="true"><div class="skel-line skel-kicker"></div><div class="skel-line skel-title"></div><div class="skel-line skel-body"></div><div class="skel-line skel-body short"></div></div>
+      <div class="skel-card" aria-hidden="true"><div class="skel-line skel-kicker"></div><div class="skel-line skel-title"></div><div class="skel-line skel-body"></div><div class="skel-line skel-body short"></div></div>
+      <div class="skel-card" aria-hidden="true"><div class="skel-line skel-kicker"></div><div class="skel-line skel-title"></div><div class="skel-line skel-body"></div><div class="skel-line skel-body short"></div></div>
+      <div class="skel-card" aria-hidden="true"><div class="skel-line skel-kicker"></div><div class="skel-line skel-title"></div><div class="skel-line skel-body"></div><div class="skel-line skel-body short"></div></div>
+    </section>
+    <div class="feed-controls">
+      <button id="load-more" class="btn" hidden>Load more</button>
+    </div>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

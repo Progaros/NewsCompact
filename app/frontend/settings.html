@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Settings — AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <news-topbar active="/settings" status-id="settings-status"></news-topbar>
+
+  <main>
+    <div class="page-tabs" id="settings-tabs" role="tablist" aria-label="Settings sections">
+      <button type="button" class="pref-tab" role="tab" data-tab="profile" aria-selected="true">Profile</button>
+      <button type="button" class="pref-tab" role="tab" data-tab="tags" aria-selected="false">Tags <span class="tab-count" id="tags-count"></span></button>
+      <button type="button" class="pref-tab" role="tab" data-tab="sources" aria-selected="false">Sources</button>
+      <button type="button" class="pref-tab" role="tab" data-tab="account" aria-selected="false">Account</button>
+      <button type="button" class="pref-tab admin-tab" role="tab" data-tab="schedules" aria-selected="false" hidden>Schedules</button>
+      <button type="button" class="pref-tab admin-tab" role="tab" data-tab="users" aria-selected="false" hidden>Users</button>
+      <button type="button" class="pref-tab admin-tab" role="tab" data-tab="synonyms" aria-selected="false" hidden>Tag Synonyms <span class="tab-count" id="syn-count"></span></button>
+    </div>
+
+    <form id="prefs-form">
+      <div class="page-pane stat-block" data-pane="profile" role="tabpanel">
+        <div class="muted">Loading profile…</div>
+      </div>
+
+      <div class="page-pane stat-block" data-pane="tags" role="tabpanel" hidden>
+        <div class="user-section">
+          <div class="user-section-label">Tag list <button type="button" class="link" id="reset-weights">reset all</button></div>
+          <p class="hint">Your own weights (−10 … 10): 1 = a bit, 3 = clearly, 10 = must see; −10 mutes a tag in “For you”. Set them here or by clicking a tag on a story.</p>
+          <div id="weights"></div>
+        </div>
+        <div class="user-section">
+          <div class="user-section-label">Learned interests</div>
+          <p class="hint">From your 👍/👎 and story chats; they fade over weeks and count less for common tags. Click one to put it on your tag list.</p>
+          <div id="learned"></div>
+        </div>
+      </div>
+
+      <div class="page-pane stat-block" data-pane="sources" role="tabpanel" hidden>
+        <div class="user-section">
+          <div class="user-section-label">Source trust <button type="button" class="link" id="reset-trust">reset all</button></div>
+          <p class="hint">How much a source counts as independent confirmation (credibility) and how much its articles weigh in story quality. 0 = ignore, 1 = full. Sliders start at the values the admins set for everyone; yours are highlighted and ↺ goes back. Expand a category to set single sources; ⊘ hides a source from your “For you” feed.</p>
+          <div id="trust"></div>
+        </div>
+      </div>
+
+      <div class="page-pane stat-block" data-pane="schedules" role="tabpanel" hidden>
+        <div class="user-section">
+          <div class="user-section-label">Scheduled ntfy reports &amp; daily podcasts <button type="button" class="link" id="add-report">+ add</button></div>
+          <p class="hint" id="ntfy-hint"></p>
+          <div id="reports"></div>
+        </div>
+      </div>
+
+      <div class="settings-save-bar" id="save-bar" hidden>
+        <span class="muted">Changes in Profile, Tags, Sources, and Schedules are saved together.</span>
+        <button type="submit" class="btn primary" id="save-btn">Save settings</button>
+      </div>
+    </form>
+
+    <div class="page-pane stat-block" data-pane="account" role="tabpanel" hidden>
+      <div class="user-section">
+        <div class="user-section-label">Password</div>
+        <p class="hint">Takes effect immediately — not tied to the Save button.</p>
+        <div class="pw-row">
+          <input type="password" id="pw-current" placeholder="Current password" autocomplete="current-password" />
+          <input type="password" id="pw-new" placeholder="New password (min. 8)" minlength="8" autocomplete="new-password" />
+          <button type="button" class="btn" id="pw-change">Change</button>
+        </div>
+      </div>
+      <div class="user-section">
+        <div class="user-section-label">Shared links</div>
+        <div id="share-list" class="share-list muted">Loading…</div>
+      </div>
+      <div class="user-section">
+        <div class="user-section-label">Session</div>
+        <button type="button" class="btn" id="signout-btn">Sign out</button>
+      </div>
+    </div>
+
+    <div class="page-pane" data-pane="users" role="tabpanel" hidden>
+      <section class="stat-block">
+        <div class="heads-up-label">Add user</div>
+        <form id="add-user" class="add-feed">
+          <input name="name" placeholder="User name (letters, digits, . _ -)" required maxlength="40"
+                 pattern="[A-Za-z0-9][A-Za-z0-9._\-]{1,39}" autocomplete="off" />
+          <input name="password" type="password" placeholder="Initial password (min. 8)" required minlength="8"
+                 autocomplete="new-password" />
+          <label class="check"><input name="is_admin" type="checkbox" /> admin</label>
+          <button class="btn" type="submit">Create</button>
+        </form>
+        <p class="hint">
+          Users share stories, summaries and classifications; preferences, votes, read state, chats,
+          podcasts and personal heads-ups are their own.
+        </p>
+      </section>
+      <section class="stat-block">
+        <div class="table-wrap" id="user-list"><div class="empty">Loading users…</div></div>
+      </section>
+    </div>
+
+    <div class="page-pane stat-block" data-pane="synonyms" role="tabpanel" hidden>
+      <div class="stat-block-head">
+        <div class="heads-up-label">Tag synonym review <span id="tag-alias-count" class="muted"></span></div>
+        <div class="outlet-controls">
+          <button type="button" class="btn" id="approve-high-btn" hidden>Approve all ≥ 0.88</button>
+          <button type="button" class="btn" id="approve-all-btn" hidden>Approve all shown</button>
+        </div>
+      </div>
+      <p class="hint">Candidate tag synonyms proposed by embedding similarity + LLM verification. Approved aliases merge tags at read time without rewriting stored stories.</p>
+      <div class="table-wrap" id="tag-alias-list"><div class="muted">Loading…</div></div>
+    </div>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/settings.js"></script>
+</body>
+</html>

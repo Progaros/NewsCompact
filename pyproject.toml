@@ -1,0 +1,28 @@
+[project]
+name = "news-aggregator-ai"
+version = "0.1.0"
+description = "Local-first RSS aggregator that clusters, summarizes and ranks news stories with a local LLM (llama.cpp or Ollama)"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "fastapi>=0.143.0",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "newspaper3k>=0.2.8",
+    "pydantic>=2.14.0",
+    "sqlite-vec>=0.1.9",
+    "trafilatura>=2.3.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-javascript>=0.25.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

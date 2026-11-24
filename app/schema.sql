@@ -1,0 +1,409 @@
+-- Schema for the AI News Aggregator (applied idempotently by app/db.py).
+-- Timestamps are naive UTC strings 'YYYY-MM-DD HH:MM:SS'.
+
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS Feed (
+    id              INTEGER PRIMARY KEY,
+    title           TEXT    NOT NULL,
+    xml_url         TEXT    NOT NULL UNIQUE,
+    site_url        TEXT,
+    category        TEXT,
+    last_fetched_at TEXT,
+    etag            TEXT,
+    last_modified   TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,   -- 0 = fetch RSS rows only, no AI
+    last_error      TEXT,                         -- NULL after a successful fetch
+    fetch_failures  INTEGER NOT NULL DEFAULT 0,   -- consecutive failed fetches (backoff)
+    next_fetch_at   TEXT,                         -- skip the feed until then (NULL = every run)
+    trust           REAL                          -- 0..1 for everyone; NULL = its category's (FeedCategory)
+);
+
+-- Default source trust per feed category (Feeds page); categories without a row count 1.0.
+-- Users can override category and feed trust in UserProfile.source_weights / feed_weights.
+CREATE TABLE IF NOT EXISTS FeedCategory (
+    name  TEXT PRIMARY KEY,   -- Feed.category ('' = uncategorized)
+    trust REAL NOT NULL
+);
+
+INSERT OR IGNORE INTO FeedCategory (name, trust) VALUES
+    ('News DACH', 0.9), ('News World', 0.9), ('Business & Finance', 0.85), ('Institutions', 1.0),
+    ('Tech', 0.8), ('Security & Privacy', 0.9), ('Science & Health', 0.85), ('Culture & Society', 0.7),
+    ('Gaming', 0.7), ('Munich & Bavaria', 0.8), ('Journals', 0.9), ('Wikipedia', 0.8),
+    ('Hacker News', 0.5), ('Reddit', 0.2), ('Reviews', 0.5);
+
+CREATE TABLE IF NOT EXISTS Article (
+    id                INTEGER PRIMARY KEY,
+    feed_id           INTEGER NOT NULL REFERENCES Feed(id) ON DELETE CASCADE,
+    story_id          INTEGER REFERENCES Story(id) ON DELETE SET NULL,  -- NULL = pending
+    title             TEXT,
+    url               TEXT UNIQUE,
+    author            TEXT,
+    content_raw       TEXT,
+    content_class     TEXT,      -- ok | thin | broken | empty (app/content_quality.py)
+    hero_image_url    TEXT,
+    published_date    TEXT,
+    created_at        TEXT DEFAULT (datetime('now')),   -- first seen (ingest)
+    quality           REAL,
+    pipeline_failures INTEGER,
+    pipeline_timeouts INTEGER,   -- consecutive model timeouts (retried with backoff)
+    retry_after       TEXT,      -- not picked up by the pipeline before this time
+    processed_at      TEXT,      -- pipeline finished (story written)
+    t_embed_s         REAL,      -- per-stage wall times of the successful run
+    t_cluster_s       REAL,
+    t_harness_s       REAL,
+    t_story_s         REAL,
+    t_wall_s          REAL,
+    t_merge_s         REAL,      -- time of the recall merge that moved it (if any)
+    duplicate_of      INTEGER,   -- cross-feed copy of this article (skips the AI pipeline)
+    url_key           TEXT,      -- canonical URL (dedup.url_key)
+    title_key         TEXT       -- normalized title (dedup.title_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_article_story       ON Article(story_id);
+CREATE INDEX IF NOT EXISTS idx_article_story_stats ON Article(story_id, duplicate_of, created_at DESC, feed_id, quality, content_class);
+CREATE INDEX IF NOT EXISTS idx_article_feed        ON Article(feed_id);
+CREATE INDEX IF NOT EXISTS idx_article_created   ON Article(created_at);
+CREATE INDEX IF NOT EXISTS idx_article_url_key   ON Article(url_key);
+CREATE INDEX IF NOT EXISTS idx_article_title_key ON Article(title_key);
+CREATE INDEX IF NOT EXISTS idx_article_duplicate ON Article(duplicate_of);
+
+CREATE TABLE IF NOT EXISTS Story (
+    id            INTEGER PRIMARY KEY,
+    headline      TEXT,
+    summary       TEXT,
+    tags          TEXT DEFAULT '[]',
+    metrics       TEXT DEFAULT '{}',   -- urgency_level, impact_scale, status, location, language
+    quality_score REAL DEFAULT 5.0,    -- trust-weighted median of member article qualities
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now')),
+    merge_checked_at TEXT,             -- last recall-merge check (re-checked after updates)
+    split_checked_at TEXT,             -- last split check (app/split.py; re-checked after updates)
+    material_at   TEXT,                -- last update significant enough to resurface a read story
+    news_at       TEXT                 -- last update that added facts (ranking recency)
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_updated ON Story(updated_at);
+CREATE INDEX IF NOT EXISTS idx_story_news    ON Story(news_at);
+
+-- Ranking filters on news_at alone: any story that has a headline must have one.
+CREATE TRIGGER IF NOT EXISTS story_news_at_insert AFTER INSERT ON Story
+WHEN NEW.news_at IS NULL AND NEW.headline IS NOT NULL BEGIN
+    UPDATE Story SET news_at = COALESCE(NEW.updated_at, datetime('now')) WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS story_news_at_update AFTER UPDATE OF headline ON Story
+WHEN NEW.news_at IS NULL AND NEW.headline IS NOT NULL BEGIN
+    UPDATE Story SET news_at = COALESCE(NEW.updated_at, datetime('now')) WHERE id = NEW.id;
+END;
+
+-- Ids of merged-away stories -> the story that absorbed them, so /s/<id> links survive merges.
+-- New stories never reuse an aliased id (clustering.decide_story).
+CREATE TABLE IF NOT EXISTS StoryAlias (
+    old_id   INTEGER PRIMARY KEY,
+    story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_storyalias_story ON StoryAlias(story_id);
+
+-- Model usage: one row per (model, role, day). Every LLM/embedding call records its
+-- tokens here (app/ollama.py); daily totals are pre-aggregated by day so the stats
+-- page (app/stats.py) stays cheap at any history depth.
+CREATE TABLE IF NOT EXISTS ModelTokenStats (
+    model      TEXT    NOT NULL,
+    role       TEXT    NOT NULL,   -- harness | verify | story | chat | brief | podcast | analysis | embedding
+    day        TEXT    NOT NULL,   -- 'YYYY-MM-DD' UTC
+    calls      INTEGER NOT NULL DEFAULT 0,
+    in_tokens  INTEGER NOT NULL DEFAULT 0,
+    out_tokens INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (model, role, day)
+);
+CREATE INDEX IF NOT EXISTS idx_modelstats_day ON ModelTokenStats(day, role);
+
+-- Experimental per-article media analysis sample (app/media_analysis.py).
+-- Cascades on Article deletion so retention keeps it bounded automatically.
+CREATE TABLE IF NOT EXISTS ArticleBias (
+    article_id    INTEGER PRIMARY KEY REFERENCES Article(id) ON DELETE CASCADE,
+    outlet        TEXT    NOT NULL,
+    political     INTEGER NOT NULL DEFAULT 0,          -- 1 if article has political/societal framing
+    economic_axis REAL,                                -- -1.0 (left/state) .. +1.0 (market-liberal)
+    social_axis   REAL,                                -- -1.0 (progressive/libertarian) .. +1.0 (conservative/authoritarian)
+    tone          TEXT    NOT NULL DEFAULT 'factual',  -- factual | emotional | alarmist | opinionated
+    clickbait     INTEGER NOT NULL DEFAULT 0,          -- 0..10 headline vs body exaggeration
+    favored       TEXT    NOT NULL DEFAULT '[]',       -- JSON list of favored people/groups/institutions
+    criticized    TEXT    NOT NULL DEFAULT '[]',       -- JSON list of criticized people/groups/institutions
+    analyzed_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_articlebias_outlet ON ArticleBias(outlet, analyzed_at DESC);
+
+-- Generated audio podcasts per user (app/podcast.py); audio files live under NEWS_PODCAST_DIR.
+CREATE TABLE IF NOT EXISTS PodcastEpisode (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    title           TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'queued', -- queued | scripting | synthesizing | ready | failed | cancelled
+    progress        TEXT    DEFAULT '',
+    error           TEXT,
+    duration_target INTEGER NOT NULL DEFAULT 15,       -- requested minutes (1..180)
+    duration_sec    REAL,                              -- actual audio duration in seconds
+    language        TEXT    NOT NULL DEFAULT 'de',
+    view            TEXT    NOT NULL DEFAULT 'personal', -- personal | default
+    style           TEXT    NOT NULL DEFAULT 'informative', -- informative | entertaining | analytical | briefing
+    format          TEXT    NOT NULL DEFAULT 'solo',   -- solo | dialogue
+    story_count     INTEGER NOT NULL DEFAULT 0,
+    voice           TEXT,
+    audio_path      TEXT,                              -- filename relative to NEWS_PODCAST_DIR
+    audio_mime      TEXT,                              -- audio/mpeg | audio/ogg | audio/wav
+    file_size       INTEGER,
+    script          TEXT,                              -- full plain-text transcript
+    chapters        TEXT    DEFAULT '[]',              -- JSON [{title, start_sec, end_sec, story_ids, stories}]
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    completed_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_podcast_user ON PodcastEpisode(user_id, created_at DESC);
+
+-- Persisted "Quick Heads Up" briefs per view key ("default" or "user:<id>"), so the
+-- morning brief survives server restarts instead of regenerating on every deploy.
+CREATE TABLE IF NOT EXISTS HeadsUpBrief (
+    key          TEXT PRIMARY KEY,
+    text         TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One-time data patches already applied to this database (app/patches.py).
+CREATE TABLE IF NOT EXISTS DbPatch (
+    id         TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+    summary    TEXT NOT NULL DEFAULT ''
+);
+
+-- Private RSS podcast feed token per user (/api/podcasts/feed/<token>.xml).
+CREATE TABLE IF NOT EXISTS PodcastFeed (
+    user_id    INTEGER PRIMARY KEY REFERENCES AppUser(id) ON DELETE CASCADE,
+    token      TEXT    NOT NULL UNIQUE,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Accounts. Stories, summaries and classifications are shared; profile, votes, read
+-- state, chats and personal briefs are per user. User 1 (admin) owns the single-user era
+-- data and logs in with NEWS_AUTH_PASSWORD until it sets a password of its own.
+CREATE TABLE IF NOT EXISTS AppUser (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT,                       -- scrypt (app/auth.py); NULL = NEWS_AUTH_PASSWORD (user 1 only)
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT    DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO AppUser (id, name, is_admin) VALUES (1, 'admin', 1);
+
+-- Login sessions (app/auth.py). Only the SHA-256 of the cookie token is stored, so a copy
+-- of the database can't be replayed as a login. env_stamp ties sessions opened with
+-- NEWS_AUTH_PASSWORD (owner without own password) to it: changing that password ends them.
+CREATE TABLE IF NOT EXISTS AuthSession (
+    token_hash TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    expires_at REAL    NOT NULL,   -- epoch seconds
+    env_stamp  TEXT,
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_authsession_user ON AuthSession(user_id);
+
+-- One row per user (id = AppUser.id), created on first use.
+-- tag_weights = the user's explicit tag list (-10..10); 👍/👎 and chats only feed the
+-- inferred weights derived from FeedbackLog / ChatSession at ranking time.
+CREATE TABLE IF NOT EXISTS UserProfile (
+    id             INTEGER PRIMARY KEY,
+    tag_weights    TEXT DEFAULT '{}',
+    source_weights TEXT DEFAULT '{}',
+    feed_weights   TEXT DEFAULT '{}',   -- per-feed trust overrides {feed_id: 0..1}
+    preferences    TEXT DEFAULT '{}'
+);
+
+INSERT OR IGNORE INTO UserProfile (id, tag_weights, source_weights, preferences)
+VALUES (1, '{}', '{}', '{"min_quality": 0.0, "summary_length": "medium"}');
+
+-- Raw votes, kept separate from UserProfile so weights can be re-derived later.
+-- Headline/tags are snapshotted: votes outlive the story (retention).
+CREATE TABLE IF NOT EXISTS FeedbackLog (
+    id         INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL DEFAULT 1,
+    story_id   INTEGER,
+    headline   TEXT,
+    tags       TEXT,
+    kind       TEXT    NOT NULL,   -- up | down
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_story ON FeedbackLog(story_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_user  ON FeedbackLog(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_user_story ON FeedbackLog(user_id, story_id) WHERE story_id IS NOT NULL;
+
+-- Stories marked read, per user. A story is unread again once
+-- COALESCE(Story.material_at, Story.created_at) > read_at.
+CREATE TABLE IF NOT EXISTS StoryRead (
+    user_id  INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE,
+    story_id INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    read_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, story_id)
+);
+
+-- When a user last changed a story's read mark or vote (app/db.py claim_mark). Clicks made
+-- offline are replayed later with their age; one older than this change is dropped, so a
+-- device coming back online can't undo what another device decided after it.
+CREATE TABLE IF NOT EXISTS MarkChange (
+    user_id    INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    story_id   INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,   -- read | vote
+    changed_at TEXT    NOT NULL,
+    PRIMARY KEY (user_id, story_id, kind)
+);
+
+-- Scheduled ntfy reports already sent (app/reports.py): one row per schedule, so a restart
+-- inside the catch-up window or a second server process can't push the same report again.
+CREATE TABLE IF NOT EXISTS ReportSent (
+    key     TEXT PRIMARY KEY,   -- <user>:<kind>@<minute of day>
+    sent_on TEXT NOT NULL       -- local date
+);
+
+-- New facts of each rated story update (Prompt 2 new_facts); a reader's "what changed"
+-- is the facts of the updates after their read_at.
+CREATE TABLE IF NOT EXISTS StoryUpdate (
+    id           INTEGER PRIMARY KEY,
+    story_id     INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    significance INTEGER NOT NULL,
+    facts        TEXT    NOT NULL,   -- JSON list of short sentences
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    event_at     TEXT                -- publication time of the triggering article (ranking); NULL = created_at
+);
+CREATE INDEX IF NOT EXISTS idx_storyupdate_story ON StoryUpdate(story_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_storyupdate_event ON StoryUpdate(COALESCE(event_at, created_at));
+
+-- URLs of deleted articles, so feeds that still list them don't re-ingest them.
+CREATE TABLE IF NOT EXISTS ArticleTombstone (
+    url        TEXT PRIMARY KEY,
+    deleted_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Shared snapshots (/p/<token>): short tokens for default-view content, long unguessable
+-- ones for personal content (personal brief, chat answers).
+CREATE TABLE IF NOT EXISTS ShareLink (
+    token      TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES AppUser(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,   -- brief | chat
+    payload    TEXT    NOT NULL,   -- JSON snapshot
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+
+-- Per-story chat: one session per user and story. Messages form a tree: editing a
+-- message adds a sibling (same parent_id); leaf_id is the end of the branch on screen.
+CREATE TABLE IF NOT EXISTS ChatSession (
+    id         INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL DEFAULT 1 REFERENCES AppUser(id) ON DELETE CASCADE,
+    story_id   INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    leaf_id    INTEGER,
+    seen_id    INTEGER,        -- newest message the user has seen (newer answers are unread)
+    created_at TEXT    DEFAULT (datetime('now')),
+    updated_at TEXT    DEFAULT (datetime('now')),
+    UNIQUE (user_id, story_id)
+);
+
+CREATE TABLE IF NOT EXISTS ChatMessage (
+    id         INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES ChatSession(id) ON DELETE CASCADE,
+    parent_id  INTEGER,        -- previous message in the branch (NULL = first message)
+    role       TEXT    NOT NULL,   -- user | assistant
+    content    TEXT    NOT NULL,
+    steps      TEXT,           -- assistant: JSON list of agent steps (thinking, searches, reads, errors)
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_message_session ON ChatMessage(session_id);
+
+-- Article_Vectors (sqlite-vec vec0, cosine, PK article_id) is created by db.py once the extension is loaded.
+
+-- Verifier verdicts between two stories (a < b). source 'merge': story-vs-story check,
+-- re-verified only after either story changed; source 'article': an article of one story
+-- was judged against the other; source 'split': parts of a split story (never merged
+-- again, never overwritten). SAME_TOPIC_DISTINCT_EVENT / CONTINUING_DEVELOPMENT
+-- links are shown as related stories.
+CREATE TABLE IF NOT EXISTS StoryLink (
+    a          INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    b          INTEGER NOT NULL REFERENCES Story(id) ON DELETE CASCADE,
+    relation   TEXT    NOT NULL,   -- verifier class
+    source     TEXT    NOT NULL,   -- merge | article | split
+    checked_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (a, b),
+    CHECK (a < b)
+);
+CREATE INDEX IF NOT EXISTS idx_storylink_b ON StoryLink(b);
+
+-- Tag synonyms beyond the static table in app/tags.py (app/tag_merge.py): embedding
+-- neighbours judged by the LLM. Only 'approved' rows are applied; 'pending' ones wait for
+-- review (scripts/merge_tags.py), 'rejected' ones keep the pair from being proposed again.
+-- Both columns hold normalized tags.
+CREATE TABLE IF NOT EXISTS TagAlias (
+    alias       TEXT NOT NULL,
+    canonical   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    similarity  REAL,                              -- embedding cosine
+    relation    TEXT,                              -- verifier verdict (SAME_CONCEPT, BROADER, ...)
+    confidence  REAL,
+    method      TEXT NOT NULL,                     -- embedding+llm | manual
+    created_at  TEXT DEFAULT (datetime('now')),
+    reviewed_at TEXT,
+    PRIMARY KEY (alias, canonical)
+);
+
+-- Embedding cache of normalized tags for app/tag_merge.py (float32 blobs).
+CREATE TABLE IF NOT EXISTS TagVector (
+    tag       TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL
+);
+
+-- One FTS5 row per story (app/search.py): its own text plus its article titles, kept in sync by triggers.
+CREATE VIRTUAL TABLE IF NOT EXISTS StorySearch USING fts5(
+    headline, tags, summary, titles,
+    tokenize = 'unicode61 remove_diacritics 2', prefix = '3'
+);
+
+CREATE TRIGGER IF NOT EXISTS story_search_insert AFTER INSERT ON Story BEGIN
+    DELETE FROM StorySearch WHERE rowid = NEW.id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS story_search_update AFTER UPDATE OF headline, summary, tags ON Story BEGIN
+    DELETE FROM StorySearch WHERE rowid = NEW.id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS story_search_delete AFTER DELETE ON Story BEGIN
+    DELETE FROM StorySearch WHERE rowid = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS article_search_insert AFTER INSERT ON Article WHEN NEW.story_id IS NOT NULL BEGIN
+    DELETE FROM StorySearch WHERE rowid = NEW.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.story_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS article_search_update AFTER UPDATE OF story_id, title ON Article
+WHEN OLD.story_id IS NOT NEW.story_id OR OLD.title IS NOT NEW.title BEGIN
+    DELETE FROM StorySearch WHERE rowid = OLD.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = OLD.story_id;
+    DELETE FROM StorySearch WHERE rowid = NEW.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = NEW.story_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS article_search_delete AFTER DELETE ON Article WHEN OLD.story_id IS NOT NULL BEGIN
+    DELETE FROM StorySearch WHERE rowid = OLD.story_id;
+    INSERT INTO StorySearch (rowid, headline, tags, summary, titles)
+    SELECT id, headline, tags, summary, (SELECT group_concat(title, ' ') FROM Article WHERE story_id = Story.id)
+    FROM Story WHERE id = OLD.story_id;
+END;

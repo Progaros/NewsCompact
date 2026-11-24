@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.venv-magpie
+
+# Runtime data & logs
+*.db
+*.db-*
+*.db.*
+*.bak
+*.sqlite*
+*.zip
+news.pid
+news.pid.lock
+*.log
+*.log.*.gz
+*.out
+false_negatives.md
+.env
+
+# Local subscriptions
+*.opml
+
+# Generated podcast audio and local backups
+podcasts/
+backups/

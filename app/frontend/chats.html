@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chats — AI News Aggregator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <news-topbar active="/chats" status-id="chats-status"></news-topbar>
+
+  <main>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search your chats…" maxlength="100" />
+      <button id="mark-all" class="btn" type="button" disabled>Mark all read</button>
+    </div>
+    <section id="chat-list" aria-label="Your chats">
+      <div class="empty">Loading chats…</div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/chat.js"></script>
+  <script src="/static/chats.js"></script>
+</body>
+</html>
